@@ -333,3 +333,23 @@ func TestPiModelNotFoundHint(t *testing.T) {
 	}
 	t.Fatal("no pattern matches pi's model-not-found warning")
 }
+
+func TestCodexUsesCodexJSONL(t *testing.T) {
+	p, err := Load("codex", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Headless.Parser != "codex-jsonl" {
+		t.Fatalf("parser = %q, want codex-jsonl", p.Headless.Parser)
+	}
+	msg := "The 'no-such-model-9' model is not supported when using Codex with a ChatGPT account."
+	for _, d := range p.Check.Diagnose {
+		if regexp.MustCompile(d.Match).MatchString(msg) {
+			if d.Hint != "model not offered for this Codex account" {
+				t.Fatalf("first matching hint = %q", d.Hint)
+			}
+			return
+		}
+	}
+	t.Fatal("no diagnose entry matches the unsupported-model message")
+}

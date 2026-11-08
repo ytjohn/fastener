@@ -133,7 +133,11 @@ func piAssistant(m *piMessage, f *Fields) bool {
 		u.InputTokens = i64(in + m.Usage.Input + m.Usage.CacheRead + m.Usage.CacheWrite)
 		u.OutputTokens = i64(out + m.Usage.Output)
 		if m.Usage.Cost != nil {
-			u.CostUSD += m.Usage.Cost.Total
+			c := m.Usage.Cost.Total
+			if u.CostUSD != nil {
+				c += *u.CostUSD
+			}
+			u.CostUSD = &c
 		}
 		f.Usage = &u
 	}

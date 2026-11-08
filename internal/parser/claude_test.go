@@ -50,7 +50,7 @@ func TestClaudeStreamJSONFixture(t *testing.T) {
 	if got.AgentError == nil || *got.AgentError {
 		t.Errorf("AgentError = %v, want false", got.AgentError)
 	}
-	if got.Usage == nil || got.Usage.InputTokens == nil || *got.Usage.InputTokens != 2+13240+11267 || got.Usage.OutputTokens == nil || *got.Usage.OutputTokens != 4 || got.Usage.CostUSD != 0.1082614 {
+	if got.Usage == nil || got.Usage.InputTokens == nil || *got.Usage.InputTokens != 2+13240+11267 || got.Usage.OutputTokens == nil || *got.Usage.OutputTokens != 4 || got.Usage.CostUSD == nil || *got.Usage.CostUSD != 0.1082614 {
 		t.Errorf("Usage = %+v", got.Usage)
 	}
 	if got.ParseErrors != 0 {
@@ -121,7 +121,7 @@ func TestClaudeCostOnlyNoFakeTokens(t *testing.T) {
 	p, _ := Get("claude-stream-json")
 	var f Fields
 	p.Line([]byte(`{"type":"result","total_cost_usd":0.5}`), &f)
-	if f.Usage == nil || f.Usage.CostUSD != 0.5 || f.Usage.InputTokens != nil || f.Usage.OutputTokens != nil {
+	if f.Usage == nil || f.Usage.CostUSD == nil || *f.Usage.CostUSD != 0.5 || f.Usage.InputTokens != nil || f.Usage.OutputTokens != nil {
 		t.Fatalf("cost-only result: want cost kept, no token counts: %+v", f.Usage)
 	}
 	if b, _ := json.Marshal(f.Usage); string(b) != `{"cost_usd":0.5}` {
@@ -129,7 +129,7 @@ func TestClaudeCostOnlyNoFakeTokens(t *testing.T) {
 	}
 	p.Line([]byte(`{"type":"result","usage":{"input_tokens":3,"output_tokens":4}}`), &f)
 	p.Line([]byte(`{"type":"result","total_cost_usd":0.5}`), &f)
-	if f.Usage == nil || f.Usage.InputTokens == nil || *f.Usage.InputTokens != 3 || f.Usage.OutputTokens == nil || *f.Usage.OutputTokens != 4 || f.Usage.CostUSD != 0.5 {
+	if f.Usage == nil || f.Usage.InputTokens == nil || *f.Usage.InputTokens != 3 || f.Usage.OutputTokens == nil || *f.Usage.OutputTokens != 4 || f.Usage.CostUSD == nil || *f.Usage.CostUSD != 0.5 {
 		t.Fatalf("Usage = %+v", f.Usage)
 	}
 }
@@ -168,5 +168,14 @@ func TestClaudeModelPrefersAssistant(t *testing.T) {
 	p.Line([]byte(`{"type":"result","is_error":true,"result":"API Error","session_id":"s"}`), &f)
 	if f.Model != "" || f.ModelSource != "" {
 		t.Errorf("model kept after an error result: %+v", f)
+	}
+}
+
+func TestClaudeNoCostOmitsCostUSD(t *testing.T) {
+	p, _ := Get("claude-stream-json")
+	var f Fields
+	p.Line([]byte(`{"type":"result","usage":{"input_tokens":3,"output_tokens":4}}`), &f)
+	if b, _ := json.Marshal(f.Usage); string(b) != `{"input_tokens":3,"output_tokens":4}` {
+		t.Fatalf("usage JSON = %s (a missing cost must not claim zero)", b)
 	}
 }

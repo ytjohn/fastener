@@ -219,6 +219,7 @@ func cloneStatus(s session.Status) session.Status {
 		u := *s.Usage
 		u.InputTokens = clonePtr(s.Usage.InputTokens)
 		u.OutputTokens = clonePtr(s.Usage.OutputTokens)
+		u.CostUSD = clonePtr(s.Usage.CostUSD)
 		c.Usage = &u
 	}
 	return c

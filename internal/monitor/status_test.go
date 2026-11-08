@@ -107,7 +107,7 @@ func TestFinishWinsOverConcurrentUpdates(t *testing.T) {
 		t.Fatalf("parser made no progress before finish: %+v", want.Fields)
 	}
 	if st.ConversationID != want.ConversationID || st.FinalMessage != want.FinalMessage ||
-		st.Usage == nil || want.Usage == nil || st.Usage.CostUSD != want.Usage.CostUSD ||
+		st.Usage == nil || want.Usage == nil || !ptrEqual(st.Usage.CostUSD, want.Usage.CostUSD) ||
 		*st.Usage.InputTokens != *want.Usage.InputTokens || *st.AgentError != *want.AgentError {
 		t.Fatalf("fields on disk %+v, want the finish snapshot %+v", st.Fields, want.Fields)
 	}
@@ -132,4 +132,11 @@ func TestStaleSnapshotDropped(t *testing.T) {
 	if st.State != session.StateRunning {
 		t.Fatalf("stale snapshot overwrote a newer one: state=%s", st.State)
 	}
+}
+
+func ptrEqual(a, b *float64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }

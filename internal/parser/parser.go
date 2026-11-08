@@ -27,17 +27,26 @@ type Fields struct {
 type Usage struct {
 	// InputTokens is all input tokens for the run, including cache reads and
 	// writes (differs from Anthropic's usage.input_tokens, which excludes cache).
-	InputTokens  *int64  `json:"input_tokens,omitempty"`
-	OutputTokens *int64  `json:"output_tokens,omitempty"`
-	CostUSD      float64 `json:"cost_usd"`
+	InputTokens  *int64 `json:"input_tokens,omitempty"`
+	OutputTokens *int64 `json:"output_tokens,omitempty"`
+	// CostUSD is nil when the backend reported no cost, so it is omitted
+	// rather than claiming a zero cost.
+	CostUSD *float64 `json:"cost_usd,omitempty"`
 }
 
 // equal reports whether a and b hold the same values (not the same pointers).
 func (a Usage) equal(b Usage) bool {
-	return ptrEq(a.InputTokens, b.InputTokens) && ptrEq(a.OutputTokens, b.OutputTokens) && a.CostUSD == b.CostUSD
+	return ptrEq(a.InputTokens, b.InputTokens) && ptrEq(a.OutputTokens, b.OutputTokens) && fptrEq(a.CostUSD, b.CostUSD)
 }
 
 func ptrEq(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+func fptrEq(a, b *float64) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
@@ -60,6 +69,7 @@ var registry = map[string]Parser{
 	"none":               none{},
 	"claude-stream-json": claudeStreamJSON{},
 	"pi-json":            piJSON{},
+	"codex-jsonl":        codexJSONL{},
 }
 
 // Get returns the named parser.
