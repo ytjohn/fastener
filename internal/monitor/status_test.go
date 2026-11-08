@@ -44,8 +44,12 @@ func TestFinishWinsOverConcurrentUpdates(t *testing.T) {
 				return
 			default:
 			}
-			fmt.Fprintf(pw, `{"type":"result","subtype":"success","session_id":"s-%d","result":"r%d","is_error":%v,"total_cost_usd":%d,"usage":{"input_tokens":%d,"output_tokens":%d}}`+"\n",
-				i, i, i%2 == 0, i, i, i)
+			if i%2 == 0 { // usage only: the parser replaces f.Usage
+				fmt.Fprintf(pw, `{"type":"result","subtype":"success","session_id":"s-%d","result":"r%d","is_error":%v,"usage":{"input_tokens":%d,"output_tokens":%d}}`+"\n",
+					i, i, i%4 == 0, i, i)
+			} else { // cost only: the parser writes f.Usage.CostUSD in place
+				fmt.Fprintf(pw, `{"type":"result","total_cost_usd":%d}`+"\n", i)
+			}
 		}
 	}()
 	for k := 0; k < 4; k++ {

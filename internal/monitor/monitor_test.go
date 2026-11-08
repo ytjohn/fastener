@@ -319,8 +319,10 @@ func TestStopAfterPlainSignalIsStop(t *testing.T) {
 		t.Fatal(err)
 	}
 	sigs := make(chan os.Signal, 4)
+	var first time.Time
 	st := runWith(t, d, sigs, func() {
 		waitFor(t, "running", func() bool { return runningStatus(d) })
+		first = time.Now()
 		sigs <- syscall.SIGTERM
 		time.Sleep(200 * time.Millisecond)
 		session.WriteJSON(d.StopPath(), session.StopRequest{SchemaVersion: 1, Generation: 1,
@@ -329,6 +331,9 @@ func TestStopAfterPlainSignalIsStop(t *testing.T) {
 	})
 	if st.EndedBy != session.EndedByStop || st.Signal != "SIGKILL" {
 		t.Fatalf("ended_by=%s signal=%s", st.EndedBy, st.Signal)
+	}
+	if took := time.Since(first); took > 3*time.Second {
+		t.Fatalf("took %v; the stop request did not shorten the 10s session grace", took)
 	}
 }
 
