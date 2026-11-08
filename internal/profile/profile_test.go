@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -206,5 +207,40 @@ func TestEmptyUserDirUsesBuiltinsOnly(t *testing.T) {
 	names, err := Names("")
 	if err != nil || !reflect.DeepEqual(names, []string{"claude", "codex", "pi"}) {
 		t.Fatalf("Names(\"\") = %v, %v", names, err)
+	}
+}
+
+func TestBuiltinDiagnosePatterns(t *testing.T) {
+	benign := []string{
+		`"cached_input_tokens":4012`, `"input_tokens":14012`, `took 1.404s`,
+		`/tmp/fastener-check-1401404`, `pong`,
+	}
+	positive := map[string][]string{
+		"codex":  {"HTTP 401 Unauthorized", "status: 401", "Not logged in"},
+		"pi":     {"HTTP 401 from provider", "status: 404", "status code 404"},
+		"claude": {"Invalid API key", `{"type":"not_found_error"}`, "model claude-x does not exist"},
+	}
+	for _, name := range []string{"claude", "codex", "pi"} {
+		p, err := Load(name, t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range p.Check.Diagnose {
+			re := regexp.MustCompile(d.Match)
+			for _, b := range benign {
+				if re.MatchString(b) {
+					t.Errorf("%s: %q matches benign %q", name, d.Match, b)
+				}
+			}
+		}
+		for _, s := range positive[name] {
+			hit := false
+			for _, d := range p.Check.Diagnose {
+				hit = hit || regexp.MustCompile(d.Match).MatchString(s)
+			}
+			if !hit {
+				t.Errorf("%s: no pattern matches %q", name, s)
+			}
+		}
 	}
 }

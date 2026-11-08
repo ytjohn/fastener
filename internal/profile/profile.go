@@ -35,6 +35,10 @@ var builtin embed.FS
 
 var ErrUnknownBackend = errors.New("unknown backend")
 
+// ErrNoPermissionLevel is wrapped by RenderHeadless when the profile does not
+// define the requested permission level.
+var ErrNoPermissionLevel = errors.New("permission level not defined")
+
 var levels = map[string]bool{"auto": true, "skip": true}
 var options = map[string]bool{"model": true}
 var commandRE = regexp.MustCompile(`^[A-Za-z0-9._+][A-Za-z0-9._+-]*$`)

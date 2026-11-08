@@ -19,6 +19,6 @@ skip = ["--dangerously-bypass-approvals-and-sandbox"]
 [check]
 version_args = ["--version"]
 diagnose = [
-  { match = '(?i)not logged in|please (run )?`?codex login|unauthorized|401', hint = "auth: run `codex login`" },
+  { match = '(?i)not logged in|please (run )?`?codex login|unauthorized|(\b(status|http)\b[^\n]{0,20}\b401\b)', hint = "auth: run `codex login`" },
   { match = '(?i)model\b.*\b(not found|does not exist|not supported)', hint = "model unavailable: pass a valid --model" },
 ]

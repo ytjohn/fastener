@@ -20,6 +20,6 @@ skip = []
 [check]
 version_args = ["--version"]
 diagnose = [
-  { match = '(?i)(model|no model).*(not found|unavailable|does not exist|no longer)|404', hint = "model unavailable: pass --model, or update pi's default model" },
-  { match = '(?i)no api key|missing credentials|not authenticated|401', hint = "auth: check `pi auth` for the provider" },
+  { match = '(?i)(model|no model).*(not found|unavailable|does not exist|no longer)|\b(status|http)\b[^\n]{0,20}\b404\b', hint = "model unavailable: pass --model, or update pi's default model" },
+  { match = '(?i)no api key|missing credentials|not authenticated|\b(status|http)\b[^\n]{0,20}\b401\b', hint = "auth: check `pi auth` for the provider" },
 ]
