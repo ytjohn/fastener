@@ -103,15 +103,37 @@ func FindMarked(pgid int, marker, bootID string) ([]Identity, error) {
 	if cur != bootID {
 		return nil, nil
 	}
+	return scanMarked(pgid, marker)
+}
+
+// FindMarkedAnyGroup is FindMarked without a process group, for a session whose
+// status.json (and so pgid and boot ID) is unreadable. It scans the processes
+// of the current boot, so it is scoped to it by construction. The marker match
+// is still required for every result, and each pid gets the same start-time
+// re-check; the marker is random per session generation, so a stranger cannot
+// match it. The calling process is never returned.
+func FindMarkedAnyGroup(marker string) ([]Identity, error) {
+	if marker == "" {
+		return nil, nil
+	}
+	return scanMarked(0, marker)
+}
+
+// scanMarked returns live processes carrying the marker; pgid 0 matches any group.
+func scanMarked(pgid int, marker string) ([]Identity, error) {
 	pids, err := PIDs()
 	if err != nil {
 		return nil, err
 	}
 	want := MarkerEnv + "=" + marker
+	self := os.Getpid()
 	var out []Identity
 	for _, pid := range pids {
+		if pid == self {
+			continue
+		}
 		g, start, err := pgidStart(pid)
-		if err != nil || g != pgid {
+		if err != nil || (pgid > 0 && g != pgid) {
 			continue
 		}
 		env, err := Environ(pid)

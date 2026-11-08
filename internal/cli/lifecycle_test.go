@@ -687,3 +687,29 @@ func TestPromptFileRejectsDevicesAndDirs(t *testing.T) {
 		}
 	}
 }
+
+// With status.json unreadable there is no pgid or boot ID, so rm --force
+// falls back to a marker-only scan scoped to the current boot.
+func TestRmForceCorruptStatusKillsMarkedOrphans(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("pdeathsig behaviour is Linux-specific")
+	}
+	h := newHarness(t)
+	pidfile := filepath.Join(t.TempDir(), "gc.pid")
+	h.start("c1", []string{"FAKE_SLEEP=60s", "FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile}, "--grace", "1s")
+	v := h.waitState("c1", "running", 5*time.Second)
+	gcPid := waitPid(t, pidfile)
+	syscall.Kill(v.Status.Monitor.PID, syscall.SIGKILL)
+	h.waitState("c1", "lost", 5*time.Second)
+	os.WriteFile(filepath.Join(h.state, "sessions", "c1", "status.json"), []byte("{not json"), 0o600)
+	if !pidAlive(gcPid) {
+		t.Fatal("grandchild died before rm")
+	}
+	h.ok("rm", "--force", "c1")
+	if _, _, code := h.cmd("inspect", "c1"); code != 127 {
+		t.Fatal("session not removed")
+	}
+	if pidAlive(gcPid) {
+		t.Fatalf("grandchild %d survived rm --force", gcPid)
+	}
+}
