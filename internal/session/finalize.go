@@ -51,8 +51,16 @@ func Finalize(d Dir, mutate func(*Status)) (bool, error) {
 	if gen <= 0 {
 		gen = 1
 	}
-	if l := readLauncher(d, gen); l != nil && l.Monitor != nil {
+	l := readLauncher(d, gen)
+	if l != nil && l.Monitor != nil {
 		if err := monitorLive(*l.Monitor, l.BootID); err != nil {
+			return false, err
+		}
+	}
+	// A unit-only launcher record (systemd, no monitor identity) is judged by
+	// the unit, exactly as View.resolve does: only when nothing names the monitor.
+	if u := unitOnly(l); u != "" && st.Monitor == nil {
+		if err := unitLive(u); err != nil {
 			return false, err
 		}
 	}
@@ -61,6 +69,19 @@ func Finalize(d Dir, mutate func(*Status)) (bool, error) {
 	st.SchemaVersion = max(read, SchemaVersion)
 	st.UpdatedAt = time.Now().UTC()
 	return true, WriteJSON(d.StatusPath(), &st)
+}
+
+// unitLive returns ErrMonitorAlive if the unit is alive or its state cannot be
+// determined (the latter wraps the cause).
+func unitLive(unit string) error {
+	ok, err := unitCheck(unit)
+	if err != nil {
+		return fmt.Errorf("%w (unit %s state unknown: %v)", ErrMonitorAlive, unit, err)
+	}
+	if ok {
+		return fmt.Errorf("%w (unit %s is active)", ErrMonitorAlive, unit)
+	}
+	return nil
 }
 
 // monitorLive returns ErrMonitorAlive if the monitor is alive or its liveness

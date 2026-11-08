@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ytjohn/fastener/internal/proc"
+	"github.com/ytjohn/fastener/internal/systemd"
 )
 
 // View is a session as read from disk, with its effective state resolved
@@ -94,7 +95,7 @@ func LoadAt(d Dir, name string, handshake time.Duration) (*View, error) {
 	if v.Launcher != nil {
 		v.warnNewer(fmt.Sprintf("generations/%d.launcher.json", gen), v.Launcher.SchemaVersion)
 	}
-	v.resolve(handshake, time.Now(), proc.Check, func() (Status, *LauncherRecord, *Plan, error) {
+	v.resolve(handshake, time.Now(), proc.Check, unitCheck, func() (Status, *LauncherRecord, *Plan, error) {
 		var st Status
 		if err := ReadJSON(d.StatusPath(), &st); err != nil {
 			return Status{}, nil, nil, err
@@ -179,6 +180,19 @@ func (v *View) MonitorIdentity() (proc.Identity, string, bool) {
 // Alive reports whether the session is still being supervised.
 func (v *View) Alive() bool { return v.State == StateRunning || v.State == StateStarting }
 
+// unitCheck reports whether a systemd unit is still alive (systemd.UnitAlive
+// in production; replaced in tests). An error means unknown.
+var unitCheck = systemd.UnitAlive
+
+// unitOnly returns the unit of a launcher record that names a unit but no
+// monitor identity, "" otherwise. Such a record is judged by the unit's state.
+func unitOnly(l *LauncherRecord) string {
+	if l == nil || l.Monitor != nil {
+		return ""
+	}
+	return l.Unit
+}
+
 // resolve computes the effective state. reload re-reads status.json and the
 // current launcher record; it is consulted once before declaring a session
 // lost, because the monitor always writes before it exits.
@@ -186,11 +200,21 @@ func (v *View) Alive() bool { return v.State == StateRunning || v.State == State
 // check is the liveness probe (proc.Check in production). An error means
 // liveness is unknown: the session is then assumed alive, and the error is
 // kept in LivenessError so inspect can explain a session that never resolves.
+// unit is the same for a systemd unit, used when no monitor identity is
+// recorded anywhere (a unit-only launcher record).
 func (v *View) resolve(handshake time.Duration, now time.Time,
 	check func(proc.Identity, string) (bool, error),
+	unit func(string) (bool, error),
 	reload func() (Status, *LauncherRecord, *Plan, error)) {
 	maybeAlive := func(id proc.Identity, boot string) bool {
 		ok, err := check(id, boot)
+		if err != nil {
+			v.LivenessError = err.Error()
+		}
+		return ok || err != nil
+	}
+	unitMaybeAlive := func(u string) bool {
+		ok, err := unit(u)
 		if err != nil {
 			v.LivenessError = err.Error()
 		}
@@ -205,12 +229,17 @@ func (v *View) resolve(handshake time.Duration, now time.Time,
 	if v.State != StateRunning && v.State != StateStarting {
 		return
 	}
-	// TODO(v0.2): a systemd launcher record with only Unit must check the unit's state.
 	id, boot, ok := v.MonitorIdentity()
+	u := ""
+	if !ok {
+		u = unitOnly(v.Launcher)
+	}
 	switch {
 	case ok && maybeAlive(id, boot):
 		return // still supervised (or liveness unknown: never declare lost on a read error)
-	case !ok && v.State == StateStarting && now.Sub(v.Session.CreatedAt) < 2*handshake:
+	case u != "" && unitMaybeAlive(u):
+		return // the unit is still up (or its state is unknown)
+	case !ok && u == "" && v.State == StateStarting && now.Sub(v.Session.CreatedAt) < 2*handshake:
 		return // launcher record not written yet; give it time
 	}
 	if reload != nil {
@@ -223,7 +252,12 @@ func (v *View) resolve(handshake time.Duration, now time.Time,
 				v.State = st.State // terminal or unknown future state: use as is
 				return
 			}
-			if id2, boot2, ok2 := v.MonitorIdentity(); ok2 && (!ok || id2 != id) && maybeAlive(id2, boot2) {
+			id2, boot2, ok2 := v.MonitorIdentity()
+			if ok2 && (!ok || id2 != id) && maybeAlive(id2, boot2) {
+				v.State = st.State
+				return
+			}
+			if u2 := unitOnly(l); !ok2 && u2 != "" && u2 != u && unitMaybeAlive(u2) {
 				v.State = st.State
 				return
 			}
