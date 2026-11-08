@@ -212,3 +212,41 @@ func TestSystemdMonitorKilledLeavesNoOrphans(t *testing.T) {
 	}
 	h.ok("rm", "s1") // nothing left to refuse over
 }
+
+// stop --grace longer than the session's grace is clamped in systemd mode (#5).
+func TestSystemdStopGraceIsClamped(t *testing.T) {
+	h := newSystemdHarness(t, "systemd")
+	h.start("s1", []string{"FAKE_SLEEP=60s", "FAKE_IGNORE_TERM=1"}, "--grace", "1s")
+	h.waitState("s1", "running", 5*time.Second)
+	start := time.Now()
+	_, errOut, code := h.cmd("stop", "s1", "--grace", "30s")
+	took := time.Since(start)
+	if code != 0 {
+		t.Fatalf("stop exit %d: %s", code, errOut)
+	}
+	if !strings.Contains(errOut, "clamped to 1s") {
+		t.Fatalf("no clamp warning: %q", errOut)
+	}
+	if took > 10*time.Second {
+		t.Fatalf("stop took %s: --grace was not clamped", took)
+	}
+	if v := h.inspect("s1"); v.Status.EndedBy != "stop" || v.Status.Signal != "SIGKILL" {
+		t.Fatalf("got %+v", v.Status)
+	}
+	// A shorter --grace is not touched.
+	h.start("s2", []string{"FAKE_SLEEP=60s"}, "--grace", "5s")
+	h.waitState("s2", "running", 5*time.Second)
+	if _, errOut, code := h.cmd("stop", "s2", "--grace", "1s"); code != 0 || strings.Contains(errOut, "clamped") {
+		t.Fatalf("shorter grace: exit %d: %q", code, errOut)
+	}
+}
+
+// The setsid launcher never clamps.
+func TestSetsidStopGraceNotClamped(t *testing.T) {
+	h := newHarness(t)
+	h.start("s1", []string{"FAKE_SLEEP=60s"}, "--grace", "1s")
+	h.waitState("s1", "running", 5*time.Second)
+	if _, errOut, code := h.cmd("stop", "s1", "--grace", "3s"); code != 0 || strings.Contains(errOut, "clamped") {
+		t.Fatalf("exit %d: %q", code, errOut)
+	}
+}

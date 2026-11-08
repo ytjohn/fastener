@@ -30,6 +30,7 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(stderr, err)
 	}
+	*grace = clampGrace(v, *grace, stderr)
 	if err := stopSession(v, *grace, "stop"); err != nil {
 		return fail(stderr, err)
 	}
@@ -86,6 +87,22 @@ func cmdRm(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, fmt.Errorf("session %s changed while being removed; nothing was deleted", name))
 	}
 	return exitOK
+}
+
+// clampGrace limits a per-call --grace to the session's own grace when the
+// session runs under systemd: the unit's TimeoutStopSec and RuntimeMaxSec were
+// sized from the session's grace, so a longer stop could have the backstop fire
+// mid-grace (recorded as signal, not stop). It warns when it clamps.
+func clampGrace(v *session.View, grace time.Duration, stderr io.Writer) time.Duration {
+	if v.Launcher == nil || v.Launcher.Launcher != "systemd" {
+		return grace
+	}
+	if limit := v.Session.EffectiveGrace(); grace > limit {
+		fmt.Fprintf(stderr, "fastener: warning: session %s runs under systemd; --grace %s is longer than the session's grace and is clamped to %s (the unit's stop timeout was sized from it)\n",
+			v.Session.Name, grace, limit)
+		return limit
+	}
+	return grace
 }
 
 // stopSession stops a session through its monitor, or, for a lost session,
