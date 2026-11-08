@@ -179,7 +179,7 @@ A monitor ignores a request whose `generation` is not its own. `restore` deletes
 
 A process that cleared its environment is not counted, and is never signalled. The check fails safe: Fastener may miss one of its own orphans, but it never kills a stranger.
 
-**Group liveness for `lost` sessions.** `inspect` reports `orphans: N`: the number of processes that pass the identity check above. `stop` and `rm` signal those pids individually (SIGTERM, wait for the grace period, then SIGKILL), not the pgid as a whole, so a reused pgid can never redirect a signal. Each signal re-verifies the pid's start time first. The orphan scan costs a pass over every process, so it runs only where it matters: `inspect`, `wait`, `stop`, `rm` and the launch handshake scan (`session.LoadFull`); `ps` loads sessions cheaply (`session.Load`) and reports no orphan counts. If an orphan survives SIGKILL, `stop` does not finalize the session and `rm` does not remove it.
+**Group liveness for `lost` sessions.** `inspect` reports `orphans: N`: the number of processes that pass the identity check above. `stop` and `rm` signal those pids individually (SIGTERM, wait for the grace period, then SIGKILL), not the pgid as a whole, so a reused pgid can never redirect a signal. Each pid's identity is verified before it is signalled; on Linux it is pinned with a pidfd before the check and both signals go through that pidfd (see Liveness). The orphan scan costs a pass over every process, so it runs only where it matters: `inspect`, `wait`, `stop`, `rm` and the launch handshake scan (`session.LoadFull`); `ps` loads sessions cheaply (`session.Load`) and reports no orphan counts. If an orphan survives SIGKILL, `stop` does not finalize the session and `rm` does not remove it.
 
 ### Launch handshake
 
@@ -214,6 +214,12 @@ A process counts as alive only if all three hold:
 - `MaybeAlive` is false only when `Check` confirms the process is gone. It guards declaring a session `lost` or finalizing it.
 
 `proc.Signal` re-verifies identity and returns a non-`ErrNoProcess` error when liveness is unknown, so a caller never mistakes "could not tell" for "already gone".
+
+**Signalling without a reuse window (Linux).** A check followed by `kill(pid)` leaves a window: the process can exit and its pid be reused between the two. On Linux, `proc.Open` closes it by pinning first: it calls `pidfd_open(pid)`, *then* verifies pid, start time and boot ID, and returns a `proc.Handle` whose signals go through `pidfd_send_signal`. The pidfd names that exact process instance:
+- if the pid was reused before the open, the start-time check fails and nothing is signalled;
+- if the process dies after the open, the check fails (gone, or a zombie), and once it is reaped the pidfd gives `ESRCH` (`ErrNoProcess`) even if the pid now belongs to a stranger.
+
+`proc.Signal` is `Open`, one signal, `Close`, so the monitor SIGTERM from `stop` is covered too. Orphan cleanup holds one handle per orphan across the whole TERM / grace / KILL sequence, so a pid that exits and is reused during the grace period cannot receive the SIGKILL. Where `pidfd_open` is refused (`ENOSYS` before Linux 5.3, `EPERM` under seccomp, or any error other than `ESRCH`), and on macOS, which has no pidfd, a handle holds only the identity and each signal re-verifies it before `kill(2)`, as before; the fallback is silent. The monitor's own `kill(-pgid)` of the agent's group does not use pidfds; the zombie pin protects it (below).
 
 Sources:
 - **Linux:** start time from `/proc/<pid>/stat` field 22 (clock ticks since boot, stored as-is); boot ID from `/proc/sys/kernel/random/boot_id`.
@@ -598,6 +604,7 @@ docs/                  json-schema.md, design specs
   - an agent that exits normally but leaves a grandchild: the session is `exited` with `orphans: N`, `rm` refuses, `stop` kills the grandchild without re-finalizing, then `rm` succeeds;
   - a monitor that dies before writing `status.json` (becomes `lost` via the generation record);
   - a reused pid, and a mismatched `boot_id`;
+  - signalling through a pidfd (Linux): a handle held across the target's reap refuses to signal, a process that dies between `pidfd_open` and the identity check is not signalled, and an `ENOSYS`/`EPERM` from `pidfd_open` falls back to check-then-kill;
   - a process in a reused pgid without the session marker: it is never counted as an orphan and never signalled;
   - a stale `stop-request.json` from an earlier generation is ignored;
   - a profile edited between `run` and the monitor starting: the monitor uses the plan, and the recorded `sha256` matches what ran;
@@ -650,4 +657,4 @@ No Fastener daemon is involved at any point.
 - In setsid mode an agent's descendants can outlive a killed monitor (on Linux: grandchildren only; on macOS: the agent too). This is handled by group-level orphan cleanup, not prevented. systemd mode prevents it.
 - Orphan identity fails safe, so some orphans can be missed:
   - a descendant that moves to its own process group, or clears its environment, is never counted or signalled;
-  - the check-then-signal sequence leaves a small pid-reuse window. On Linux, `pidfd_open` plus `pidfd_send_signal` can close it.
+  - on macOS, and on Linux where `pidfd_open` is unavailable (before 5.3, or refused by seccomp), the check-then-signal sequence leaves a small pid-reuse window, including across an orphan's grace period. Linux with pidfds closes it (§4, Liveness).
