@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -353,5 +354,12 @@ func TestResolveReloadsPlanOnGenerationChange(t *testing.T) {
 	}
 	if v.Plan == nil || v.Plan.Generation != 2 {
 		t.Fatalf("plan %+v", v.Plan)
+	}
+}
+
+func TestRootAbsoluteForRelativeStateDir(t *testing.T) {
+	t.Setenv("FASTENER_STATE_DIR", "rel/state")
+	if r := Root(); !filepath.IsAbs(r) || !strings.HasSuffix(r, "rel/state") {
+		t.Fatalf("Root() = %q", r)
 	}
 }

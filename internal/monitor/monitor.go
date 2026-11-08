@@ -74,9 +74,6 @@ func load(d session.Dir, gen int, logger *log.Logger) (*monitor, error) {
 	if err := session.ReadJSON(d.PlanPath(gen), &m.plan); err != nil {
 		return nil, err
 	}
-	if err := session.ReadJSON(d.StatusPath(), &m.st); err != nil {
-		return nil, err
-	}
 	if len(m.plan.Argv) == 0 {
 		return nil, fmt.Errorf("plan %d has empty argv", gen)
 	}
@@ -88,7 +85,7 @@ func load(d session.Dir, gen int, logger *log.Logger) (*monitor, error) {
 	if err != nil {
 		return nil, err
 	}
-	m.st.Generation, m.st.Monitor, m.st.BootID = gen, &self, boot
+	m.st = session.Status{Generation: gen, Monitor: &self, BootID: boot} // fresh: nothing carried over from a previous generation
 	return m, nil
 }
 
@@ -186,7 +183,25 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 
 	// Linux delivers Pdeathsig when the spawning *thread* exits (golang/go#27505),
 	// so spawn and wait on one locked thread that lives as long as the agent.
+	// A stop or signal that arrived during setup is recorded without spawning.
+	if _, ok := m.stopRequest(); ok {
+		pw.Close()
+		pr.Close()
+		m.finish(session.EndedByStop, nil)
+		return 0
+	}
+	select {
+	case sig := <-sigs:
+		m.log.Printf("received %v before spawn", sig)
+		pw.Close()
+		pr.Close()
+		m.finish(session.EndedBySignal, nil)
+		return 0
+	default:
+	}
 	started := make(chan error, 1)
+	exitPending := make(chan struct{}, 1) // agent is dead; on Linux still an unreaped zombie
+	reapNow := make(chan struct{})        // closed once we are done signalling the group
 	exited := make(chan *os.ProcessState, 1)
 	go func() {
 		runtime.LockOSThread() // never unlocked: the thread exits with the goroutine
@@ -195,7 +210,15 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 			return
 		}
 		started <- nil
-		_ = cmd.Wait()
+		if pinsZombie {
+			waitExitNoReap(cmd.Process.Pid)
+			exitPending <- struct{}{}
+			<-reapNow
+			_ = cmd.Wait()
+		} else {
+			_ = cmd.Wait()
+			exitPending <- struct{}{}
+		}
 		exited <- cmd.ProcessState
 	}()
 	if err := <-started; err != nil {
@@ -234,25 +257,43 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	}
 
 	endedBy := session.EndedByExit
-	var ps *os.ProcessState
-	select {
-	case ps = <-exited:
-	case <-limit:
-		endedBy = session.EndedByLimit
-		ps = terminate(pid, time.Duration(m.sess.Grace), exited)
-	case sig := <-sigs:
-		grace := time.Duration(m.sess.Grace)
-		endedBy = session.EndedBySignal
-		if req, ok := m.stopRequest(); ok {
-			endedBy = session.EndedByStop
-			if req.Grace > 0 {
-				grace = time.Duration(req.Grace)
-			}
+	exitedAlready := func() bool {
+		select {
+		case <-exitPending:
+			return true
+		default:
+			return false
 		}
-		m.log.Printf("received %v; ended_by=%s grace=%s", sig, endedBy, grace)
-		ps = terminate(pid, grace, exited)
 	}
+	gone := false // exitPending already consumed
+	select {
+	case <-exitPending:
+		gone = true
+	case <-limit:
+		if gone = exitedAlready(); !gone {
+			endedBy = session.EndedByLimit
+			gone = m.terminate(cmd, pid, time.Duration(m.sess.Grace), exitPending)
+		}
+	case sig := <-sigs:
+		if gone = exitedAlready(); !gone {
+			grace := time.Duration(m.sess.Grace)
+			endedBy = session.EndedBySignal
+			if req, ok := m.stopRequest(); ok {
+				endedBy = session.EndedByStop
+				if req.Grace > 0 {
+					grace = time.Duration(req.Grace)
+				}
+			}
+			m.log.Printf("received %v; ended_by=%s grace=%s", sig, endedBy, grace)
+			gone = m.terminate(cmd, pid, grace, exitPending)
+		}
+	}
+	_ = gone
+	close(reapNow) // signalling is finished; let the spawn goroutine reap
+	ps := <-exited
 
+	// Abandoning remaining output after drainTimeout is deliberate: a
+	// descendant holding the pipe must not keep the session from finishing.
 	select {
 	case <-drained:
 	case <-time.After(drainTimeout):
@@ -264,19 +305,27 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 }
 
 // terminate sends SIGTERM to the agent's process group, waits up to grace for
-// the agent to exit, then SIGKILLs the group (reaching any lingering members).
-func terminate(pgid int, grace time.Duration, exited <-chan *os.ProcessState) *os.ProcessState {
+// the agent to die, then SIGKILLs the group. The agent is not reaped until the
+// caller closes reapNow, so (on Linux) its pgid cannot be reused meanwhile. It
+// returns once exitPending has been consumed.
+func (m *monitor) terminate(cmd *exec.Cmd, pgid int, grace time.Duration, exitPending <-chan struct{}) bool {
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	var ps *os.ProcessState
 	select {
-	case ps = <-exited:
+	case <-exitPending:
+		if pinsZombie {
+			_ = syscall.Kill(-pgid, syscall.SIGKILL) // reach lingering group members
+		}
+		return true
 	case <-time.After(grace):
 	}
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	if ps == nil {
-		ps = <-exited
+	_ = cmd.Process.Kill() // covers a leader that left the group
+	select {
+	case <-exitPending:
+	case <-time.After(30 * time.Second):
+		m.log.Printf("agent did not exit 30s after SIGKILL")
 	}
-	return ps
+	return true
 }
 
 func exitFacts(s *session.Status, ps *os.ProcessState) {
@@ -285,13 +334,26 @@ func exitFacts(s *session.Status, ps *os.ProcessState) {
 	}
 	if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
 		s.Signal = unix.SignalName(ws.Signal())
+		s.ExitCode = nil
 		return
 	}
+	s.Signal = ""
 	code := ps.ExitCode()
 	s.ExitCode = &code
 }
 
 // pump copies agent stdout to output.log unchanged and feeds the parser.
+func (m *monitor) lineSafe(p parser.Parser, line []byte) (changed bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			m.log.Printf("parser panic: %v", r)
+			m.st.ParseErrors++
+			changed = true
+		}
+	}()
+	return p.Line(line, &m.st.Fields)
+}
+
 func (m *monitor) pump(r *os.File, out *os.File, p parser.Parser, done chan<- struct{}) {
 	defer close(done)
 	defer r.Close()
@@ -305,7 +367,7 @@ func (m *monitor) pump(r *os.File, out *os.File, p parser.Parser, done chan<- st
 			case len(line) > maxParseLine:
 				m.st.ParseErrors++
 				m.dirty = true
-			case p.Line(bytes.TrimRight(line, "\r\n"), &m.st.Fields):
+			case m.lineSafe(p, bytes.TrimRight(line, "\r\n")):
 				if len(m.st.FinalMessage) > maxFinalMessage {
 					i := maxFinalMessage
 					for i > 0 && !utf8.RuneStart(m.st.FinalMessage[i]) {

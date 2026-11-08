@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -42,6 +43,11 @@ func (Setsid) Start(d session.Dir, gen int) (session.LauncherRecord, error) {
 	if err != nil {
 		return session.LauncherRecord{}, err
 	}
+	abs, err := filepath.Abs(string(d)) // the monitor runs with cwd "/"
+	if err != nil {
+		return session.LauncherRecord{}, err
+	}
+	d = session.Dir(abs)
 	logf, err := os.OpenFile(d.MonitorLog(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return session.LauncherRecord{}, err

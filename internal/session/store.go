@@ -27,7 +27,11 @@ func ValidName(name string) bool { return nameRE.MatchString(name) }
 // directory can be determined (no HOME); callers must treat that as an error.
 func Root() string {
 	if v := os.Getenv("FASTENER_STATE_DIR"); v != "" {
-		return v
+		abs, err := filepath.Abs(v)
+		if err != nil {
+			return ""
+		}
+		return abs
 	}
 	if v := os.Getenv("XDG_STATE_HOME"); filepath.IsAbs(v) {
 		return filepath.Join(v, "fastener")

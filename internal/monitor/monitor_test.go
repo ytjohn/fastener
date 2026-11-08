@@ -1,11 +1,14 @@
 package monitor
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -21,13 +24,21 @@ func newTestMonitor(t *testing.T) *monitor {
 		t.Fatal(err)
 	}
 	envFile := filepath.Join(t.TempDir(), "env")
-	os.WriteFile(envFile, []byte("B=file\nC=file\n"), 0o600)
-	session.WriteJSON(d.SessionPath(), session.Session{
-		SchemaVersion: 1, Name: "m", CreatedAt: time.Now(),
-		EnvBase: []string{"A=base", "B=base"}, EnvFile: envFile, Env: []string{"C=flag"},
-	})
-	session.WriteJSON(d.PlanPath(2), session.Plan{SchemaVersion: 1, Generation: 2, Argv: []string{"/bin/true"}, Marker: "m:2:n"})
-	session.WriteJSON(d.StatusPath(), session.Status{SchemaVersion: 1, State: session.StateStarting})
+	if err := os.WriteFile(envFile, []byte("B=file\nC=file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, err := range []error{
+		session.WriteJSON(d.SessionPath(), session.Session{
+			SchemaVersion: 1, Name: "m", CreatedAt: time.Now(),
+			EnvBase: []string{"A=base", "B=base"}, EnvFile: envFile, Env: []string{"C=flag"},
+		}),
+		session.WriteJSON(d.PlanPath(2), session.Plan{SchemaVersion: 1, Generation: 2, Argv: []string{"/bin/true"}, Marker: "m:2:n"}),
+		session.WriteJSON(d.StatusPath(), session.Status{SchemaVersion: 1, State: session.StateStarting}),
+	} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	m, err := load(d, 2, log.New(os.Stderr, "", 0))
 	if err != nil {
 		t.Fatal(err)
@@ -70,16 +81,32 @@ func TestAgentEnvLayering(t *testing.T) {
 	}
 }
 
+var (
+	fakeOnce sync.Once
+	fakeBin  string
+	fakeErr  error
+)
+
 func buildFake(t *testing.T) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "fakeagent")
-	if out, err := exec.Command("go", "build", "-o", bin, "../testbin/fakeagent").CombinedOutput(); err != nil {
-		t.Fatalf("build fakeagent: %v\n%s", err, out)
+	fakeOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "fakeagent")
+		if err != nil {
+			fakeErr = err
+			return
+		}
+		fakeBin = filepath.Join(dir, "fakeagent")
+		if out, err := exec.Command("go", "build", "-o", fakeBin, "../testbin/fakeagent").CombinedOutput(); err != nil {
+			fakeErr = fmt.Errorf("%v\n%s", err, out)
+		}
+	})
+	if fakeErr != nil {
+		t.Fatalf("build fakeagent: %v", fakeErr)
 	}
-	return bin
+	return fakeBin
 }
 
-func setupRun(t *testing.T, argv []string, cwd string) session.Dir {
+func setupRun(t *testing.T, argv []string, cwd string, env []string, maxRuntime time.Duration) session.Dir {
 	t.Helper()
 	t.Setenv("FASTENER_STATE_DIR", t.TempDir())
 	d, err := session.Create("e2e")
@@ -94,7 +121,7 @@ func setupRun(t *testing.T, argv []string, cwd string) session.Dir {
 	}
 	must(session.WriteJSON(d.SessionPath(), session.Session{
 		SchemaVersion: 1, Name: "e2e", CreatedAt: time.Now(), Cwd: cwd,
-		Grace: session.Duration(2 * time.Second), EnvBase: []string{"PATH=" + os.Getenv("PATH")},
+		Grace: session.Duration(300 * time.Millisecond), MaxRuntime: session.Duration(maxRuntime), Env: env, EnvBase: []string{"PATH=" + os.Getenv("PATH")},
 	}))
 	must(os.WriteFile(d.PromptPath(), []byte("ping\n"), 0o600))
 	must(session.WriteJSON(d.PlanPath(1), session.Plan{
@@ -107,8 +134,22 @@ func setupRun(t *testing.T, argv []string, cwd string) session.Dir {
 
 func runInProcess(t *testing.T, d session.Dir) session.Status {
 	t.Helper()
+	return runWith(t, d, make(chan os.Signal, 4), nil)
+}
+
+// runWith drives m.run with an injectable signal channel; inject (optional) runs
+// concurrently once the monitor has started.
+func runWith(t *testing.T, d session.Dir, sigs chan os.Signal, inject func()) session.Status {
+	t.Helper()
+	m, err := load(d, 1, log.New(os.Stderr, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan int, 1)
-	go func() { done <- Run(string(d), 1, log.New(os.Stderr, "", 0)) }()
+	go func() { done <- m.run(sigs) }()
+	if inject != nil {
+		go inject()
+	}
 	select {
 	case code := <-done:
 		if code != 0 {
@@ -126,7 +167,7 @@ func runInProcess(t *testing.T, d session.Dir) session.Status {
 
 func TestRunEndToEnd(t *testing.T) {
 	bin := buildFake(t)
-	d := setupRun(t, []string{bin}, t.TempDir())
+	d := setupRun(t, []string{bin}, t.TempDir(), nil, 0)
 	st := runInProcess(t, d)
 	if st.State != session.StateExited || st.EndedBy != session.EndedByExit {
 		t.Fatalf("state=%s ended_by=%s err=%s", st.State, st.EndedBy, st.Error)
@@ -148,9 +189,115 @@ func TestRunEndToEnd(t *testing.T) {
 
 func TestRunLaunchFailed(t *testing.T) {
 	bin := buildFake(t)
-	d := setupRun(t, []string{bin}, "/nonexistent/fastener-cwd")
+	d := setupRun(t, []string{bin}, "/nonexistent/fastener-cwd", nil, 0)
 	st := runInProcess(t, d)
 	if st.State != session.StateExited || st.EndedBy != session.EndedByLaunchFailed || st.Error == "" {
 		t.Fatalf("state=%s ended_by=%s err=%q", st.State, st.EndedBy, st.Error)
+	}
+}
+
+func requestStop(t *testing.T, d session.Dir) {
+	t.Helper()
+	if err := session.WriteJSON(d.StopPath(), session.StopRequest{SchemaVersion: 1, Generation: 1, By: "stop"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitFor polls cond for up to 5s.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if cond() {
+			return
+		}
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+func runningStatus(d session.Dir) bool {
+	var st session.Status
+	return session.ReadJSON(d.StatusPath(), &st) == nil && st.State == session.StateRunning
+}
+
+func TestStopIgnoringTermIsKilled(t *testing.T) {
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), []string{"FAKE_IGNORE_TERM=1", "FAKE_SLEEP=30s"}, 0)
+	sigs := make(chan os.Signal, 4)
+	start := time.Now()
+	st := runWith(t, d, sigs, func() {
+		waitFor(t, "running", func() bool { return runningStatus(d) })
+		time.Sleep(100 * time.Millisecond)
+		requestStop(t, d)
+		sigs <- syscall.SIGTERM
+	})
+	if st.EndedBy != session.EndedByStop || st.Signal != "SIGKILL" || st.ExitCode != nil {
+		t.Fatalf("ended_by=%s signal=%s code=%v", st.EndedBy, st.Signal, st.ExitCode)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("took %v", time.Since(start))
+	}
+}
+
+func TestStopKillsGrandchild(t *testing.T) {
+	pidfile := filepath.Join(t.TempDir(), "gc.pid")
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), []string{"FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile, "FAKE_SLEEP=30s"}, 0)
+	sigs := make(chan os.Signal, 4)
+	st := runWith(t, d, sigs, func() {
+		waitFor(t, "grandchild pidfile", func() bool { b, err := os.ReadFile(pidfile); return err == nil && len(b) > 0 })
+		requestStop(t, d)
+		sigs <- syscall.SIGTERM
+	})
+	if st.EndedBy != session.EndedByStop {
+		t.Fatalf("ended_by=%s", st.EndedBy)
+	}
+	b, _ := os.ReadFile(pidfile)
+	pid := strings.TrimSpace(string(b))
+	waitFor(t, "grandchild dead", func() bool {
+		stat, err := os.ReadFile("/proc/" + pid + "/stat")
+		if err != nil {
+			return true
+		}
+		i := strings.LastIndex(string(stat), ") ")
+		return i >= 0 && strings.HasPrefix(string(stat)[i+2:], "Z")
+	})
+}
+
+func TestMaxRuntimeLimit(t *testing.T) {
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), []string{"FAKE_SLEEP=30s"}, 300*time.Millisecond)
+	st := runInProcess(t, d)
+	if st.EndedBy != session.EndedByLimit || st.Signal == "" {
+		t.Fatalf("ended_by=%s signal=%s", st.EndedBy, st.Signal)
+	}
+}
+
+func TestSignalWithoutRequest(t *testing.T) {
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), []string{"FAKE_SLEEP=30s"}, 0)
+	sigs := make(chan os.Signal, 4)
+	st := runWith(t, d, sigs, func() {
+		waitFor(t, "running", func() bool { return runningStatus(d) })
+		sigs <- syscall.SIGTERM
+	})
+	if st.EndedBy != session.EndedBySignal {
+		t.Fatalf("ended_by=%s", st.EndedBy)
+	}
+}
+
+func TestExitBeatsSignal(t *testing.T) {
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), []string{"FAKE_EXIT=3", "FAKE_GRANDCHILD=1"}, 0)
+	sigs := make(chan os.Signal, 4)
+	st := runWith(t, d, sigs, func() {
+		time.Sleep(200 * time.Millisecond) // agent has exited by now (exit is immediate)
+		sigs <- syscall.SIGTERM
+	})
+	if st.EndedBy != session.EndedByExit || st.ExitCode == nil || *st.ExitCode != 3 || st.Signal != "" {
+		t.Fatalf("ended_by=%s code=%v signal=%s", st.EndedBy, st.ExitCode, st.Signal)
+	}
+}
+
+func TestStopBeforeSpawn(t *testing.T) {
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), nil, 0)
+	requestStop(t, d)
+	st := runInProcess(t, d)
+	if st.EndedBy != session.EndedByStop || st.Agent != nil {
+		t.Fatalf("ended_by=%s agent=%v", st.EndedBy, st.Agent)
 	}
 }
