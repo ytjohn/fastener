@@ -119,12 +119,19 @@ func piAssistant(m *piMessage, f *Fields) bool {
 	}
 	if m.Usage != nil {
 		// Usage is per API call; sum it so multi-turn runs count every call.
+		var in, out int64
 		u := Usage{}
 		if f.Usage != nil {
 			u = *f.Usage
+			if u.InputTokens != nil {
+				in = *u.InputTokens
+			}
+			if u.OutputTokens != nil {
+				out = *u.OutputTokens
+			}
 		}
-		u.InputTokens += m.Usage.Input + m.Usage.CacheRead + m.Usage.CacheWrite
-		u.OutputTokens += m.Usage.Output
+		u.InputTokens = i64(in + m.Usage.Input + m.Usage.CacheRead + m.Usage.CacheWrite)
+		u.OutputTokens = i64(out + m.Usage.Output)
 		if m.Usage.Cost != nil {
 			u.CostUSD += m.Usage.Cost.Total
 		}
@@ -132,5 +139,5 @@ func piAssistant(m *piMessage, f *Fields) bool {
 	}
 	return f.Model != before.Model || f.ModelSource != before.ModelSource || f.FinalMessage != before.FinalMessage ||
 		before.AgentError == nil || *before.AgentError != isErr ||
-		(f.Usage != nil && (before.Usage == nil || *f.Usage != *before.Usage))
+		(f.Usage != nil && (before.Usage == nil || !f.Usage.equal(*before.Usage)))
 }

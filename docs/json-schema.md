@@ -51,7 +51,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
   - `model`: the model the backend reports it actually served, as `provider/model` when the backend names the provider (Pi), else the bare model id (Claude). It can differ from the requested `--model`: a short alias or pattern resolves to a full id, and a policy can substitute a different model. It is absent when the agent reported an error (`agent_error`), because the attempted model never answered.
   - `model_source`: who reported `model`: `server` (the API response named it) or `client` (the agent CLI recorded the id it requested, so a provider-side substitution would not show; Pi's adapters other than `anthropic-messages` and `openai-completions`, unless they report a `responseModel`). Present exactly when `model` is.
   - `agent_error`
-  - `usage`: `{input_tokens, output_tokens, cost_usd}`, present only when the backend reported usage
+  - `usage`: `{input_tokens, output_tokens, cost_usd}`, present only when the backend reported usage or a cost. `input_tokens` and `output_tokens` are omitted when the backend reported no token counts (for example a Claude result with `total_cost_usd` but no `usage` block, which yields `{"cost_usd": x}`)
   - `parse_errors`
   - `usage.input_tokens` counts *all* input tokens for the run, including cache reads and writes. This differs from Anthropic's own `usage.input_tokens`, which excludes cache tokens.
 - `updated_at`

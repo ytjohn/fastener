@@ -79,8 +79,8 @@ func (claudeStreamJSON) Line(line []byte, f *Fields) bool {
 	}
 	if e.Usage != nil {
 		u := &Usage{
-			InputTokens:  e.Usage.InputTokens + e.Usage.CacheCreationInputTokens + e.Usage.CacheReadInputTokens,
-			OutputTokens: e.Usage.OutputTokens,
+			InputTokens:  i64(e.Usage.InputTokens + e.Usage.CacheCreationInputTokens + e.Usage.CacheReadInputTokens),
+			OutputTokens: i64(e.Usage.OutputTokens),
 		}
 		if f.Usage != nil {
 			u.CostUSD = f.Usage.CostUSD
@@ -88,7 +88,10 @@ func (claudeStreamJSON) Line(line []byte, f *Fields) bool {
 		f.Usage = u
 		changed = true
 	}
-	if e.TotalCostUSD != nil && f.Usage != nil {
+	if e.TotalCostUSD != nil {
+		if f.Usage == nil {
+			f.Usage = &Usage{} // cost only: keep it without inventing token counts
+		}
 		f.Usage.CostUSD = *e.TotalCostUSD
 		changed = true
 	}
