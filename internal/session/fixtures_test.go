@@ -38,6 +38,9 @@ func TestStateFixtures(t *testing.T) {
 					if v.State != StateExited {
 						t.Errorf("%s %s: state %q, want exited", load.how, n, v.State)
 					}
+					if len(v.Warnings) != 0 {
+						t.Errorf("%s %s: unexpected warnings %v", load.how, n, v.Warnings)
+					}
 					if v.Session.Name != n || v.Session.Backend != "fake" || v.Session.Kind != "headless" {
 						t.Errorf("%s %s: session %+v", load.how, n, v.Session)
 					}

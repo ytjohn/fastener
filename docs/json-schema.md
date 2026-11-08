@@ -20,6 +20,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 | `plan` | The current generation's launch plan. Omitted if unreadable. |
 | `launcher` | The launcher record. Omitted if not written. |
 | `paths` | `dir`, `output_log`, `stderr_log`, `monitor_log` (absolute paths) |
+| `warnings` | Array of strings, omitted when empty. One entry per state file whose `schema_version` is newer than this fastener understands, e.g. `status.json has schema_version 2; this fastener understands up to 1, so some fields may be ignored`. The file is still read; unknown fields are ignored. |
 
 `session` fields:
 - `schema_version`, `name`, `created_at`, `kind` (`headless`), `backend`, `cwd` (absolute)
@@ -60,7 +61,7 @@ While a session runs, parser fields are flushed about once a second and always a
 
 ## `ps --json`
 
-An array (never null) of `{name, backend, state, created_at, ended_at?, ended_by?, exit_code?, labels?}`, newest first. Without `--all`, `ps` lists running, starting and lost sessions plus those that ended in the last 24 hours. `ps` does not scan for orphans (too costly across many sessions) and has no orphans field; use `inspect` for that. A session that cannot be read is skipped with a warning on stderr.
+An array (never null) of `{name, backend, state, created_at, ended_at?, ended_by?, exit_code?, labels?}`, newest first. Without `--all`, `ps` lists running, starting and lost sessions plus those that ended in the last 24 hours. `ps` does not scan for orphans (too costly across many sessions) and has no orphans field; use `inspect` for that. A session that cannot be read is skipped with a warning on stderr. A session whose files have a newer `schema_version` than this fastener understands is listed, with one `fastener: warning: <name>: …` line on stderr (the same text as `inspect`'s `warnings`).
 
 ## `check --json`
 

@@ -33,13 +33,15 @@ type inspectOut struct {
 	Plan          *session.Plan           `json:"plan,omitempty"`
 	Launcher      *session.LauncherRecord `json:"launcher,omitempty"`
 	Paths         pathsOut                `json:"paths"`
+	Warnings      []string                `json:"warnings,omitempty"`
 }
 
 func inspectOf(v *session.View) inspectOut {
 	return inspectOut{
 		SchemaVersion: JSONSchemaVersion, Name: v.Session.Name, State: v.State, Backend: v.Session.Backend,
 		Orphans: len(v.Orphans), Session: v.Session, Status: v.Status, Plan: v.Plan, Launcher: v.Launcher,
-		Paths: pathsOut{Dir: string(v.Dir), OutputLog: v.Dir.OutputLog(), StderrLog: v.Dir.StderrLog(), MonitorLog: v.Dir.MonitorLog()},
+		Warnings: v.Warnings,
+		Paths:    pathsOut{Dir: string(v.Dir), OutputLog: v.Dir.OutputLog(), StderrLog: v.Dir.StderrLog(), MonitorLog: v.Dir.MonitorLog()},
 	}
 }
 
@@ -90,8 +92,11 @@ func cmdInspect(args []string, stdout, stderr io.Writer) int {
 	}
 	out := inspectOf(v)
 	if *asJSON {
-		writeJSON(stdout, out)
+		writeJSON(stdout, out) // warnings travel in the "warnings" array
 		return exitOK
+	}
+	for _, w := range v.Warnings {
+		fmt.Fprintf(stderr, "fastener: warning: %s: %s\n", name, w)
 	}
 	s := v.Status
 	tw := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
@@ -159,6 +164,9 @@ func cmdPs(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			fmt.Fprintf(stderr, "fastener: skipping %s: %v\n", n, err)
 			continue
+		}
+		for _, w := range v.Warnings {
+			fmt.Fprintf(stderr, "fastener: warning: %s: %s\n", n, w)
 		}
 		recent := v.Alive() || v.State == session.StateLost ||
 			(v.Status.EndedAt != nil && v.Status.EndedAt.After(cutoff)) ||

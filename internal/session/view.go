@@ -20,6 +20,19 @@ type View struct {
 	Launcher *LauncherRecord
 	State    string          // effective: may be "lost" although status.json says otherwise
 	Orphans  []proc.Identity // marked processes still alive in a lost session
+	// Warnings are non-fatal read problems, e.g. a file written by a newer
+	// fastener than this one.
+	Warnings []string
+}
+
+// warnNewer records a warning when a file's schema_version is newer than this
+// build understands.
+func (v *View) warnNewer(file string, version int) {
+	if version > SchemaVersion {
+		v.Warnings = append(v.Warnings, fmt.Sprintf(
+			"%s has schema_version %d; this fastener understands up to %d, so some fields may be ignored",
+			file, version, SchemaVersion))
+	}
 }
 
 // Load reads a session. handshake is the configured handshake timeout; a
@@ -49,18 +62,24 @@ func Load(name string, handshake time.Duration) (*View, error) {
 		}
 		v.Session = Session{Name: name, CreatedAt: fi.ModTime()}
 	}
+	v.warnNewer("session.json", v.Session.SchemaVersion)
 	if err := ReadJSON(d.StatusPath(), &v.Status); err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
 		v.Status = Status{State: StateStarting}
 	}
+	v.warnNewer("status.json", v.Status.SchemaVersion)
 	gen := v.Generation()
 	var p Plan
 	if ReadJSON(d.PlanPath(gen), &p) == nil {
 		v.Plan = &p
+		v.warnNewer(fmt.Sprintf("generations/%d.json", gen), p.SchemaVersion)
 	}
 	v.Launcher = readLauncher(d, gen)
+	if v.Launcher != nil {
+		v.warnNewer(fmt.Sprintf("generations/%d.launcher.json", gen), v.Launcher.SchemaVersion)
+	}
 	v.resolve(handshake, time.Now(), func() (Status, *LauncherRecord, *Plan, error) {
 		var st Status
 		if err := ReadJSON(d.StatusPath(), &st); err != nil {

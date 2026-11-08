@@ -363,3 +363,45 @@ func TestRootAbsoluteForRelativeStateDir(t *testing.T) {
 		t.Fatalf("Root() = %q", r)
 	}
 }
+
+func TestLoadWarnsOnNewerSchemaVersion(t *testing.T) {
+	setup(t)
+	boot, _ := proc.BootID()
+	dead := deadIdentity(t)
+	d := writeSession(t, "future", time.Now(), Status{SchemaVersion: SchemaVersion + 1, State: StateExited, EndedBy: EndedByExit, Monitor: &dead, BootID: boot},
+		&LauncherRecord{SchemaVersion: SchemaVersion + 2, Launcher: "setsid", Monitor: &dead, BootID: boot})
+	if err := WriteJSON(d.SessionPath(), Session{SchemaVersion: SchemaVersion + 3, Name: "future", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteJSON(d.PlanPath(1), Plan{SchemaVersion: SchemaVersion + 4, Generation: 1, Marker: "future:1:x"}); err != nil {
+		t.Fatal(err)
+	}
+	v, err := Load("future", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"session.json has schema_version 4; this fastener understands up to 1, so some fields may be ignored",
+		"status.json has schema_version 2; this fastener understands up to 1, so some fields may be ignored",
+		"generations/1.json has schema_version 5; this fastener understands up to 1, so some fields may be ignored",
+		"generations/1.launcher.json has schema_version 3; this fastener understands up to 1, so some fields may be ignored",
+	}
+	if strings.Join(v.Warnings, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("warnings:\n%s\nwant:\n%s", strings.Join(v.Warnings, "\n"), strings.Join(want, "\n"))
+	}
+	if v.State != StateExited {
+		t.Fatalf("state %s", v.State)
+	}
+}
+
+func TestLoadNoWarningsAtCurrentOrOlderSchema(t *testing.T) {
+	setup(t)
+	boot, _ := proc.BootID()
+	dead := deadIdentity(t)
+	writeSession(t, "now", time.Now(), Status{SchemaVersion: SchemaVersion, State: StateExited, Monitor: &dead, BootID: boot},
+		&LauncherRecord{SchemaVersion: SchemaVersion, Launcher: "setsid", Monitor: &dead, BootID: boot})
+	v, err := Load("now", time.Second)
+	if err != nil || len(v.Warnings) != 0 {
+		t.Fatalf("%v %v", v.Warnings, err)
+	}
+}
