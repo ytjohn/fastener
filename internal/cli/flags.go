@@ -24,7 +24,8 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 }
 
 // parseArgs lets flags and positional arguments interleave
-// ("run claude --cwd x" and "run --cwd x claude" both work).
+// ("run claude --cwd x" and "run --cwd x claude" both work). A bare "--" ends
+// flag parsing: everything after it is positional, even if it starts with "-".
 func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	var pos []string
 	for {
@@ -35,9 +36,32 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 		if len(rest) == 0 {
 			return pos, nil
 		}
+		if consumed := len(args) - len(rest); consumed > 0 && args[consumed-1] == "--" && !isFlagValue(fs, args, consumed-1) {
+			return append(pos, rest...), nil
+		}
 		pos = append(pos, rest[0])
 		args = rest[1:]
 	}
+}
+
+// isFlagValue reports whether args[i] was consumed as the value of the value
+// flag at args[i-1] (as in "--cwd --") rather than as the "--" terminator.
+func isFlagValue(fs *flag.FlagSet, args []string, i int) bool {
+	if i == 0 {
+		return false
+	}
+	prev := args[i-1]
+	if !strings.HasPrefix(prev, "-") || strings.Contains(prev, "=") {
+		return false
+	}
+	f := fs.Lookup(strings.TrimLeft(prev, "-"))
+	if f == nil {
+		return false
+	}
+	if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+		return false
+	}
+	return true
 }
 
 func parseLabels(items []string) (map[string]string, error) {
