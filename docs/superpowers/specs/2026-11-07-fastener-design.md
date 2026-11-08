@@ -272,6 +272,7 @@ A profile is TOML describing how a backend's CLI is invoked.
 schema_version = 1
 name    = "claude"
 command = "claude"
+# default_permissions = "auto"   # optional; must be a level defined below
 
 [headless]
 args   = ["-p", "--output-format", "stream-json", "--verbose"]
@@ -314,14 +315,14 @@ url_pattern = 'https://claude\.ai/\S+'
 - **Template validation.** Every `[options]` template and `[resume].args` must be non-empty and contain its placeholder (`{value}`, `{conversation_id}`) exactly once; a placeholder anywhere else (headless args, permissions) is an error.
 - **No silent fallback.**
   - A requested permission level, option, mode or `--remote` that the profile does not define is a hard error before anything is created.
-  - The permission level comes from the `--permissions` flag if given, else the `default_permissions` config, else `auto`. An explicit `--permissions` must be a known level (`auto` or `skip`); anything else is a usage error (exit 2) for `run` and `check`.
+  - The permission level comes from the `--permissions` flag if given, else the `default_permissions` config, else the profile's own optional `default_permissions`, else `auto`. This holds for both `run` and `check`, and the resolved level is recorded in `session.json`. A profile's `default_permissions` must name a level that profile defines (validated at load). An explicit `--permissions` must be a known level (`auto` or `skip`); anything else is a usage error (exit 2) for `run` and `check`.
   - Fastener never substitutes the backend's default permissions or `skip`.
 - **Resolution:** `~/.config/fastener/backends/<name>.toml` (`$XDG_CONFIG_HOME`) **replaces** the embedded built-in of the same name entirely. There is no merging.
 - **Validation:** an unknown key, a missing required section or an unknown parser or finder name is an error, both at load time and in `fastener check --static`.
 - **Built-ins** (`profiles/*.toml`, embedded with `go:embed`): `claude`, `codex`, `pi`. Every flag in a built-in profile is verified against the real CLI by `fastener check` (the opt-in smoke tests, §12) before release; all three passed on the development machine.
   - **`claude`:** `-p --output-format stream-json --verbose`, prompt on stdin, parser `claude-stream-json`; `auto` is `--permission-mode auto`, `skip` is `--dangerously-skip-permissions`.
   - **`codex`:** `exec --json --skip-git-repo-check`, prompt on stdin, parser `none` until v0.2; `auto` is `--approve-for-me`, `skip` is `--dangerously-bypass-approvals-and-sandbox`. `--skip-git-repo-check` is there because Fastener sessions name their working directory explicitly and `check` runs in a temporary non-git directory.
-  - **`pi`:** `-p --mode text`, prompt as an argument, parser `none`. Pi has no permission system, so the profile defines only `skip`; Pi sessions need `--permissions skip`, and `auto` is a hard error rather than a silent fallback.
+  - **`pi`:** `-p --mode json`, prompt as an argument, parser `pi-json`. Pi has no permission system, so the profile defines only `skip` and sets `default_permissions = "skip"`: Pi sessions get `skip` without a flag (unless the config's `default_permissions` names another level). An explicit `--permissions auto` is still a hard error rather than a silent fallback. Pi exits 0 and only warns on stderr when a provider does not offer the requested model; a diagnose entry turns that warning into a hint.
 - **Adding a backend** means writing a TOML file. Adding a *built-in* backend is a PR containing the profile plus a recorded-output test fixture. If the backend needs a new output format, the PR also adds a parser.
 
 ### 6.1 `fastener check`: proving a backend works
@@ -333,11 +334,11 @@ url_pattern = 'https://claude\.ai/\S+'
   - `--max-runtime 2m`;
   - `--cwd` is a fresh temporary directory, removed afterwards;
   - label `fastener.check=true`;
-  - permissions resolved exactly as for `run`.
+  - permissions resolved exactly as for `run` (so `check pi` uses Pi's profile default, `skip`).
 - **Options:** the same as `run` (`--model`, `--permissions`, `--env-file`, `--env`, `--cwd`, `--launcher`, `--max-runtime`). So `fastener check pi --model X` tests that exact combination.
 - **Other flags:**
   - `--keep` keeps the session for inspection; by default it is removed after the check.
-  - `--all` checks every resolvable backend. Under `--all`, a backend whose profile does not define the resolved permission level (the flag, else config, else `auto`) is a skip, not a failure: one `profile` step with status `skip`, and `skipped: true` in JSON. `--all` exits 0 when every non-skipped backend passed. `--all` requires at least one checked backend: if every backend is skipped, or none exists, it exits 1. An explicit `check <backend>` for an undefined level still fails at the `profile` step, and an explicit `--permissions` outside `auto|skip` is a usage error (exit 2) for `run` and `check`.
+  - `--all` checks every resolvable backend. Under `--all`, a backend whose profile does not define the resolved permission level (the flag, else config, else the profile's `default_permissions`, else `auto`) is a skip, not a failure: one `profile` step with status `skip`, and `skipped: true` in JSON. `--all` exits 0 when every non-skipped backend passed. `--all` requires at least one checked backend: if every backend is skipped, or none exists, it exits 1. An explicit `check <backend>` for an undefined level still fails at the `profile` step, and an explicit `--permissions` outside `auto|skip` is a usage error (exit 2) for `run` and `check`.
   - `--static` skips the model call.
   - `--json` gives the step-by-step result.
 
@@ -478,7 +479,7 @@ fastener install-restore
   - There is no `--rm`-on-exit flag, because it would race callers reading results.
 - **Config:** `~/.config/fastener/config.toml` holds:
   - `retention`
-  - `default_permissions` (must be a level defined by each profile used)
+  - `default_permissions` (must be a level defined by each profile used; it overrides every profile's own `default_permissions`)
   - `handshake_timeout`
   - `launcher` (`auto` | `systemd` | `setsid`)
   - `env_passthrough`

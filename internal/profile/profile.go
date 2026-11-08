@@ -9,6 +9,10 @@
 // check.version_args is optional; when it is empty, check's binary step only
 // verifies that the command can be looked up.
 //
+// default_permissions is optional; when set it must name a level the profile
+// defines, and it applies only when neither --permissions nor the config's
+// default_permissions is given (see ResolvePermissions).
+//
 // Names lists every *.toml file it finds, including broken ones, so that
 // `check --all` surfaces them rather than hiding them.
 package profile
@@ -55,14 +59,17 @@ var commandRE = regexp.MustCompile(`^[A-Za-z0-9._+][A-Za-z0-9._+-]*$`)
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 
 type Profile struct {
-	SchemaVersion int                 `toml:"schema_version"`
-	Name          string              `toml:"name"`
-	Command       string              `toml:"command"`
-	Headless      Headless            `toml:"headless"`
-	Options       map[string][]string `toml:"options"`
-	Permissions   map[string][]string `toml:"permissions"`
-	Resume        *Resume             `toml:"resume"`
-	Check         Check               `toml:"check"`
+	SchemaVersion int    `toml:"schema_version"`
+	Name          string `toml:"name"`
+	Command       string `toml:"command"`
+	// DefaultPermissions is the level used when neither the flag nor the
+	// config names one. It must be a level this profile defines.
+	DefaultPermissions string              `toml:"default_permissions"`
+	Headless           Headless            `toml:"headless"`
+	Options            map[string][]string `toml:"options"`
+	Permissions        map[string][]string `toml:"permissions"`
+	Resume             *Resume             `toml:"resume"`
+	Check              Check               `toml:"check"`
 
 	Source string `toml:"-"` // "builtin" or the file path
 	SHA256 string `toml:"-"` // of the file's bytes
@@ -165,6 +172,11 @@ func (p *Profile) validate() error {
 			return fmt.Errorf("permissions.%s: unknown level (known: auto, skip)", lvl)
 		}
 	}
+	if d := p.DefaultPermissions; d != "" {
+		if _, ok := p.Permissions[d]; !ok {
+			return fmt.Errorf("default_permissions %q is not a level this profile defines (defined: %s)", d, strings.Join(p.Levels(), ", "))
+		}
+	}
 	for opt := range p.Options {
 		if !options[opt] {
 			return fmt.Errorf("options.%s: unknown option (known: model)", opt)
@@ -182,6 +194,19 @@ func (p *Profile) validate() error {
 		}
 	}
 	return nil
+}
+
+// ResolvePermissions picks the permission level for a run: the --permissions
+// flag, else the config's default_permissions, else the profile's
+// default_permissions, else "auto". The result may still be undefined for this
+// profile; RenderHeadless rejects it then.
+func (p *Profile) ResolvePermissions(flag, configDefault string) string {
+	for _, l := range []string{flag, configDefault, p.DefaultPermissions} {
+		if l != "" {
+			return l
+		}
+	}
+	return "auto"
 }
 
 // Levels lists the permission levels a profile defines, sorted.

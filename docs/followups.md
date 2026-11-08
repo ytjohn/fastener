@@ -36,7 +36,6 @@ Deferred work after v0.1, grouped by area. Each item is one line plus the reason
 ## Parsers
 
 - Add `codex-jsonl`. Event shape captured 2026-11-07: `thread.started` carries `thread_id`; an `item.completed` event whose item is an `agent_message` carries the text; `turn.completed` carries usage. The built-in profile uses `parser = "none"` until then.
-- Pi's output is plain text (`--mode text`): consider `--mode json` and a Pi parser to get a conversation ID and usage.
 - Pi may treat a prompt starting with `@` as a file include: unverified, so check whether the prompt needs escaping.
 - Add more `diagnose` patterns as new failures are seen: they are data, one profile PR each.
 

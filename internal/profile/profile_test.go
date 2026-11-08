@@ -76,6 +76,8 @@ func TestValidationErrors(t *testing.T) {
 		{"relative command", strings.Replace(base, `command = "x"`, `command = "bin/agent"`, 1), "command"},
 		{"command with space", strings.Replace(base, `command = "x"`, `command = "/opt/my agent"`, 1), "whitespace"},
 		{"command leading dash", strings.Replace(base, `command = "x"`, `command = "-x"`, 1), "command"},
+		{"default level undefined", "default_permissions = \"skip\"\n" + base, "default_permissions"},
+		{"default level unknown", "default_permissions = \"yolo\"\n" + base, "default_permissions"},
 	}
 	for _, c := range cases {
 		_, err := Parse([]byte(c.src))
@@ -259,4 +261,73 @@ func TestNoLevelErrorMessageOnce(t *testing.T) {
 	if strings.Contains(err.Error(), ErrNoPermissionLevel.Error()) {
 		t.Errorf("sentinel text leaks into the message: %v", err)
 	}
+}
+
+func TestDefaultPermissionsValid(t *testing.T) {
+	p, err := Parse([]byte("default_permissions = \"auto\"\n" + baseTOML))
+	if err != nil || p.DefaultPermissions != "auto" {
+		t.Fatalf("p = %+v, err = %v", p, err)
+	}
+}
+
+func TestResolvePermissionsPrecedence(t *testing.T) {
+	withDefault := &Profile{DefaultPermissions: "skip"}
+	without := &Profile{}
+	cases := []struct {
+		name            string
+		p               *Profile
+		flag, cfg, want string
+	}{
+		{"flag beats all", withDefault, "auto", "skip", "auto"},
+		{"config beats profile", withDefault, "", "auto", "auto"},
+		{"profile default", withDefault, "", "", "skip"},
+		{"auto last", without, "", "", "auto"},
+		{"config without profile default", without, "", "skip", "skip"},
+		{"flag without profile default", without, "skip", "", "skip"},
+	}
+	for _, c := range cases {
+		if got := c.p.ResolvePermissions(c.flag, c.cfg); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestPiRendersJSONWithDefaultSkip(t *testing.T) {
+	pi, err := Load("pi", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	level := pi.ResolvePermissions("", "")
+	if level != "skip" {
+		t.Fatalf("pi default level = %q, want skip", level)
+	}
+	r, err := pi.RenderHeadless(Request{Permissions: level, Model: "github-copilot/claude-haiku-4.5", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-p", "--mode", "json", "--model", "github-copilot/claude-haiku-4.5", "--", "hi"}
+	if !reflect.DeepEqual(r.Args, want) || r.Parser != "pi-json" || r.PromptMode != "arg" {
+		t.Fatalf("render = %+v", r)
+	}
+	// An explicit auto still errors: no silent fallback.
+	if _, err := pi.RenderHeadless(Request{Permissions: pi.ResolvePermissions("auto", ""), Prompt: "hi"}); !errors.Is(err, ErrNoPermissionLevel) {
+		t.Fatalf("explicit auto: %v", err)
+	}
+}
+
+func TestPiModelNotFoundHint(t *testing.T) {
+	pi, err := Load("pi", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := `Warning: Model "claude-nonexistent-9" not found for provider "github-copilot". Using custom model id.`
+	for _, d := range pi.Check.Diagnose {
+		if regexp.MustCompile(d.Match).MatchString(line) {
+			if !strings.Contains(d.Hint, "not offered") {
+				t.Fatalf("first matching hint is %q", d.Hint)
+			}
+			return
+		}
+	}
+	t.Fatal("no pattern matches pi's model-not-found warning")
 }

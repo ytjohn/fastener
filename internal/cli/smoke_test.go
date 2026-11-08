@@ -23,7 +23,7 @@ func TestSmokeBuiltins(t *testing.T) {
 	}{
 		{"claude", "claude", nil},
 		{"codex", "codex", nil},
-		{"pi", "pi", []string{"--permissions", "skip"}},
+		{"pi", "pi", nil}, // the profile defaults to skip
 	} {
 		t.Run(b.name, func(t *testing.T) {
 			if _, err := exec.LookPath(b.bin); err != nil {

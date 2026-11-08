@@ -329,3 +329,63 @@ func TestCheckStaticValidatesLauncher(t *testing.T) {
 		t.Fatalf("code %d: %+v", code, r)
 	}
 }
+
+// skipDefaultProfile defines only "skip" and makes it the profile's default.
+func skipDefaultProfile(name string) string {
+	return fmt.Sprintf("schema_version = 1\nname = %q\ncommand = %q\ndefault_permissions = \"skip\"\n[headless]\nargs = []\nprompt = \"stdin\"\nparser = \"claude-stream-json\"\n[permissions]\nskip = []\n", name, fakeBin)
+}
+
+func TestProfileDefaultPermissions(t *testing.T) {
+	h := newHarness(t)
+	h.writeProfile("skipdef", skipDefaultProfile("skipdef"))
+	h.ok("run", "skipdef", "--name", "d1", "--cwd", h.work, "--prompt", "x")
+	var v struct {
+		Session struct {
+			Permissions string `json:"permissions"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal([]byte(h.ok("inspect", "d1", "--json")), &v); err != nil || v.Session.Permissions != "skip" {
+		t.Fatalf("session permissions = %q (%v)", v.Session.Permissions, err)
+	}
+	// An explicit --permissions auto still errors.
+	if _, errOut, code := h.cmd("run", "skipdef", "--cwd", h.work, "--prompt", "x", "--permissions", "auto"); code != 1 || !strings.Contains(errOut, `permission level "auto"`) {
+		t.Fatalf("explicit auto: code %d: %s", code, errOut)
+	}
+	r, code := h.check("skipdef", "--static")
+	if code != 0 || !strings.Contains(stepDetail(r[0], "profile"), "permissions=skip") {
+		t.Fatalf("check: code %d %+v", code, r)
+	}
+	// The config's default_permissions beats the profile's.
+	if err := os.WriteFile(filepath.Join(h.config, "config.toml"), []byte("default_permissions = \"auto\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, errOut, code := h.cmd("run", "skipdef", "--cwd", h.work, "--prompt", "x"); code != 1 || !strings.Contains(errOut, `permission level "auto"`) {
+		t.Fatalf("config auto: code %d: %s", code, errOut)
+	}
+	if r, code := h.check("skipdef", "--static"); code != 1 || r[0].Skipped {
+		t.Fatalf("check with config auto: code %d %+v", code, r)
+	}
+	// And the flag beats the config.
+	if r, code := h.check("skipdef", "--static", "--permissions", "skip"); code != 0 {
+		t.Fatalf("flag skip: code %d %+v", code, r)
+	}
+}
+
+func TestCheckAllChecksBackendWithDefaultLevel(t *testing.T) {
+	h := newHarness(t)
+	h.writeBuiltinStandIns()
+	h.writeProfile("pi", skipDefaultProfile("pi"))
+	r, code := h.check("--all", "--static")
+	if code != 0 {
+		t.Fatalf("exit %d: %+v", code, r)
+	}
+	for _, rep := range r {
+		if rep.Backend == "pi" {
+			if rep.Skipped || !rep.Passed {
+				t.Fatalf("pi skipped or failed: %+v", rep)
+			}
+			return
+		}
+	}
+	t.Fatal("pi missing from --all")
+}

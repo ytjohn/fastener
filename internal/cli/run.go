@@ -15,7 +15,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.Cwd, "cwd", "", "working directory for the agent (required)")
 	fs.StringVar(&o.Prompt, "prompt", "", "prompt text")
 	fs.StringVar(&o.PromptFile, "prompt-file", "", "read the prompt from a file (copied at launch)")
-	fs.StringVar(&o.Permissions, "permissions", "", "permission level: auto|skip (default: config, else auto)")
+	fs.StringVar(&o.Permissions, "permissions", "", "permission level: auto|skip (default: config, else the profile's default, else auto)")
 	fs.StringVar(&o.Model, "model", "", "model passed to the backend")
 	fs.StringVar(&o.EnvFile, "env-file", "", "KEY=VALUE file read by the monitor (use for secrets)")
 	fs.StringVar(&o.Launcher, "launcher", "", "auto|setsid|systemd (default: config)")

@@ -38,9 +38,11 @@ Backends are TOML profiles: `fastener backends` lists them. Add your own in
 `~/.config/fastener/backends/<name>.toml`; a file there replaces the built-in of
 the same name.
 
-Pi has no permission system, so Pi sessions need `--permissions skip`. `check --all --static`
-skips backends that do not define the current permission level (Pi, unless you pass
-`--permissions skip`); at least one backend must actually be checked.
+The permission level is `--permissions`, else the config's `default_permissions`, else
+the profile's own `default_permissions`, else `auto`. Pi has no permission system, so its
+profile defines only `skip` and makes it the default; `--permissions auto` on Pi is an
+error. `check --all` skips backends that do not define the resolved level; at least one
+backend must actually be checked.
 
 State lives under `~/.local/state/fastener` and config under `~/.config/fastener`;
 `FASTENER_STATE_DIR` and `FASTENER_CONFIG_DIR` override them.

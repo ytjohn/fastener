@@ -63,13 +63,7 @@ func prepare(o launchOptions, prompt string) (*prepared, error) {
 	if err != nil {
 		return nil, inStep("profile", err)
 	}
-	perms := o.Permissions
-	if perms == "" {
-		perms = cfg.DefaultPermissions
-	}
-	if perms == "" {
-		perms = "auto"
-	}
+	perms := prof.ResolvePermissions(o.Permissions, cfg.DefaultPermissions)
 	r, err := prof.RenderHeadless(profile.Request{Permissions: perms, Model: o.Model, Prompt: prompt})
 	if err != nil {
 		return nil, inStep("profile", err)

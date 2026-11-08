@@ -56,7 +56,7 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&keep, "keep", false, "keep the check session for inspection")
 	fs.BoolVar(&asJSON, "json", false, "print JSON")
 	fs.StringVar(&o.Cwd, "cwd", "", "working directory (default: a fresh temporary directory)")
-	fs.StringVar(&o.Permissions, "permissions", "", "permission level (default: config, else auto)")
+	fs.StringVar(&o.Permissions, "permissions", "", "permission level (default: config, else the profile's default, else auto)")
 	fs.StringVar(&o.Model, "model", "", "model passed to the backend")
 	fs.StringVar(&o.EnvFile, "env-file", "", "KEY=VALUE file for the agent")
 	fs.StringVar(&o.Launcher, "launcher", "", "auto|setsid|systemd")
@@ -152,13 +152,13 @@ func runCheck(o launchOptions, opts checkOpts, stderr io.Writer) (r checkReport)
 		}
 		r.unknown = errors.Is(err, profile.ErrUnknownBackend)
 		if opts.all && errors.Is(err, profile.ErrNoPermissionLevel) {
-			// Not a failure under --all: the level was never requested for this backend.
+			// Not a failure under --all: the level was never requested for this
+			// backend. prepare got this far, so the config and profile load.
 			level := o.Permissions
-			if cfg, cerr := config.Load(); level == "" && cerr == nil {
-				level = cfg.DefaultPermissions
-			}
-			if level == "" {
-				level = "auto"
+			cfg, cerr := config.Load()
+			prof, perr := profile.Load(o.Backend, config.BackendsDir())
+			if cerr == nil && perr == nil {
+				level = prof.ResolvePermissions(o.Permissions, cfg.DefaultPermissions)
 			}
 			r.Skipped = true
 			r.add("profile", stepSkip, fmt.Sprintf("does not define permission level %s; pass --permissions to check it", level), "")
