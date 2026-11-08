@@ -160,8 +160,14 @@ func cmdPs(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("ps", stderr)
 	all := fs.Bool("all", false, "include everything retained, not just recent")
 	asJSON := fs.Bool("json", false, "print JSON")
+	var filterArgs multiFlag
+	fs.Var(&filterArgs, "filter", "keep sessions matching KEY=VALUE (label=K[=V], state=S, backend=B, name=GLOB); repeatable, ANDed")
 	if _, err := parseArgs(fs, args); err != nil {
 		return parseFail(err)
+	}
+	filters, err := parsePsFilters(filterArgs)
+	if err != nil {
+		return fail(stderr, err)
 	}
 	names, err := session.Names()
 	if err != nil {
@@ -185,11 +191,14 @@ func cmdPs(args []string, stdout, stderr io.Writer) int {
 		if !*all && !recent {
 			continue
 		}
-		rows = append(rows, psRow{
+		row := psRow{
 			Name: n, Backend: v.Session.Backend, State: v.State, CreatedAt: v.Session.CreatedAt,
 			EndedAt: v.Status.EndedAt, EndedBy: v.Status.EndedBy, ExitCode: v.Status.ExitCode,
 			Labels: v.Session.Labels,
-		})
+		}
+		if matchAll(filters, row) {
+			rows = append(rows, row)
+		}
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].CreatedAt.After(rows[j].CreatedAt) })
 	if *asJSON {

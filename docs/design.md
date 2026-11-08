@@ -448,7 +448,7 @@ Designed now so that v1's state layout and monitor need no rework; built after v
 fastener run <backend> [--name N] --cwd DIR (--prompt TEXT | --prompt-file F)
              [--permissions auto|skip] [--model M] [--max-runtime D] [--grace D]
              [--env-file F] [--env K=V]... [--label K=V]... [--follow] [--json]
-fastener ps [--all] [--filter label=K=V | state=S | backend=B]... [--json]   # --filter: v0.2
+fastener ps [--all] [--filter label=K[=V] | state=S | backend=B | name=GLOB]... [--json]
 fastener inspect <name> [--json]
 fastener logs <name> [-f] [--stderr] [--generation N]   # --generation: phase B
 fastener wait <name> [--timeout D]
@@ -471,12 +471,19 @@ fastener install-restore
   - `--follow` follows the logs after launch, then exits with the code `wait` would report for the session (the agent's exit code, 128+N for a signal, 125 for an abnormal end, including a session removed while following). (This is not `attach`, which is the phase B pty command.)
   - `--prompt` and `--prompt-file` are mutually exclusive. One is required for headless runs, and `--cwd` is required.
   - `--prompt-file -` reads the prompt from stdin. A prompt (from a file or stdin) larger than 4 MiB is a usage error (exit 2) naming the limit, and `--prompt-file` accepts regular files and pipes (a FIFO, or process substitution such as `<(cmd)`; reading blocks until a writer appears) but rejects devices such as `/dev/zero`, directories and sockets before opening them.
-  - Labels are stored in v0.1 (`check` uses `fastener.check=true`); filtering by them is v0.2.
+  - Labels are stored (`check` uses `fastener.check=true`) and can be filtered on with `ps --filter label=K=V`.
   - `--launcher systemd` is a clear error in v0.1.
 - **`ps`:**
   - Shows `running`, `starting` and `lost` sessions plus anything that ended in the last 24 h.
   - `--all` shows everything retained.
-  - Filters (v0.2) are ANDed together.
+  - `--filter KEY=VALUE` is repeatable; filters are ANDed. Keys:
+    - `label=K=V`: the session has label K with value V. `label=K` (no `=V`) matches any session that has label K, whatever its value.
+    - `state=S`: the effective state; S is one of `starting`, `running`, `exited`, `lost`, `restore-failed`.
+    - `backend=B`: the backend name.
+    - `name=GLOB`: a shell glob (Go `path.Match`) on the session name, e.g. `name=bd-12-a*`.
+  - An unknown key, a malformed filter or an unknown state is a usage error (exit 2) that lists the valid keys or states.
+  - Filters apply on top of the time window, never instead of it. `ps --filter state=exited` still shows only sessions that ended in the last 24 h; add `--all` to search everything retained.
+  - `--json` is unchanged in shape and holds only the matching rows (`[]` when none match; exit 0).
   - It loads sessions without the orphan scan, so it reports no orphan counts; `inspect` does.
 - **`wait`:**
   - Exits with the agent's exit code.
@@ -555,11 +562,11 @@ docs/                  json-schema.md, design specs
   - an old state fixture read by the new CLI (deferred to v0.2);
   - prune and retention (deferred to v0.2, with the feature);
   - `wait` exit codes;
-  - label filtering (deferred to v0.2, with the feature).
+  - label filtering (shipped as `ps --filter`).
 - **Live smoke** (opt-in, `FASTENER_SMOKE=1`; costs model calls): runs `fastener check --all --json` and requires every built-in backend to pass. This is the release check that built-in flags are correct. There is no separate smoke-test logic.
 - **`check` itself** is tested against the fake agent: a passing reply, a wrong reply, `agent_error`, a timeout (built-in hint), a `diagnose` pattern match in `stderr.log`, and a missing binary.
 - **CI:** Linux and macOS runners; `go vet`, `go test -race`. The macOS job is `continue-on-error` in v0.1 because its lifecycle tests have never run there. `staticcheck` is not wired in yet.
-- **Deferred to v0.2:** concurrent `stop`/`rm` through the CLI (`Finalize` has a unit test), `--grace` clamping in systemd mode, schema fixtures per release, and prune/retention and label filtering (those features are v0.2).
+- **Deferred to v0.2:** concurrent `stop`/`rm` through the CLI (`Finalize` has a unit test), `--grace` clamping in systemd mode, schema fixtures per release, and prune/retention (those features are v0.2).
 
 ## 13. Milestones
 
@@ -574,7 +581,7 @@ docs/                  json-schema.md, design specs
 2. **v0.2:**
    - systemd launcher;
    - `codex-jsonl` parser and a Pi JSON parser (after capturing real output);
-   - `ps --filter`, prune and retention;
+   - prune and retention;
    - more `diagnose` patterns;
    - macOS hardening (see `docs/followups.md`).
 3. **v0.3, phase B:** pty monitor, `attach`, `--remote`, conversation finders, `restore`, `install-restore`.

@@ -16,6 +16,7 @@ go install github.com/ytjohn/fastener/cmd/fastener@latest
 fastener check pi --model github-copilot/claude-haiku-4.5   # prove the backend works and served that model
 fastener run claude --cwd ~/proj --prompt "Summarize README.md" --max-runtime 10m
 fastener ps
+fastener ps --filter label=bead=factotum-abc --json   # filters: label=K[=V], state=S, backend=B, name=GLOB; repeatable, ANDed
 fastener wait <name>; fastener inspect <name>
 ```
 
