@@ -63,7 +63,7 @@ While a session runs, parser fields are flushed about once a second and always a
 
 ## `ps --json`
 
-An array (never null) of `{name, backend, state, created_at, ended_at?, ended_by?, exit_code?, labels?}`, newest first. Without `--all`, `ps` lists running, starting and lost sessions plus those that ended in the last 24 hours. `ps` does not scan for orphans (too costly across many sessions) and has no orphans field; use `inspect` for that. A session that cannot be read is skipped with a warning on stderr. A session whose files have a newer `schema_version` than this fastener understands is listed, with one `fastener: warning: <name>: …` line on stderr (the same text as `inspect`'s `warnings`).
+An array (never null) of `{name, backend, state, created_at, ended_at?, ended_by?, exit_code?, labels?}`, newest first. Without `--all`, `ps` lists running, starting and lost sessions plus those that ended in the last 24 hours. `ps` does not scan for orphans (too costly across many sessions) and has no orphans field; use `inspect` for that. `--filter KEY=VALUE` (repeatable, ANDed; see design §10) keeps only matching rows after the window is applied; the shape is unchanged and no match gives `[]`. A session that cannot be read is skipped with a warning on stderr. A session whose files have a newer `schema_version` than this fastener understands is listed, with one `fastener: warning: <name>: …` line on stderr (the same text as `inspect`'s `warnings`).
 
 ## `check --json`
 
