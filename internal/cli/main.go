@@ -32,6 +32,7 @@ commands:
   wait <name>        wait for a session to end; exit with its code
   stop <name>        stop a session
   rm <name>          remove a session's state
+  prune              remove old ended sessions
   check <backend>    prove a backend works end to end
   backends           list backend profiles
   version            print the version
@@ -64,6 +65,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return cmdStop(rest, stdout, stderr)
 	case "rm":
 		return cmdRm(rest, stdout, stderr)
+	case "prune":
+		return cmdPrune(rest, stdout, stderr)
 	case "check":
 		return cmdCheck(rest, stdout, stderr)
 	case "backends":

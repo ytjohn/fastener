@@ -432,3 +432,46 @@ func TestRunUnknownParserIsLaunchFailed(t *testing.T) {
 		t.Fatalf("ended_by=%s err=%q agent=%v", st.EndedBy, st.Error, st.Agent)
 	}
 }
+
+func TestFinalWriteIsRetried(t *testing.T) {
+	m := newTestMonitor(t)
+	m.retryDelay = time.Millisecond
+	fails := 3
+	m.writeStatus = func(path string, v any) error {
+		if fails > 0 {
+			fails--
+			return fmt.Errorf("injected failure")
+		}
+		return session.WriteJSON(path, v)
+	}
+	m.finish(session.EndedByExit, nil)
+	var st session.Status
+	if err := session.ReadJSON(m.d.StatusPath(), &st); err != nil || st.State != session.StateExited {
+		t.Fatalf("final snapshot not written after retries: %+v %v", st, err)
+	}
+	if !m.closed {
+		t.Fatal("not closed after a successful final write")
+	}
+}
+
+func TestFinalWriteGivesUpAfterRetries(t *testing.T) {
+	m := newTestMonitor(t)
+	m.retryDelay = time.Millisecond
+	calls := 0
+	m.writeStatus = func(string, any) error { calls++; return fmt.Errorf("always") }
+	m.finish(session.EndedByExit, nil)
+	if calls != finalWriteAttempts || !m.closed {
+		t.Fatalf("calls %d closed %v", calls, m.closed)
+	}
+}
+
+func TestNonFinalWriteIsNotRetried(t *testing.T) {
+	m := newTestMonitor(t)
+	m.retryDelay = time.Millisecond
+	calls := 0
+	m.writeStatus = func(string, any) error { calls++; return fmt.Errorf("always") }
+	m.update(func(s *session.Status) { s.State = session.StateRunning })
+	if calls != 1 || m.closed {
+		t.Fatalf("calls %d closed %v", calls, m.closed)
+	}
+}

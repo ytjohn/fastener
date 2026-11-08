@@ -26,6 +26,11 @@ type View struct {
 	// LivenessError is why the monitor's liveness could not be determined
 	// (it is then assumed alive). Empty unless State is running or starting.
 	LivenessError string
+	// OrphanErr is why the orphan scan could not be trusted (no readable plan,
+	// or the process scan failed) for a session that needed one. Empty
+	// otherwise. Callers that delete must treat a non-empty value as "unknown",
+	// not as "no orphans".
+	OrphanErr string
 }
 
 // warnNewer records a warning when a file's schema_version is newer than this
@@ -51,6 +56,12 @@ func Load(name string, handshake time.Duration) (*View, error) {
 	if d == "" {
 		return nil, ErrNoStateDir
 	}
+	return LoadAt(d, name, handshake)
+}
+
+// LoadAt is Load for an explicit directory, e.g. a tombstone the prune path
+// has renamed a session to. name is only used for messages and the stub.
+func LoadAt(d Dir, name string, handshake time.Duration) (*View, error) {
 	fi, err := os.Stat(string(d))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, name)
@@ -127,9 +138,21 @@ func LoadFull(name string, handshake time.Duration) (*View, error) {
 // are tracked, never killed implicitly). It is a no-op for other states, and
 // for exited sessions that never spawned an agent.
 func (v *View) FindOrphans() {
+	v.OrphanErr = ""
 	scan := v.State == StateLost || (v.State == StateExited && v.Status.PGID > 0)
-	if scan && v.Plan != nil {
-		v.Orphans, _ = proc.FindMarked(v.Status.PGID, v.Plan.Marker, v.Status.BootID)
+	if !scan {
+		return
+	}
+	if v.Plan == nil {
+		if v.Status.PGID > 0 {
+			v.OrphanErr = "no readable plan for the current generation"
+		}
+		return
+	}
+	ids, err := proc.FindMarked(v.Status.PGID, v.Plan.Marker, v.Status.BootID)
+	v.Orphans = ids
+	if err != nil {
+		v.OrphanErr = "process scan failed: " + err.Error()
 	}
 }
 

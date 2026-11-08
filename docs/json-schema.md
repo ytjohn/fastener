@@ -65,6 +65,10 @@ While a session runs, parser fields are flushed about once a second and always a
 
 An array (never null) of `{name, backend, state, created_at, ended_at?, ended_by?, exit_code?, labels?}`, newest first. Without `--all`, `ps` lists running, starting and lost sessions plus those that ended in the last 24 hours. `ps` does not scan for orphans (too costly across many sessions) and has no orphans field; use `inspect` for that. `--filter KEY=VALUE` (repeatable, ANDed; see design §10) keeps only matching rows after the window is applied; the shape is unchanged and no match gives `[]`. A session that cannot be read is skipped with a warning on stderr. A session whose files have a newer `schema_version` than this fastener understands is listed, with one `fastener: warning: <name>: …` line on stderr (the same text as `inspect`'s `warnings`).
 
+## `prune --json`
+
+`{removed, kept}`: `removed` is an array (never null) of session names deleted, or, with `--dry-run`, that would be; `kept` is an array (never null) of `{name, reason}` for sessions old enough to prune that were kept, where `reason` is `lost`, `orphans`, `pinned` or `unknown` (the leftover-process scan was not possible). Sessions that are not old enough, or are alive, appear in neither. If a removal fails, a `failed` array of `{name, error}` is added and the exit code is 1. Opportunistic pruning by `run` and `ps` prints nothing.
+
 ## `check --json`
 
 An array, one entry per backend checked: `{backend, passed, session?, skipped?, steps: [{name, status, detail?, hint?}]}`.
