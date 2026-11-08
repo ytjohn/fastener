@@ -85,7 +85,7 @@ An array of `{name, source, sha256, command, parser, permissions}`, or `{name, e
   - the agent's exit code;
   - 128+N if the agent was killed by signal N;
   - 124 if `--timeout` elapsed;
-  - 125 for `launch-failed`, `lost` or `restore-failed`, and for an exited session with neither an exit code nor a known signal;
+  - 125 for `launch-failed`, `lost` or `restore-failed`, for an exited session with neither an exit code nor a known signal, and for an agent that exited 0 while status `agent_error` is true (Pi's json mode exits 0 on a model error); a non-zero exit code is returned as is;
   - 127 for an unknown session, including one removed while `wait` was running.
 - **Other commands:**
   - 0 for success;

@@ -32,7 +32,8 @@ fastener check --all --static           # profile and binary checks for every ba
 Add `--json` to `run`, `inspect`, `ps`, `backends`, `check` and `version` for
 machine-readable output (see `docs/json-schema.md`). `wait` exits with the
 agent's exit code (124 on `--timeout`, 125 if the session was lost or failed to
-launch, 127 for an unknown session).
+launch, or if the agent exited 0 but reported an error, as Pi does on a model
+error; 127 for an unknown session).
 
 Backends are TOML profiles: `fastener backends` lists them. Add your own in
 `~/.config/fastener/backends/<name>.toml`; a file there replaces the built-in of

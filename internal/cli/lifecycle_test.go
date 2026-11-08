@@ -176,6 +176,17 @@ func TestWaitCodes(t *testing.T) {
 	if _, _, code := h.cmd("wait", "crash", "--timeout", "10s"); code != 128+9 {
 		t.Fatalf("crash code %d, want 137", code)
 	}
+	// Exit 0 with agent_error (pi's json mode on a model error) is abnormal.
+	h.start("agenterr", []string{"FAKE_IS_ERROR=1", "FAKE_EXIT=0"})
+	_, errOut, code := h.cmd("wait", "agenterr", "--timeout", "10s")
+	if code != 125 || !strings.Contains(errOut, "agent reported an error") {
+		t.Fatalf("agent error code %d, want 125 (%s)", code, errOut)
+	}
+	// A non-zero exit keeps its own code even with agent_error.
+	h.start("agenterr3", []string{"FAKE_IS_ERROR=1", "FAKE_EXIT=3"})
+	if _, _, code := h.cmd("wait", "agenterr3", "--timeout", "10s"); code != 3 {
+		t.Fatalf("agent error with exit 3: code %d", code)
+	}
 }
 
 func TestRmRefusesAliveUnlessForce(t *testing.T) {

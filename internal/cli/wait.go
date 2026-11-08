@@ -33,7 +33,11 @@ func cmdWait(args []string, stdout, stderr io.Writer) int {
 		}
 		switch v.State {
 		case session.StateExited:
-			return exitCodeOf(v.Status)
+			code := exitCodeOf(v.Status)
+			if code == exitAbnormal && v.Status.ExitCode != nil && *v.Status.ExitCode == 0 {
+				fmt.Fprintf(stderr, "fastener: session %s: agent reported an error (exit code 0)\n", name)
+			}
+			return code
 		case session.StateLost, session.StateRestoreFailed:
 			fmt.Fprintf(stderr, "fastener: session %s is %s\n", name, v.State)
 			return exitAbnormal
@@ -57,6 +61,11 @@ func exitCodeOf(s session.Status) int {
 		return exitAbnormal
 	}
 	if s.ExitCode != nil {
+		// Some agents (pi's json mode) exit 0 after a failed model call; only
+		// the parser's agent_error tells. Report that as abnormal, not success.
+		if *s.ExitCode == 0 && s.AgentError != nil && *s.AgentError {
+			return exitAbnormal
+		}
 		return *s.ExitCode
 	}
 	return exitAbnormal
