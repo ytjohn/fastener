@@ -374,7 +374,7 @@ func TestProfileDefaultPermissions(t *testing.T) {
 		t.Fatalf("check: code %d %+v", code, r)
 	}
 	// The config's default_permissions beats the profile's.
-	if err := os.WriteFile(filepath.Join(h.config, "config.toml"), []byte("default_permissions = \"auto\"\n"), 0o600); err != nil {
+	if err := h.writeConfig("default_permissions = \"auto\"\n"); err != nil {
 		t.Fatal(err)
 	}
 	if _, errOut, code := h.cmd("run", "skipdef", "--cwd", h.work, "--prompt", "x"); code != 1 || !strings.Contains(errOut, `permission level "auto"`) {

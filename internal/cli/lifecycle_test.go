@@ -405,7 +405,7 @@ func TestRunJSONWithFollowIsUsageError(t *testing.T) {
 
 func TestHandshakeTimeoutStopsTheSession(t *testing.T) {
 	h := newHarness(t)
-	if err := os.WriteFile(filepath.Join(h.config, "config.toml"), []byte("handshake_timeout = \"1ns\"\n"), 0o600); err != nil {
+	if err := h.writeConfig("handshake_timeout = \"1ns\"\n"); err != nil {
 		t.Fatal(err)
 	}
 	args := []string{"run", "fake", "--name", "slowstart", "--cwd", h.work, "--prompt", "x", "--env", "FAKE_SLEEP=60s"}

@@ -78,6 +78,18 @@ type Session struct {
 	Remote        bool              `json:"remote"`
 }
 
+// DefaultGrace is the stop grace for a session that recorded none.
+const DefaultGrace = 10 * time.Second
+
+// EffectiveGrace is the session's grace, else DefaultGrace. Both stop and the
+// systemd launcher's unit timers use it.
+func (s Session) EffectiveGrace() time.Duration {
+	if g := time.Duration(s.Grace); g > 0 {
+		return g
+	}
+	return DefaultGrace
+}
+
 // Plan is one generation's launch plan, written before the monitor starts.
 // The monitor reads only this and never opens the profile.
 type Plan struct {
