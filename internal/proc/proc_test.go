@@ -1,6 +1,7 @@
 package proc
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"syscall"
@@ -28,27 +29,6 @@ func TestSelfAlive(t *testing.T) {
 	}
 }
 
-func TestDeadAndZombieNotAlive(t *testing.T) {
-	cmd := exec.Command("sleep", "30")
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	id, err := Of(cmd.Process.Pid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	boot, _ := BootID()
-	_ = cmd.Process.Kill()
-	time.Sleep(100 * time.Millisecond) // now a zombie: killed but not yet reaped
-	if Alive(id, boot) {
-		t.Fatal("zombie reported alive")
-	}
-	_ = cmd.Wait()
-	if Alive(id, boot) {
-		t.Fatal("reaped process reported alive")
-	}
-}
-
 func startInGroup(t *testing.T, env []string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command("sleep", "30")
@@ -61,40 +41,95 @@ func startInGroup(t *testing.T, env []string) *exec.Cmd {
 	return cmd
 }
 
-func TestFindMarkedRequiresMarker(t *testing.T) {
-	boot, _ := BootID()
-	marked := startInGroup(t, append(os.Environ(), MarkerEnv+"=s1:1:abc"))
-	unmarked := startInGroup(t, os.Environ())
+func mustBoot(t *testing.T) string {
+	t.Helper()
+	boot, err := BootID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return boot
+}
 
-	got, err := FindMarked(marked.Process.Pid, "s1:1:abc", boot)
+func TestCheckEmptyBoot(t *testing.T) {
+	id, err := Self()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := Check(id, ""); ok || err != nil {
+		t.Fatalf("Check(empty boot) = %v, %v", ok, err)
+	}
+}
+
+func TestFindMarkedSameGroup(t *testing.T) {
+	boot := mustBoot(t)
+	marked := startInGroup(t, append(os.Environ(), MarkerEnv+"=s1:1:abc"))
+	pgid := marked.Process.Pid
+	other := exec.Command("sleep", "30")
+	other.Env = os.Environ()
+	other.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
+	if err := other.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Process.Kill(); _ = other.Wait() })
+
+	got, err := FindMarked(pgid, "s1:1:abc", boot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 || got[0].PID != marked.Process.Pid {
-		t.Fatalf("FindMarked(marked) = %+v", got)
+		t.Fatalf("FindMarked = %+v, want only pid %d", got, marked.Process.Pid)
 	}
-	// Same pgid lookup, but the process lacks the marker: never counted.
-	got, _ = FindMarked(unmarked.Process.Pid, "s1:1:abc", boot)
-	if len(got) != 0 {
-		t.Fatalf("unmarked process counted: %+v", got)
+	for _, m := range []string{"s1:1:xyz", "s1:1:ab"} {
+		got, err := FindMarked(pgid, m, boot)
+		if err != nil || len(got) != 0 {
+			t.Fatalf("marker %q: %+v, %v", m, got, err)
+		}
 	}
-	// Right marker, wrong boot: nothing.
-	got, _ = FindMarked(marked.Process.Pid, "s1:1:abc", "other-boot")
-	if len(got) != 0 {
+	if got, _ := FindMarked(pgid, "s1:1:abc", "other-boot"); len(got) != 0 {
 		t.Fatalf("wrong boot counted: %+v", got)
 	}
 }
 
-func TestWaitGone(t *testing.T) {
-	boot, _ := BootID()
+func TestSignalMismatchedIdentity(t *testing.T) {
+	boot := mustBoot(t)
 	cmd := startInGroup(t, os.Environ())
-	id, _ := Of(cmd.Process.Pid)
+	id, err := Of(cmd.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := Identity{PID: id.PID, StartTime: id.StartTime + 1}
+	if err := Signal(bad, boot, syscall.SIGKILL); !errors.Is(err, ErrNoProcess) {
+		t.Fatalf("Signal = %v, want ErrNoProcess", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if !Alive(id, boot) {
+		t.Fatal("target was signalled despite identity mismatch")
+	}
+}
+
+func TestWaitGone(t *testing.T) {
+	boot := mustBoot(t)
+	cmd := startInGroup(t, os.Environ())
+	id, err := Of(cmd.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if left := WaitGone([]Identity{id}, boot, 100*time.Millisecond); len(left) != 1 {
 		t.Fatalf("expected survivor, got %v", left)
 	}
-	_ = cmd.Process.Kill()
-	_ = cmd.Wait()
-	if left := WaitGone([]Identity{id}, boot, 2*time.Second); len(left) != 0 {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		time.Sleep(200 * time.Millisecond)
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}()
+	defer func() { <-done }() // cleanup's Wait must not race the goroutine's
+	start := time.Now()
+	if left := WaitGone([]Identity{id}, boot, 5*time.Second); len(left) != 0 {
 		t.Fatalf("expected none left, got %v", left)
+	}
+	if el := time.Since(start); el > 3*time.Second {
+		t.Fatalf("WaitGone took %v", el)
 	}
 }

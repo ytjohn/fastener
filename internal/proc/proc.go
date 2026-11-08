@@ -35,17 +35,39 @@ func Of(pid int) (Identity, error) {
 // Self returns the identity of the calling process.
 func Self() (Identity, error) { return Of(os.Getpid()) }
 
-// Alive reports whether id still names a live (non-zombie) process on the boot bootID.
-func Alive(id Identity, bootID string) bool {
+// Check reports whether id names a live process on boot bootID.
+// A non-nil error means liveness could not be determined.
+func Check(id Identity, bootID string) (bool, error) {
 	if id.PID <= 0 || bootID == "" {
-		return false
+		return false, nil
 	}
 	cur, err := BootID()
-	if err != nil || cur != bootID {
-		return false
+	if err != nil {
+		return false, err
+	}
+	if cur != bootID {
+		return false, nil
 	}
 	st, err := StartTime(id.PID)
-	return err == nil && st == id.StartTime
+	if errors.Is(err, ErrNoProcess) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return st == id.StartTime, nil
+}
+
+// Alive is true only when Check confirms the process is alive. Use it before signalling.
+func Alive(id Identity, bootID string) bool {
+	ok, err := Check(id, bootID)
+	return ok && err == nil
+}
+
+// MaybeAlive is false only when Check confirms the process is gone. Use it before declaring a session lost.
+func MaybeAlive(id Identity, bootID string) bool {
+	ok, err := Check(id, bootID)
+	return ok || err != nil
 }
 
 // Signal sends sig to id after re-verifying the identity.
@@ -53,12 +75,19 @@ func Signal(id Identity, bootID string, sig syscall.Signal) error {
 	if !Alive(id, bootID) {
 		return ErrNoProcess
 	}
-	return syscall.Kill(id.PID, sig)
+	if err := syscall.Kill(id.PID, sig); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return ErrNoProcess
+		}
+		return err
+	}
+	return nil
 }
 
 // FindMarked returns the live processes in process group pgid whose environment
 // contains MarkerEnv=marker, on boot bootID. A process without the marker is
 // never returned, so a reused pgid cannot redirect a signal to a stranger.
+// The caller must not be a member of the group it searches.
 func FindMarked(pgid int, marker, bootID string) ([]Identity, error) {
 	if pgid <= 0 || marker == "" {
 		return nil, nil
@@ -77,7 +106,7 @@ func FindMarked(pgid int, marker, bootID string) ([]Identity, error) {
 	want := MarkerEnv + "=" + marker
 	var out []Identity
 	for _, pid := range pids {
-		g, err := PGID(pid)
+		g, start, err := pgidStart(pid)
 		if err != nil || g != pgid {
 			continue
 		}
@@ -85,22 +114,22 @@ func FindMarked(pgid int, marker, bootID string) ([]Identity, error) {
 		if err != nil || !has(env, want) {
 			continue
 		}
-		id, err := Of(pid)
-		if err != nil {
+		// Re-check that the pid was not recycled while the environment was read.
+		if again, err := StartTime(pid); err != nil || again != start {
 			continue
 		}
-		out = append(out, id)
+		out = append(out, Identity{PID: pid, StartTime: start})
 	}
 	return out, nil
 }
 
-// WaitGone polls until none of ids is alive or d elapses, and returns the survivors.
+// WaitGone polls until none of ids may be alive or d elapses, and returns the survivors.
 func WaitGone(ids []Identity, bootID string, d time.Duration) []Identity {
 	deadline := time.Now().Add(d)
 	for {
 		var left []Identity
 		for _, id := range ids {
-			if Alive(id, bootID) {
+			if MaybeAlive(id, bootID) {
 				left = append(left, id)
 			}
 		}

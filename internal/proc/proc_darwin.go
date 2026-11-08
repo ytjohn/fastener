@@ -5,6 +5,7 @@ package proc
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 
 	"golang.org/x/sys/unix"
 )
@@ -14,7 +15,10 @@ const sZomb = 5 // SZOMB in <sys/proc.h>
 func kinfo(pid int) (*unix.KinfoProc, error) {
 	k, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {
-		return nil, ErrNoProcess
+		if errors.Is(err, unix.ESRCH) || errors.Is(err, unix.EIO) {
+			return nil, ErrNoProcess
+		}
+		return nil, err
 	}
 	if int(k.Proc.P_pid) != pid {
 		return nil, ErrNoProcess
@@ -32,6 +36,19 @@ func StartTime(pid int) (uint64, error) {
 	}
 	tv := k.Proc.P_starttime
 	return uint64(tv.Sec)*1_000_000 + uint64(tv.Usec), nil
+}
+
+// pgidStart reads pgid and start time from one kinfo call (zombies are ErrNoProcess).
+func pgidStart(pid int) (int, uint64, error) {
+	k, err := kinfo(pid)
+	if err != nil {
+		return 0, 0, err
+	}
+	if k.Proc.P_stat == sZomb {
+		return 0, 0, ErrNoProcess
+	}
+	tv := k.Proc.P_starttime
+	return int(k.Eproc.Pgid), uint64(tv.Sec)*1_000_000 + uint64(tv.Usec), nil
 }
 
 func PGID(pid int) (int, error) {

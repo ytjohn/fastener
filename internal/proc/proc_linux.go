@@ -9,19 +9,23 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
-// readStat parses /proc/<pid>/stat. comm (field 2) may contain spaces and
-// parentheses, so fields are counted from after the last ')'.
 func readStat(pid int) (state byte, pgid int, start uint64, err error) {
 	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 			err = ErrNoProcess
 		}
 		return 0, 0, 0, err
 	}
-	s := string(b)
+	return parseStat(pid, string(b))
+}
+
+// parseStat parses the contents of /proc/<pid>/stat. comm (field 2) may contain
+// spaces and parentheses, so fields are counted from after the last ')'.
+func parseStat(pid int, s string) (state byte, pgid int, start uint64, err error) {
 	i := strings.LastIndexByte(s, ')')
 	if i < 0 {
 		return 0, 0, 0, fmt.Errorf("proc: malformed stat for pid %d", pid)
@@ -39,13 +43,27 @@ func readStat(pid int) (state byte, pgid int, start uint64, err error) {
 	return f[0][0], pgid, start, nil
 }
 
+func deadState(s byte) bool { return s == 'Z' || s == 'X' || s == 'x' }
+
+// pgidStart reads pgid and start time in one /proc read (zombies are ErrNoProcess).
+func pgidStart(pid int) (int, uint64, error) {
+	state, pgid, start, err := readStat(pid)
+	if err != nil {
+		return 0, 0, err
+	}
+	if deadState(state) {
+		return 0, 0, ErrNoProcess
+	}
+	return pgid, start, nil
+}
+
 // StartTime returns the start time of a live process (ErrNoProcess for zombies).
 func StartTime(pid int) (uint64, error) {
 	state, _, start, err := readStat(pid)
 	if err != nil {
 		return 0, err
 	}
-	if state == 'Z' || state == 'X' {
+	if deadState(state) {
 		return 0, ErrNoProcess
 	}
 	return start, nil
