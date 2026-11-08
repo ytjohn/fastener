@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -49,9 +50,20 @@ type monitor struct {
 
 	beforeWait func(pid int) // test hook, called just before the main wait
 
+	// mu guards the in-memory status. It is held only to mutate st or to take
+	// a snapshot of it, never across a disk write.
 	mu    sync.Mutex
 	st    session.Status
-	dirty bool
+	dirty bool   // st changed since the last snapshot
+	seq   uint64 // sequence number of the last snapshot
+	final bool   // the exited snapshot has been taken; no more snapshots
+
+	// wmu serializes status.json writes. A snapshot is written only if its
+	// sequence number is newer than the last one written, and nothing is
+	// written after the exited snapshot.
+	wmu     sync.Mutex
+	written uint64
+	closed  bool
 }
 
 // Run executes one generation. It returns a process exit code for the
@@ -92,25 +104,103 @@ func load(d session.Dir, gen int, logger *log.Logger) (*monitor, error) {
 	return m, nil
 }
 
-// write persists status; callers hold m.mu.
-func (m *monitor) write() {
+// snapshotLocked stamps st and returns a deep copy of it with a new sequence
+// number; callers hold m.mu. It returns ok=false once the final (exited)
+// snapshot has been taken, so nothing can follow it.
+func (m *monitor) snapshotLocked() (st session.Status, seq uint64, ok bool) {
+	if m.final {
+		return session.Status{}, 0, false
+	}
 	m.st.SchemaVersion = session.SchemaVersion
 	m.st.UpdatedAt = time.Now().UTC()
-	if err := session.WriteJSON(m.d.StatusPath(), &m.st); err != nil {
+	m.seq++
+	m.dirty = false
+	if m.st.State == session.StateExited {
+		m.final = true
+	}
+	return cloneStatus(m.st), m.seq, true
+}
+
+// persist writes a snapshot to status.json; callers must not hold m.mu.
+// Writes are serialized; a snapshot older than the last one written is
+// dropped, and nothing is written after the exited snapshot.
+func (m *monitor) persist(st session.Status, seq uint64) {
+	m.wmu.Lock()
+	defer m.wmu.Unlock()
+	if m.closed || seq <= m.written {
+		return
+	}
+	if err := session.WriteJSON(m.d.StatusPath(), &st); err != nil {
 		m.log.Printf("write status: %v", err)
 	}
-	m.dirty = false
+	m.written = seq
+	if st.State == session.StateExited {
+		m.closed = true
+	}
+}
+
+// update applies mutate to the status under m.mu, then writes a snapshot
+// outside it.
+func (m *monitor) update(mutate func(*session.Status)) {
+	m.mu.Lock()
+	mutate(&m.st)
+	st, seq, ok := m.snapshotLocked()
+	m.mu.Unlock()
+	if ok {
+		m.persist(st, seq)
+	}
+}
+
+// flush writes the status if the parser changed it since the last snapshot.
+func (m *monitor) flush() {
+	m.mu.Lock()
+	if !m.dirty {
+		m.mu.Unlock()
+		return
+	}
+	st, seq, ok := m.snapshotLocked()
+	m.mu.Unlock()
+	if ok {
+		m.persist(st, seq)
+	}
 }
 
 func (m *monitor) finish(endedBy string, mutate func(*session.Status)) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	now := time.Now().UTC()
-	m.st.State, m.st.EndedBy, m.st.EndedAt = session.StateExited, endedBy, &now
-	if mutate != nil {
-		mutate(&m.st)
+	m.update(func(s *session.Status) {
+		now := time.Now().UTC()
+		s.State, s.EndedBy, s.EndedAt = session.StateExited, endedBy, &now
+		if mutate != nil {
+			mutate(s)
+		}
+	})
+}
+
+// cloneStatus copies s, including the values its pointer fields reference,
+// so a snapshot shares no memory with the live status (parsers update
+// pointed-to values such as Usage in place).
+func cloneStatus(s session.Status) session.Status {
+	c := s
+	c.Monitor = clonePtr(s.Monitor)
+	c.Agent = clonePtr(s.Agent)
+	c.StartedAt = clonePtr(s.StartedAt)
+	c.EndedAt = clonePtr(s.EndedAt)
+	c.ExitCode = clonePtr(s.ExitCode)
+	c.AgentError = clonePtr(s.AgentError)
+	if s.Usage != nil {
+		u := *s.Usage
+		u.InputTokens = clonePtr(s.Usage.InputTokens)
+		u.OutputTokens = clonePtr(s.Usage.OutputTokens)
+		c.Usage = &u
 	}
-	m.write()
+	return c
+}
+
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 // stopRequest reports a stop request addressed to this generation.
@@ -142,10 +232,7 @@ func (m *monitor) launchFailed(err error) int {
 
 func (m *monitor) run(sigs <-chan os.Signal) int {
 	// Identify this monitor in status.json before anything else can fail or block.
-	m.mu.Lock()
-	m.st.State = session.StateStarting
-	m.write()
-	m.mu.Unlock()
+	m.update(func(s *session.Status) { s.State = session.StateStarting })
 	if _, ok := m.stopRequest(); ok {
 		m.finish(session.EndedByStop, nil) // stopped before the agent was spawned
 		return 0
@@ -250,14 +337,17 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	if err != nil {
 		agent = proc.Identity{PID: pid} // already exited; exit facts follow
 	}
-	m.mu.Lock()
-	now := time.Now().UTC()
-	m.st.State, m.st.Agent, m.st.PGID, m.st.StartedAt = session.StateRunning, &agent, pid, &now
-	m.write()
-	m.mu.Unlock()
+	m.update(func(s *session.Status) {
+		now := time.Now().UTC()
+		s.State, s.Agent, s.PGID, s.StartedAt = session.StateRunning, &agent, pid, &now
+	})
 
 	drained := make(chan struct{})
-	go m.pump(pr, out, p, drained)
+	go func() {
+		defer close(drained)
+		defer pr.Close()
+		m.pump(pr, out, p)
+	}()
 	stopFlush := make(chan struct{})
 	go m.flushLoop(stopFlush)
 
@@ -371,9 +461,7 @@ func (m *monitor) lineSafe(p parser.Parser, line []byte) (changed bool) {
 	return p.Line(line, &m.st.Fields)
 }
 
-func (m *monitor) pump(r *os.File, out *os.File, p parser.Parser, done chan<- struct{}) {
-	defer close(done)
-	defer r.Close()
+func (m *monitor) pump(r io.Reader, out io.Writer, p parser.Parser) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	for {
 		line, err := br.ReadBytes('\n')
@@ -411,11 +499,7 @@ func (m *monitor) flushLoop(stop <-chan struct{}) {
 		case <-stop:
 			return
 		case <-t.C:
-			m.mu.Lock()
-			if m.dirty {
-				m.write()
-			}
-			m.mu.Unlock()
+			m.flush()
 		}
 	}
 }
