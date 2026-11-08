@@ -344,3 +344,26 @@ func TestHelpExitsZero(t *testing.T) {
 		}
 	}
 }
+
+func TestRmForceCleansLostWithOrphans(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("pdeathsig behaviour is Linux-specific")
+	}
+	h := newHarness(t)
+	pidfile := filepath.Join(t.TempDir(), "gc.pid")
+	h.start("s1", []string{"FAKE_SLEEP=60s", "FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile})
+	v := h.waitState("s1", "running", 5*time.Second)
+	waitPid(t, pidfile)
+	syscall.Kill(v.Status.Monitor.PID, syscall.SIGKILL)
+	if v = h.waitState("s1", "lost", 5*time.Second); v.Orphans < 1 {
+		t.Fatalf("orphans = %d", v.Orphans)
+	}
+	h.ok("rm", "--force", "s1")
+	if _, _, code := h.cmd("inspect", "s1"); code != 127 {
+		t.Fatal("session not removed")
+	}
+	gc, _ := os.ReadFile(pidfile)
+	if pid, _ := strconv.Atoi(strings.TrimSpace(string(gc))); pid > 0 && pidAlive(pid) {
+		t.Fatalf("grandchild %d survived rm --force", pid)
+	}
+}

@@ -47,7 +47,6 @@ type prepared struct {
 	envBase  []string
 	envFile  string
 	fileEnv  []string
-	launcher launcher.Launcher
 }
 
 func (p *prepared) mergedEnv(extra []string) []string {
@@ -97,14 +96,21 @@ func prepare(o launchOptions, prompt string) (*prepared, error) {
 	if err != nil {
 		return nil, inStep("binary", err)
 	}
+	return p, nil
+}
+
+// selectLauncher resolves --launcher / config. It belongs to the launch step,
+// so `check` only reaches it after the binary step has run.
+func (p *prepared) selectLauncher(o launchOptions) (launcher.Launcher, error) {
 	pref := o.Launcher
 	if pref == "" {
-		pref = cfg.Launcher
+		pref = p.cfg.Launcher
 	}
-	if p.launcher, err = launcher.Select(pref); err != nil {
+	l, err := launcher.Select(pref)
+	if err != nil {
 		return nil, inStep("launch", err)
 	}
-	return p, nil
+	return l, nil
 }
 
 // launch creates a session and starts its monitor. On a handshake failure it
@@ -148,6 +154,10 @@ func launch(o launchOptions, stderr io.Writer) (*session.View, error) {
 	if err != nil {
 		return nil, err
 	}
+	l, err := p.selectLauncher(o)
+	if err != nil {
+		return nil, err
+	}
 	name := o.Name
 	if name == "" {
 		name = session.GenerateName(o.Backend)
@@ -187,18 +197,20 @@ func launch(o launchOptions, stderr io.Writer) (*session.View, error) {
 			return nil, inStep("launch", err)
 		}
 	}
-	rec, err := p.launcher.Start(d, 1)
+	rec, err := l.Start(d, 1)
 	if err != nil {
 		_, _ = session.Finalize(d, func(s *session.Status) {
 			t := time.Now().UTC()
 			s.State, s.EndedBy, s.EndedAt, s.Error = session.StateExited, session.EndedByLaunchFailed, &t, "monitor: "+err.Error()
 		})
 		// Return the (finalized) view too, so `run --json` can print it.
-		var v *session.View
-		if nv, lerr := session.Load(name, p.cfg.Handshake()); lerr == nil {
-			v = nv
+		nv, lerr := session.LoadFull(name, p.cfg.Handshake())
+		if lerr != nil {
+			// No view to hand back: do not leave an unreported directory behind.
+			os.RemoveAll(string(d))
+			nv = nil
 		}
-		return v, inStep("launch", fmt.Errorf("session %s: start monitor: %w", name, err))
+		return nv, inStep("launch", fmt.Errorf("session %s: start monitor: %w", name, err))
 	}
 	if err := session.WriteJSON(d.LauncherPath(1), rec); err != nil {
 		// Not fatal: status.json carries the monitor identity once it starts.
@@ -207,8 +219,27 @@ func launch(o launchOptions, stderr io.Writer) (*session.View, error) {
 	return handshake(name, p.cfg.Handshake())
 }
 
+// handshakeLostAction decides what the handshake does with a session whose
+// monitor is gone. It finalizes as launch-failed only when nothing was ever
+// spawned: no agent identity, a status still reading starting, and no marked
+// process alive (v must have had FindOrphans run). Otherwise the session stays
+// lost so stop/rm can see and clean up the agent and its orphans.
+func handshakeLostAction(v *session.View) (finalize bool) {
+	if v.Status.Agent != nil && v.Status.State != session.StateStarting {
+		return false
+	}
+	return len(v.Orphans) == 0
+}
+
 func handshake(name string, timeout time.Duration) (*session.View, error) {
 	deadline := time.Now().Add(timeout)
+	// full upgrades a cheap view to one with the orphan scan, for error returns.
+	full := func(v *session.View) *session.View {
+		if nv, err := session.LoadFull(name, timeout); err == nil {
+			return nv
+		}
+		return v
+	}
 	for {
 		v, err := session.Load(name, timeout)
 		if err != nil {
@@ -224,22 +255,17 @@ func handshake(name string, timeout time.Duration) (*session.View, error) {
 			return v, nil // a fast agent may already have finished
 		case session.StateLost:
 			msg := fmt.Sprintf("monitor died during launch; see %s", v.Dir.MonitorLog())
-			if v.Status.Agent != nil && v.Status.State != session.StateStarting {
-				// An agent was spawned: leave the session lost so stop/rm see it
-				// (and its orphans) instead of hiding them behind launch-failed.
-				return v, inStep("launch", fmt.Errorf("session %s: %s", name, msg))
+			v.FindOrphans()
+			if handshakeLostAction(v) {
+				_, _ = session.Finalize(v.Dir, func(s *session.Status) {
+					t := time.Now().UTC()
+					s.State, s.EndedBy, s.EndedAt, s.Error = session.StateExited, session.EndedByLaunchFailed, &t, msg
+				})
 			}
-			_, _ = session.Finalize(v.Dir, func(s *session.Status) {
-				t := time.Now().UTC()
-				s.State, s.EndedBy, s.EndedAt, s.Error = session.StateExited, session.EndedByLaunchFailed, &t, msg
-			})
-			if nv, lerr := session.Load(name, timeout); lerr == nil {
-				v = nv
-			}
-			return v, inStep("launch", fmt.Errorf("session %s: %s", name, msg))
+			return full(v), inStep("launch", fmt.Errorf("session %s: %s", name, msg))
 		}
 		if time.Now().After(deadline) {
-			return v, inStep("launch", fmt.Errorf("session %s did not start within %s; see %s", name, timeout, v.Dir.MonitorLog()))
+			return full(v), inStep("launch", fmt.Errorf("session %s did not start within %s; see %s", name, timeout, v.Dir.MonitorLog()))
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
