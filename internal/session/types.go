@@ -118,6 +118,9 @@ type Status struct {
 	ExitCode      *int           `json:"exit_code,omitempty"`
 	Signal        string         `json:"signal,omitempty"`
 	Error         string         `json:"error,omitempty"`
+	// OutputTruncated: the agent exited but its stdout was still held open
+	// after the drain timeout, so anything written later is not in output.log.
+	OutputTruncated bool `json:"output_truncated,omitempty"`
 	parser.Fields
 	UpdatedAt time.Time `json:"updated_at"`
 }

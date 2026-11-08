@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -244,6 +245,145 @@ func TestStopIgnoringTermIsKilled(t *testing.T) {
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Fatalf("took %v", time.Since(start))
+	}
+}
+
+// TestSecondStopShortensGrace starts a stop with a 10s grace against an agent
+// that ignores TERM, then sends a newer request with a 200ms grace: the KILL
+// must follow the second request's deadline, not the first's.
+func TestSecondStopShortensGrace(t *testing.T) {
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), []string{"FAKE_IGNORE_TERM=1", "FAKE_SLEEP=30s"}, 0)
+	stopAt := func(grace time.Duration) {
+		t.Helper()
+		if err := session.WriteJSON(d.StopPath(), session.StopRequest{SchemaVersion: 1, Generation: 1,
+			RequestedAt: time.Now().UTC(), Grace: session.Duration(grace), By: "stop"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sigs := make(chan os.Signal, 4)
+	var first time.Time
+	st := runWith(t, d, sigs, func() {
+		waitFor(t, "running", func() bool { return runningStatus(d) })
+		time.Sleep(100 * time.Millisecond)
+		first = time.Now()
+		stopAt(10 * time.Second)
+		sigs <- syscall.SIGTERM
+		time.Sleep(500 * time.Millisecond)
+		stopAt(200 * time.Millisecond)
+		sigs <- syscall.SIGTERM
+	})
+	took := time.Since(first)
+	if st.EndedBy != session.EndedByStop || st.Signal != "SIGKILL" || st.ExitCode != nil {
+		t.Fatalf("ended_by=%s signal=%s code=%v", st.EndedBy, st.Signal, st.ExitCode)
+	}
+	if took > 2*time.Second {
+		t.Fatalf("KILL came after %v; the second request's 200ms grace was not honoured", took)
+	}
+}
+
+// TestLaterLongerStopDoesNotExtend checks that a newer request with a longer
+// grace never extends the wait.
+func TestLaterLongerStopDoesNotExtend(t *testing.T) {
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), []string{"FAKE_IGNORE_TERM=1", "FAKE_SLEEP=30s"}, 0)
+	sigs := make(chan os.Signal, 4)
+	var first time.Time
+	st := runWith(t, d, sigs, func() {
+		waitFor(t, "running", func() bool { return runningStatus(d) })
+		first = time.Now()
+		session.WriteJSON(d.StopPath(), session.StopRequest{SchemaVersion: 1, Generation: 1,
+			RequestedAt: time.Now().UTC(), Grace: session.Duration(500 * time.Millisecond), By: "stop"})
+		sigs <- syscall.SIGTERM
+		time.Sleep(100 * time.Millisecond)
+		session.WriteJSON(d.StopPath(), session.StopRequest{SchemaVersion: 1, Generation: 1,
+			RequestedAt: time.Now().UTC(), Grace: session.Duration(30 * time.Second), By: "rm"})
+		sigs <- syscall.SIGTERM
+	})
+	if st.EndedBy != session.EndedByStop || st.Signal != "SIGKILL" {
+		t.Fatalf("ended_by=%s signal=%s", st.EndedBy, st.Signal)
+	}
+	if took := time.Since(first); took > 2*time.Second {
+		t.Fatalf("took %v; a longer second grace extended the wait", took)
+	}
+}
+
+// TestStopAfterPlainSignalIsStop: a signal without a request starts the
+// termination, then a stop request arrives; ended_by is stop.
+func TestStopAfterPlainSignalIsStop(t *testing.T) {
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), []string{"FAKE_IGNORE_TERM=1", "FAKE_SLEEP=30s"}, 0)
+	var s session.Session
+	if err := session.ReadJSON(d.SessionPath(), &s); err != nil {
+		t.Fatal(err)
+	}
+	s.Grace = session.Duration(10 * time.Second)
+	if err := session.WriteJSON(d.SessionPath(), s); err != nil {
+		t.Fatal(err)
+	}
+	sigs := make(chan os.Signal, 4)
+	var first time.Time
+	st := runWith(t, d, sigs, func() {
+		waitFor(t, "running", func() bool { return runningStatus(d) })
+		first = time.Now()
+		sigs <- syscall.SIGTERM
+		time.Sleep(200 * time.Millisecond)
+		session.WriteJSON(d.StopPath(), session.StopRequest{SchemaVersion: 1, Generation: 1,
+			RequestedAt: time.Now().UTC(), Grace: session.Duration(100 * time.Millisecond), By: "stop"})
+		sigs <- syscall.SIGTERM
+	})
+	if st.EndedBy != session.EndedByStop || st.Signal != "SIGKILL" {
+		t.Fatalf("ended_by=%s signal=%s", st.EndedBy, st.Signal)
+	}
+	if took := time.Since(first); took > 3*time.Second {
+		t.Fatalf("took %v; the stop request did not shorten the 10s session grace", took)
+	}
+}
+
+// TestDrainTimeoutTruncatesOutput: a grandchild holds stdout after the agent
+// exits. What it writes within the drain window is kept; what it writes later
+// is lost, and status.json records output_truncated.
+func TestDrainTimeoutTruncatesOutput(t *testing.T) {
+	pidfile := filepath.Join(t.TempDir(), "gc.pid")
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), []string{
+		"FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile,
+		"FAKE_GRANDCHILD_WRITES=300ms," + (drainTimeout + time.Second).String(),
+	}, 0)
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(pidfile); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 0 {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	start := time.Now()
+	st := runInProcess(t, d)
+	if st.EndedBy != session.EndedByExit || st.ExitCode == nil || *st.ExitCode != 0 {
+		t.Fatalf("ended_by=%s code=%v", st.EndedBy, st.ExitCode)
+	}
+	if !st.OutputTruncated {
+		t.Fatal("output_truncated not set after the drain timed out")
+	}
+	if st.FinalMessage != "pong" {
+		t.Fatalf("final_message=%q", st.FinalMessage)
+	}
+	// Wait past the grandchild's late write, then check it was not recorded.
+	time.Sleep(time.Until(start.Add(drainTimeout + 1500*time.Millisecond)))
+	out, _ := os.ReadFile(d.OutputLog())
+	if !strings.Contains(string(out), "grandchild-0") {
+		t.Fatalf("output written inside the drain window is missing:\n%s", out)
+	}
+	if strings.Contains(string(out), "grandchild-1") {
+		t.Fatalf("output written after the drain timeout reached output.log:\n%s", out)
+	}
+}
+
+// TestNoTruncationWhenStdoutCloses: the normal case leaves the flag unset.
+func TestNoTruncationWhenStdoutCloses(t *testing.T) {
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), nil, 0)
+	if st := runInProcess(t, d); st.OutputTruncated {
+		t.Fatal("output_truncated set although stdout closed with the agent")
+	}
+	b, _ := os.ReadFile(d.StatusPath())
+	if strings.Contains(string(b), "output_truncated") {
+		t.Fatalf("output_truncated not omitted: %s", b)
 	}
 }
 

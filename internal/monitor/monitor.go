@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -32,11 +33,14 @@ import (
 const drainTimeout = 2 * time.Second
 
 // Lines longer than maxParseLine are logged but not parsed (counted as parse
-// errors), so a huge tool result is never unmarshalled while holding m.mu.
-// (ReadBytes still allocates the whole line; this caps parsing, not memory.)
+// errors). The pump accumulates at most maxParseLine bytes of a line, so this
+// caps memory as well as parsing; the rest of an overlong line is streamed to
+// output.log without being held. A line buffer that grew past keepLineCap is
+// released after its line instead of being kept for reuse.
 // final_message is capped so status.json stays small.
 const (
 	maxParseLine    = 16 << 20
+	keepLineCap     = 1 << 20
 	maxFinalMessage = 64 << 10
 )
 
@@ -49,9 +53,20 @@ type monitor struct {
 
 	beforeWait func(pid int) // test hook, called just before the main wait
 
+	// mu guards the in-memory status. It is held only to mutate st or to take
+	// a snapshot of it, never across a disk write.
 	mu    sync.Mutex
 	st    session.Status
-	dirty bool
+	dirty bool   // st changed since the last snapshot
+	seq   uint64 // sequence number of the last snapshot
+	final bool   // the exited snapshot has been taken; no more snapshots
+
+	// wmu serializes status.json writes. A snapshot is written only if its
+	// sequence number is newer than the last one written, and nothing is
+	// written after the exited snapshot.
+	wmu     sync.Mutex
+	written uint64
+	closed  bool
 }
 
 // Run executes one generation. It returns a process exit code for the
@@ -92,25 +107,103 @@ func load(d session.Dir, gen int, logger *log.Logger) (*monitor, error) {
 	return m, nil
 }
 
-// write persists status; callers hold m.mu.
-func (m *monitor) write() {
+// snapshotLocked stamps st and returns a deep copy of it with a new sequence
+// number; callers hold m.mu. It returns ok=false once the final (exited)
+// snapshot has been taken, so nothing can follow it.
+func (m *monitor) snapshotLocked() (st session.Status, seq uint64, ok bool) {
+	if m.final {
+		return session.Status{}, 0, false
+	}
 	m.st.SchemaVersion = session.SchemaVersion
 	m.st.UpdatedAt = time.Now().UTC()
-	if err := session.WriteJSON(m.d.StatusPath(), &m.st); err != nil {
+	m.seq++
+	m.dirty = false
+	if m.st.State == session.StateExited {
+		m.final = true
+	}
+	return cloneStatus(m.st), m.seq, true
+}
+
+// persist writes a snapshot to status.json; callers must not hold m.mu.
+// Writes are serialized; a snapshot older than the last one written is
+// dropped, and nothing is written after the exited snapshot.
+func (m *monitor) persist(st session.Status, seq uint64) {
+	m.wmu.Lock()
+	defer m.wmu.Unlock()
+	if m.closed || seq <= m.written {
+		return
+	}
+	if err := session.WriteJSON(m.d.StatusPath(), &st); err != nil {
 		m.log.Printf("write status: %v", err)
 	}
-	m.dirty = false
+	m.written = seq
+	if st.State == session.StateExited {
+		m.closed = true
+	}
+}
+
+// update applies mutate to the status under m.mu, then writes a snapshot
+// outside it.
+func (m *monitor) update(mutate func(*session.Status)) {
+	m.mu.Lock()
+	mutate(&m.st)
+	st, seq, ok := m.snapshotLocked()
+	m.mu.Unlock()
+	if ok {
+		m.persist(st, seq)
+	}
+}
+
+// flush writes the status if the parser changed it since the last snapshot.
+func (m *monitor) flush() {
+	m.mu.Lock()
+	if !m.dirty {
+		m.mu.Unlock()
+		return
+	}
+	st, seq, ok := m.snapshotLocked()
+	m.mu.Unlock()
+	if ok {
+		m.persist(st, seq)
+	}
 }
 
 func (m *monitor) finish(endedBy string, mutate func(*session.Status)) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	now := time.Now().UTC()
-	m.st.State, m.st.EndedBy, m.st.EndedAt = session.StateExited, endedBy, &now
-	if mutate != nil {
-		mutate(&m.st)
+	m.update(func(s *session.Status) {
+		now := time.Now().UTC()
+		s.State, s.EndedBy, s.EndedAt = session.StateExited, endedBy, &now
+		if mutate != nil {
+			mutate(s)
+		}
+	})
+}
+
+// cloneStatus copies s, including the values its pointer fields reference,
+// so a snapshot shares no memory with the live status (parsers update
+// pointed-to values such as Usage in place).
+func cloneStatus(s session.Status) session.Status {
+	c := s
+	c.Monitor = clonePtr(s.Monitor)
+	c.Agent = clonePtr(s.Agent)
+	c.StartedAt = clonePtr(s.StartedAt)
+	c.EndedAt = clonePtr(s.EndedAt)
+	c.ExitCode = clonePtr(s.ExitCode)
+	c.AgentError = clonePtr(s.AgentError)
+	if s.Usage != nil {
+		u := *s.Usage
+		u.InputTokens = clonePtr(s.Usage.InputTokens)
+		u.OutputTokens = clonePtr(s.Usage.OutputTokens)
+		c.Usage = &u
 	}
-	m.write()
+	return c
+}
+
+func clonePtr[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 // stopRequest reports a stop request addressed to this generation.
@@ -142,10 +235,7 @@ func (m *monitor) launchFailed(err error) int {
 
 func (m *monitor) run(sigs <-chan os.Signal) int {
 	// Identify this monitor in status.json before anything else can fail or block.
-	m.mu.Lock()
-	m.st.State = session.StateStarting
-	m.write()
-	m.mu.Unlock()
+	m.update(func(s *session.Status) { s.State = session.StateStarting })
 	if _, ok := m.stopRequest(); ok {
 		m.finish(session.EndedByStop, nil) // stopped before the agent was spawned
 		return 0
@@ -250,14 +340,17 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	if err != nil {
 		agent = proc.Identity{PID: pid} // already exited; exit facts follow
 	}
-	m.mu.Lock()
-	now := time.Now().UTC()
-	m.st.State, m.st.Agent, m.st.PGID, m.st.StartedAt = session.StateRunning, &agent, pid, &now
-	m.write()
-	m.mu.Unlock()
+	m.update(func(s *session.Status) {
+		now := time.Now().UTC()
+		s.State, s.Agent, s.PGID, s.StartedAt = session.StateRunning, &agent, pid, &now
+	})
 
 	drained := make(chan struct{})
-	go m.pump(pr, out, p, drained)
+	go func() {
+		defer close(drained)
+		defer pr.Close()
+		m.pump(pr, out, p)
+	}()
 	stopFlush := make(chan struct{})
 	go m.flushLoop(stopFlush)
 
@@ -289,20 +382,23 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	case <-limit:
 		if !exitedAlready() {
 			endedBy = session.EndedByLimit
-			m.terminate(cmd, pid, time.Duration(m.sess.Grace), exitPending)
+			// A stop request during the limit's grace can shorten it, but the
+			// limit is what ended the session.
+			m.terminate(cmd, pid, time.Duration(m.sess.Grace), time.Time{}, exitPending, sigs)
 		}
 	case sig := <-sigs:
 		if !exitedAlready() {
-			grace := time.Duration(m.sess.Grace)
+			grace := m.requestGrace(session.StopRequest{})
 			endedBy = session.EndedBySignal
+			var last time.Time
 			if req, ok := m.stopRequest(); ok {
 				endedBy = session.EndedByStop
-				if req.Grace > 0 {
-					grace = time.Duration(req.Grace)
-				}
+				grace, last = m.requestGrace(req), req.RequestedAt
 			}
 			m.log.Printf("received %v; ended_by=%s grace=%s", sig, endedBy, grace)
-			m.terminate(cmd, pid, grace, exitPending)
+			if m.terminate(cmd, pid, grace, last, exitPending, sigs) {
+				endedBy = session.EndedByStop
+			}
 		}
 	}
 	close(reapNow) // signalling is finished; let the spawn goroutine reap
@@ -310,29 +406,70 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 
 	// Abandoning remaining output after drainTimeout is deliberate: a
 	// descendant holding the pipe must not keep the session from finishing.
+	// Anything it writes later never reaches output.log; status.json says so.
+	truncated := false
 	select {
 	case <-drained:
 	case <-time.After(drainTimeout):
-		m.log.Printf("stdout still open after agent exit (a descendant holds it); not waiting")
+		truncated = true
+		m.log.Printf("stdout still open %s after agent exit (a descendant holds it); not waiting, later output is lost", drainTimeout)
 	}
 	close(stopFlush)
-	m.finish(endedBy, func(s *session.Status) { exitFacts(s, ps) })
+	m.finish(endedBy, func(s *session.Status) {
+		exitFacts(s, ps)
+		s.OutputTruncated = truncated
+	})
 	return 0
+}
+
+// requestGrace is the grace period a stop request asks for, else the session's.
+func (m *monitor) requestGrace(req session.StopRequest) time.Duration {
+	if req.Grace > 0 {
+		return time.Duration(req.Grace)
+	}
+	return time.Duration(m.sess.Grace)
 }
 
 // terminate sends SIGTERM to the agent's process group, waits up to grace for
 // the agent to die, then SIGKILLs the group. The agent is not reaped until the
 // caller closes reapNow, so (on Linux) its pgid cannot be reused meanwhile. It
 // returns once exitPending has been consumed.
-func (m *monitor) terminate(cmd *exec.Cmd, pgid int, grace time.Duration, exitPending <-chan struct{}) bool {
+//
+// While it waits, a further signal with a stop request newer than last
+// (requested_at) can shorten the wait to that request's requested_at + grace;
+// it never extends it. The first deadline is monotonic (receipt + grace); a
+// later one is wall-clock, so a clock step can move it. terminate reports
+// whether it saw such a request, whether or not it shortened the wait.
+func (m *monitor) terminate(cmd *exec.Cmd, pgid int, grace time.Duration, last time.Time,
+	exitPending <-chan struct{}, sigs <-chan os.Signal) (seen bool) {
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	select {
-	case <-exitPending:
-		if pinsZombie {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL) // reach lingering group members
+	deadline := time.Now().Add(grace)
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+wait:
+	for {
+		select {
+		case <-exitPending:
+			if pinsZombie {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL) // reach lingering group members
+			}
+			return seen
+		case <-timer.C:
+			break wait
+		case sig := <-sigs:
+			req, ok := m.stopRequest()
+			if !ok || !req.RequestedAt.After(last) {
+				m.log.Printf("received %v during termination; no newer stop request", sig)
+				continue
+			}
+			last, seen = req.RequestedAt, true
+			if d := req.RequestedAt.Add(m.requestGrace(req)); d.Before(deadline) {
+				deadline = d
+				timer.Reset(time.Until(d)) // Go 1.23+: Reset needs no drain
+			}
+			m.log.Printf("received %v during termination; stop request at %s, killing at %s",
+				sig, req.RequestedAt.Format(time.RFC3339Nano), deadline.UTC().Format(time.RFC3339Nano))
 		}
-		return true
-	case <-time.After(grace):
 	}
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	_ = cmd.Process.Kill() // covers a leader that left the group
@@ -342,7 +479,7 @@ func (m *monitor) terminate(cmd *exec.Cmd, pgid int, grace time.Duration, exitPe
 		m.log.Printf("agent still alive after SIGKILL; still waiting for it to exit")
 		<-exitPending
 	}
-	return true
+	return seen
 }
 
 func exitFacts(s *session.Status, ps *os.ProcessState) {
@@ -359,7 +496,7 @@ func exitFacts(s *session.Status, ps *os.ProcessState) {
 	s.ExitCode = &code
 }
 
-// pump copies agent stdout to output.log unchanged and feeds the parser.
+// lineSafe feeds one line to the parser, recovering a panic; callers hold m.mu.
 func (m *monitor) lineSafe(p parser.Parser, line []byte) (changed bool) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -371,35 +508,84 @@ func (m *monitor) lineSafe(p parser.Parser, line []byte) (changed bool) {
 	return p.Line(line, &m.st.Fields)
 }
 
-func (m *monitor) pump(r *os.File, out *os.File, p parser.Parser, done chan<- struct{}) {
-	defer close(done)
-	defer r.Close()
+// pump copies agent stdout to output.log unchanged and feeds the parser one
+// line at a time. Every byte is written through as it is read. A line is
+// accumulated for the parser only up to maxParseLine bytes; once it is longer
+// the pump stops accumulating, keeps writing the rest straight through,
+// counts one parse error, and resumes parsing after the next newline. So
+// memory stays bounded however long a line is.
+func (m *monitor) pump(r io.Reader, out io.Writer, p parser.Parser) {
 	br := bufio.NewReaderSize(r, 64*1024)
+	var line []byte
+	overlong := false
 	for {
-		line, err := br.ReadBytes('\n')
-		if len(line) > 0 {
-			_, _ = out.Write(line)
-			m.mu.Lock()
-			switch {
-			case len(line) > maxParseLine:
-				m.st.ParseErrors++
-				m.dirty = true
-			case m.lineSafe(p, bytes.TrimRight(line, "\r\n")):
-				if len(m.st.FinalMessage) > maxFinalMessage {
-					i := maxFinalMessage
-					for i > 0 && !utf8.RuneStart(m.st.FinalMessage[i]) {
-						i-- // never split a UTF-8 sequence
-					}
-					m.st.FinalMessage = m.st.FinalMessage[:i]
+		chunk, err := br.ReadSlice('\n') // valid only until the next read
+		if len(chunk) > 0 {
+			_, _ = out.Write(chunk)
+			if !overlong {
+				if len(line)+len(chunk) > maxParseLine {
+					overlong, line = true, nil
+				} else {
+					line = appendCapped(line, chunk)
 				}
-				m.dirty = true
 			}
-			m.mu.Unlock()
+		}
+		if err == bufio.ErrBufferFull {
+			continue // the line goes on
+		}
+		if err == nil || len(line) > 0 || overlong { // a newline, or a last unterminated line
+			m.endLine(p, line, overlong)
 		}
 		if err != nil {
 			return
 		}
+		overlong = false
+		if cap(line) > keepLineCap {
+			line = nil
+		} else {
+			line = line[:0]
+		}
 	}
+}
+
+// appendCapped appends chunk to line, growing it by doubling but never past
+// maxParseLine (the caller guarantees the result fits).
+func appendCapped(line, chunk []byte) []byte {
+	need := len(line) + len(chunk)
+	if need > cap(line) {
+		n := max(2*cap(line), need, 4096)
+		n = min(n, maxParseLine)
+		grown := make([]byte, len(line), n)
+		copy(grown, line)
+		line = grown
+	}
+	return append(line, chunk...)
+}
+
+// endLine records one complete line: a parse error if it was overlong, else
+// the parser's update.
+func (m *monitor) endLine(p parser.Parser, line []byte, overlong bool) {
+	if overlong {
+		m.log.Printf("stdout line longer than %d bytes: written to output.log, not parsed", maxParseLine)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if overlong {
+		m.st.ParseErrors++
+		m.dirty = true
+		return
+	}
+	if !m.lineSafe(p, bytes.TrimRight(line, "\r\n")) {
+		return
+	}
+	if len(m.st.FinalMessage) > maxFinalMessage {
+		i := maxFinalMessage
+		for i > 0 && !utf8.RuneStart(m.st.FinalMessage[i]) {
+			i-- // never split a UTF-8 sequence
+		}
+		m.st.FinalMessage = m.st.FinalMessage[:i]
+	}
+	m.dirty = true
 }
 
 // flushLoop writes parser updates at most once per second.
@@ -411,11 +597,7 @@ func (m *monitor) flushLoop(stop <-chan struct{}) {
 		case <-stop:
 			return
 		case <-t.C:
-			m.mu.Lock()
-			if m.dirty {
-				m.write()
-			}
-			m.mu.Unlock()
+			m.flush()
 		}
 	}
 }
