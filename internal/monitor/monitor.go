@@ -437,9 +437,11 @@ func (m *monitor) requestGrace(req session.StopRequest) time.Duration {
 //
 // While it waits, a further signal with a stop request newer than last
 // (requested_at) can shorten the wait to that request's requested_at + grace;
-// it never extends it. terminate reports whether it honoured such a request.
+// it never extends it. The first deadline is monotonic (receipt + grace); a
+// later one is wall-clock, so a clock step can move it. terminate reports
+// whether it saw such a request, whether or not it shortened the wait.
 func (m *monitor) terminate(cmd *exec.Cmd, pgid int, grace time.Duration, last time.Time,
-	exitPending <-chan struct{}, sigs <-chan os.Signal) (honoured bool) {
+	exitPending <-chan struct{}, sigs <-chan os.Signal) (seen bool) {
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 	deadline := time.Now().Add(grace)
 	timer := time.NewTimer(grace)
@@ -451,7 +453,7 @@ wait:
 			if pinsZombie {
 				_ = syscall.Kill(-pgid, syscall.SIGKILL) // reach lingering group members
 			}
-			return honoured
+			return seen
 		case <-timer.C:
 			break wait
 		case sig := <-sigs:
@@ -460,7 +462,7 @@ wait:
 				m.log.Printf("received %v during termination; no newer stop request", sig)
 				continue
 			}
-			last, honoured = req.RequestedAt, true
+			last, seen = req.RequestedAt, true
 			if d := req.RequestedAt.Add(m.requestGrace(req)); d.Before(deadline) {
 				deadline = d
 				timer.Reset(time.Until(d)) // Go 1.23+: Reset needs no drain
@@ -477,7 +479,7 @@ wait:
 		m.log.Printf("agent still alive after SIGKILL; still waiting for it to exit")
 		<-exitPending
 	}
-	return honoured
+	return seen
 }
 
 func exitFacts(s *session.Status, ps *os.ProcessState) {
