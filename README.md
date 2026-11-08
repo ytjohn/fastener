@@ -40,7 +40,7 @@ once an hour (`.last-prune` in the state directory); `ps` prunes before it lists
 `exited` and `restore-failed` sessions are removed. Sessions that are running,
 `lost`, pinned, that still have leftover processes, or whose leftover-process
 check could not be done (reason `unknown`) are never removed (`prune` reports
-the old ones it kept). `retention` must be at least 1h. After an old session is
+the old ones it kept). Prune never acts on less than 1h from config: a smaller `retention` is clamped to 1h with a warning. After an old session is
 auto-pruned, its name can be reused by `run --name`. Set `auto_prune = false` in the config to turn off the
 opportunistic pruning.
 

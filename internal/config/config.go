@@ -98,9 +98,6 @@ func Load() (Config, error) {
 			return c, fmt.Errorf("%s: %s must be positive, got %q", path, d.name, d.v)
 		}
 	}
-	if r, _ := time.ParseDuration(c.Retention); r < time.Hour {
-		return c, fmt.Errorf("%s: retention must be at least 1h, got %q", path, c.Retention)
-	}
 	switch c.Launcher {
 	case "auto", "setsid", "systemd":
 	default:
@@ -125,4 +122,23 @@ func (c Config) RetentionDuration() time.Duration {
 		return 168 * time.Hour
 	}
 	return d
+}
+
+// MinRetention is the smallest retention prune will act on. Load accepts any
+// positive value (v0.1 did); prune clamps.
+const MinRetention = time.Hour
+
+// EffectiveRetention is RetentionDuration clamped to MinRetention; clamped
+// reports whether it had to be.
+func (c Config) EffectiveRetention() (d time.Duration, clamped bool) {
+	d = c.RetentionDuration()
+	if d < MinRetention {
+		return MinRetention, true
+	}
+	return d, false
+}
+
+// ClampWarning is the stderr line printed when retention is clamped.
+func (c Config) ClampWarning() string {
+	return fmt.Sprintf("retention %s is below the 1h minimum; using 1h", c.Retention)
 }

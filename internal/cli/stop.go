@@ -60,6 +60,9 @@ func cmdRm(args []string, stdout, stderr io.Writer) int {
 		return exitOK
 	}
 	if v.OrphanErr != "" {
+		if !*force {
+			return fail(stderr, fmt.Errorf("session %s: orphan check unavailable (%s), so leftover processes cannot be ruled out; use --force to remove it anyway", name, v.OrphanErr))
+		}
 		fmt.Fprintf(stderr, "fastener: warning: %s: orphan check unavailable (%s); leftover processes may not be detected\n", name, v.OrphanErr)
 	}
 	if v.Alive() || len(v.Orphans) > 0 {

@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/ytjohn/fastener/internal/config"
 	"github.com/ytjohn/fastener/internal/session"
@@ -32,14 +33,17 @@ func cmdPrune(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(stderr, err)
 	}
-	ret := cfg.RetentionDuration()
+	ret, clamped := cfg.EffectiveRetention()
 	var set bool
 	fs.Visit(func(f *flag.Flag) { set = set || f.Name == "older-than" })
 	if set {
 		if *olderThan <= 0 {
 			return fail(stderr, usagef("--older-than must be positive, got %s", *olderThan))
 		}
-		ret = *olderThan
+		ret, clamped = *olderThan, false // explicit: no floor
+	}
+	if clamped {
+		fmt.Fprintf(stderr, "fastener: warning: %s\n", cfg.ClampWarning())
 	}
 	if session.SessionsDir() == "" {
 		return fail(stderr, session.ErrNoStateDir)
@@ -84,5 +88,11 @@ func autoPrune() {
 	if err != nil || !cfg.AutoPrune {
 		return
 	}
-	session.AutoPrune(session.PruneOptions{Retention: cfg.RetentionDuration(), Handshake: cfg.Handshake()})
+	ret, clamped := cfg.EffectiveRetention()
+	o := session.PruneOptions{Retention: ret, Handshake: cfg.Handshake()}
+	if clamped {
+		// Printed only when a prune actually runs (about hourly), not on every command.
+		o.OnRun = func() { fmt.Fprintf(os.Stderr, "fastener: warning: %s\n", cfg.ClampWarning()) }
+	}
+	session.AutoPrune(o)
 }

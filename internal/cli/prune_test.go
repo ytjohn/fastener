@@ -288,9 +288,11 @@ func TestPruneKeepsWhenPlanMissingOrCorrupt(t *testing.T) {
 			if len(r.Removed) != 0 || len(r.Kept) != 1 || r.Kept[0].Reason != "unknown" || !h.exists("s1") {
 				t.Fatalf("%s plan: %+v", mode, r)
 			}
-			if _, e, code := h.cmd("rm", "s1"); code != 0 || !strings.Contains(e, "orphan check unavailable") {
-				// rm keeps its behaviour but warns.
-				t.Fatalf("rm: exit %d, stderr %q", code, e)
+			if _, e, code := h.cmd("rm", "s1"); code != 1 || !strings.Contains(e, "--force") || !h.exists("s1") {
+				t.Fatalf("rm without --force: exit %d, stderr %q, exists %v", code, e, h.exists("s1"))
+			}
+			if _, e, code := h.cmd("rm", "--force", "s1"); code != 0 || !strings.Contains(e, "orphan check unavailable") || h.exists("s1") {
+				t.Fatalf("rm --force: exit %d, stderr %q, exists %v", code, e, h.exists("s1"))
 			}
 		})
 	}
@@ -318,5 +320,34 @@ func TestPruneWarnsBelowOneHour(t *testing.T) {
 	_, e, code := h.cmd("prune", "--older-than", "10m", "--dry-run")
 	if code != 0 || !strings.Contains(e, "under 1h") {
 		t.Fatalf("exit %d stderr %q", code, e)
+	}
+}
+
+func TestShortConfigRetentionIsClamped(t *testing.T) {
+	h := newHarness(t)
+	os.WriteFile(filepath.Join(h.config, "config.toml"), []byte("retention = \"30m\"\n"), 0o600)
+	h.doneSession("mid", 45*time.Minute) // older than 30m, younger than the 1h floor
+	h.doneSession("old", 2*time.Hour)
+	// The config still loads for other commands, with no warning.
+	if _, e, code := h.cmd("ps"); code != 0 || strings.Contains(e, "below") {
+		t.Fatalf("ps: exit %d stderr %q", code, e)
+	}
+	_, e, code := h.cmd("prune")
+	if code != 0 || !strings.Contains(e, "retention 30m is below the 1h minimum; using 1h") {
+		t.Fatalf("prune: exit %d stderr %q", code, e)
+	}
+	if !h.exists("mid") || h.exists("old") {
+		t.Fatalf("mid=%v old=%v", h.exists("mid"), h.exists("old"))
+	}
+	// Opportunistic prune warns once per actual run, and clamps too.
+	h.doneSession("old2", 2*time.Hour)
+	os.Remove(h.stamp())
+	_, e, _ = h.cmd("ps")
+	if !strings.Contains(e, "using 1h") || h.exists("old2") || !h.exists("mid") {
+		t.Fatalf("auto prune: stderr %q old2=%v mid=%v", e, h.exists("old2"), h.exists("mid"))
+	}
+	_, e, _ = h.cmd("ps")
+	if strings.Contains(e, "below") {
+		t.Fatalf("warned again while throttled: %q", e)
 	}
 }

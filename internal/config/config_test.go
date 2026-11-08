@@ -88,7 +88,6 @@ func TestRejectsBadValues(t *testing.T) {
 		"handshake_timeout = \"-1s\"\n",
 		"retention = \"0s\"\n",
 		"retention = \"-1h\"\n",
-		"retention = \"30m\"\n",
 		"launcher = \"sytemd\"\n",
 		"auto_prune = \"no\"\n",
 	} {
@@ -134,5 +133,21 @@ func TestAutoPruneAndRetention(t *testing.T) {
 	c, err = Load()
 	if err != nil || c.AutoPrune || c.RetentionDuration() != 48*time.Hour {
 		t.Fatalf("got %+v %v", c, err)
+	}
+}
+
+func TestShortRetentionAcceptedAndClamped(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FASTENER_CONFIG_DIR", dir)
+	writeCfg(t, dir, "retention = \"30m\"\n")
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("Load rejected a positive retention: %v", err)
+	}
+	if d, clamped := c.EffectiveRetention(); d != time.Hour || !clamped {
+		t.Fatalf("got %s clamped=%v", d, clamped)
+	}
+	if c.ClampWarning() != "retention 30m is below the 1h minimum; using 1h" {
+		t.Fatal(c.ClampWarning())
 	}
 }
