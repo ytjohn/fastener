@@ -11,6 +11,8 @@
 //	FAKE_STDERR=text           print text to stderr first
 //	FAKE_GRANDCHILD=1          start a long-lived child in the same process group
 //	FAKE_GRANDCHILD_PIDFILE=p  write that child's pid to p
+//	FAKE_GRANDCHILD_WRITES=d,… the child inherits stdout (holding the pipe open)
+//	                           and prints "grandchild-<i>" at each delay d after it starts
 //	FAKE_CRASH=1               kill itself with SIGKILL after init
 //	FAKE_MODEL=id              report id as the init event's model and in an assistant
 //	                           event's message.model (both absent when unset)
@@ -24,6 +26,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -40,6 +43,14 @@ func main() {
 	}
 	if os.Getenv("FAKE_ROLE") == "grandchild" {
 		signal.Ignore(syscall.SIGTERM, syscall.SIGHUP)
+		if w := os.Getenv("FAKE_GRANDCHILD_WRITES"); w != "" {
+			start := time.Now()
+			for i, d := range strings.Split(w, ",") {
+				dur, _ := time.ParseDuration(d)
+				time.Sleep(time.Until(start.Add(dur)))
+				fmt.Printf("grandchild-%d\n", i)
+			}
+		}
 		for {
 			time.Sleep(time.Hour)
 		}
@@ -54,6 +65,9 @@ func main() {
 	if os.Getenv("FAKE_GRANDCHILD") == "1" {
 		c := exec.Command(os.Args[0])
 		c.Env = append(os.Environ(), "FAKE_ROLE=grandchild")
+		if os.Getenv("FAKE_GRANDCHILD_WRITES") != "" {
+			c.Stdout = os.Stdout
+		}
 		if err := c.Start(); err != nil {
 			fmt.Fprintln(os.Stderr, "grandchild:", err)
 			os.Exit(90)

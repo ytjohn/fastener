@@ -403,13 +403,19 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 
 	// Abandoning remaining output after drainTimeout is deliberate: a
 	// descendant holding the pipe must not keep the session from finishing.
+	// Anything it writes later never reaches output.log; status.json says so.
+	truncated := false
 	select {
 	case <-drained:
 	case <-time.After(drainTimeout):
-		m.log.Printf("stdout still open after agent exit (a descendant holds it); not waiting")
+		truncated = true
+		m.log.Printf("stdout still open %s after agent exit (a descendant holds it); not waiting, later output is lost", drainTimeout)
 	}
 	close(stopFlush)
-	m.finish(endedBy, func(s *session.Status) { exitFacts(s, ps) })
+	m.finish(endedBy, func(s *session.Status) {
+		exitFacts(s, ps)
+		s.OutputTruncated = truncated
+	})
 	return 0
 }
 

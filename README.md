@@ -29,6 +29,11 @@ fastener rm <name> [--force]            # remove a finished session (refuses if 
 fastener check --all --static           # profile and binary checks for every backend, no model call
 ```
 
+`logs` shows the agent's stdout as recorded in `output.log`. After the agent
+exits, the monitor reads its stdout for at most 2 s more: if a process the agent
+started keeps the pipe open, later output is not recorded, and `inspect --json`
+shows `"output_truncated": true` in `status`.
+
 Add `--json` to `run`, `inspect`, `ps`, `backends`, `check` and `version` for
 machine-readable output (see `docs/json-schema.md`). `wait` exits with the
 agent's exit code: 124 on `--timeout`; 125 if the session was lost, failed to

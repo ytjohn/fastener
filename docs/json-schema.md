@@ -47,6 +47,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 - `started_at`, `ended_at`
 - `ended_by`: `exit` | `limit` | `stop` | `signal` | `launch-failed`
 - `exit_code` (absent when the agent was killed by a signal), `signal` (a name, e.g. `SIGKILL`), `error`
+- `output_truncated`: `true` when a descendant still held the agent's stdout open 2 s after the agent exited. The monitor stopped reading, so anything written to stdout after that is not in `output.log`. Omitted otherwise.
 - parser fields, each present only when known:
   - `conversation_id`
   - `final_message`, capped at 64 KiB (cut on a UTF-8 boundary)

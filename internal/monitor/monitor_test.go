@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -328,6 +329,56 @@ func TestStopAfterPlainSignalIsStop(t *testing.T) {
 	})
 	if st.EndedBy != session.EndedByStop || st.Signal != "SIGKILL" {
 		t.Fatalf("ended_by=%s signal=%s", st.EndedBy, st.Signal)
+	}
+}
+
+// TestDrainTimeoutTruncatesOutput: a grandchild holds stdout after the agent
+// exits. What it writes within the drain window is kept; what it writes later
+// is lost, and status.json records output_truncated.
+func TestDrainTimeoutTruncatesOutput(t *testing.T) {
+	pidfile := filepath.Join(t.TempDir(), "gc.pid")
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), []string{
+		"FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile,
+		"FAKE_GRANDCHILD_WRITES=300ms," + (drainTimeout + time.Second).String(),
+	}, 0)
+	t.Cleanup(func() {
+		if b, err := os.ReadFile(pidfile); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 0 {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+			}
+		}
+	})
+	start := time.Now()
+	st := runInProcess(t, d)
+	if st.EndedBy != session.EndedByExit || st.ExitCode == nil || *st.ExitCode != 0 {
+		t.Fatalf("ended_by=%s code=%v", st.EndedBy, st.ExitCode)
+	}
+	if !st.OutputTruncated {
+		t.Fatal("output_truncated not set after the drain timed out")
+	}
+	if st.FinalMessage != "pong" {
+		t.Fatalf("final_message=%q", st.FinalMessage)
+	}
+	// Wait past the grandchild's late write, then check it was not recorded.
+	time.Sleep(time.Until(start.Add(drainTimeout + 1500*time.Millisecond)))
+	out, _ := os.ReadFile(d.OutputLog())
+	if !strings.Contains(string(out), "grandchild-0") {
+		t.Fatalf("output written inside the drain window is missing:\n%s", out)
+	}
+	if strings.Contains(string(out), "grandchild-1") {
+		t.Fatalf("output written after the drain timeout reached output.log:\n%s", out)
+	}
+}
+
+// TestNoTruncationWhenStdoutCloses: the normal case leaves the flag unset.
+func TestNoTruncationWhenStdoutCloses(t *testing.T) {
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), nil, 0)
+	if st := runInProcess(t, d); st.OutputTruncated {
+		t.Fatal("output_truncated set although stdout closed with the agent")
+	}
+	b, _ := os.ReadFile(d.StatusPath())
+	if strings.Contains(string(b), "output_truncated") {
+		t.Fatalf("output_truncated not omitted: %s", b)
 	}
 }
 
