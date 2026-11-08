@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "state": "exited",
+  "generation": 1,
+  "monitor": {
+    "pid": 4101,
+    "start_time": 5101
+  },
+  "boot_id": "00000000-0000-4000-8000-000000000001",
+  "ended_at": "2026-01-02T03:05:07Z",
+  "ended_by": "launch-failed",
+  "error": "cwd /nonexistent/dir: no such file or directory",
+  "updated_at": "2026-01-02T03:05:08Z"
+}

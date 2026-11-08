@@ -244,7 +244,7 @@ A parser panic is recovered: it is logged, counted in `parse_errors`, and never 
 
 - A running monitor is unaffected by replacing the binary on disk.
 - The monitor reads its generation plan once, at start, and never reads the profile.
-- New CLIs read old state through `schema_version`. Keeping and testing a `testdata` fixture directory from each released schema version is a follow-up; v0.1 does not keep them yet.
+- New CLIs read old state through `schema_version`. `internal/session/testdata/state/<release>/` keeps real session directories as each release wrote them (v0.1.0 so far), and a test loads every one with the current code. A release that changes a schema adds a directory; existing ones are never edited.
 
 ## 5. Environment
 

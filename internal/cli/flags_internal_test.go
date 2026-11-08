@@ -1,9 +1,14 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/ytjohn/fastener/internal/session"
 )
 
 func TestParseArgsDoubleDashEndsFlags(t *testing.T) {
@@ -33,5 +38,31 @@ func TestParseArgsDoubleDashEndsFlags(t *testing.T) {
 		if !reflect.DeepEqual(got, c.want) || *cwd != c.cwd || *name != c.name {
 			t.Errorf("%v: pos=%v cwd=%q, want pos=%v cwd=%q", c.args, got, *cwd, c.want, c.cwd)
 		}
+	}
+}
+
+func TestInspectShowsUnknownLiveness(t *testing.T) {
+	v := &session.View{
+		Session:       session.Session{Name: "s", Backend: "fake"},
+		Status:        session.Status{State: session.StateRunning},
+		State:         session.StateRunning,
+		LivenessError: "permission denied",
+	}
+	var b bytes.Buffer
+	renderInspect(&b, v, inspectOf(v))
+	if !strings.Contains(b.String(), "liveness    unknown (permission denied)") {
+		t.Fatalf("human output:\n%s", b.String())
+	}
+	j, _ := json.Marshal(inspectOf(v))
+	if !strings.Contains(string(j), `"liveness_error":"permission denied"`) {
+		t.Fatalf("json: %s", j)
+	}
+
+	v.LivenessError = ""
+	b.Reset()
+	renderInspect(&b, v, inspectOf(v))
+	j, _ = json.Marshal(inspectOf(v))
+	if strings.Contains(b.String(), "liveness") || strings.Contains(string(j), "liveness_error") {
+		t.Fatalf("liveness shown when known:\n%s\n%s", b.String(), j)
 	}
 }

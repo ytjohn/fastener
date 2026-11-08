@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "state": "exited",
+  "generation": 1,
+  "monitor": {
+    "pid": 4201,
+    "start_time": 5201
+  },
+  "agent": {
+    "pid": 4202,
+    "start_time": 5202
+  },
+  "pgid": 4202,
+  "boot_id": "00000000-0000-4000-8000-000000000001",
+  "started_at": "2026-01-02T03:06:07Z",
+  "ended_at": "2026-01-02T03:06:09Z",
+  "ended_by": "stop",
+  "signal": "SIGKILL",
+  "conversation_id": "fake-session-0001",
+  "updated_at": "2026-01-02T03:06:10Z"
+}

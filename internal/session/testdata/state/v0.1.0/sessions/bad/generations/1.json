@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "generation": 1,
+  "argv": [
+    "/tmp/x/fakeagent"
+  ],
+  "prompt_mode": "stdin",
+  "parser": "claude-stream-json",
+  "profile_source": "/tmp/x/config/backends/fake.toml",
+  "profile_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "marker": "bad:1:fixedmarker0000",
+  "fastener_version": "dev",
+  "planned_at": "2026-01-02T03:05:05Z"
+}

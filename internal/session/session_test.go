@@ -195,14 +195,14 @@ func TestResolveRereadBeforeLost(t *testing.T) {
 	dead := deadIdentity(t)
 	exited := Status{State: StateExited, EndedBy: EndedByExit, Monitor: &dead, BootID: boot}
 	v := &View{Status: Status{State: StateRunning, Monitor: &dead, BootID: boot}}
-	v.resolve(time.Second, time.Now(), func() (Status, *LauncherRecord, *Plan, error) { return exited, nil, nil, nil })
+	v.resolve(time.Second, time.Now(), proc.Check, func() (Status, *LauncherRecord, *Plan, error) { return exited, nil, nil, nil })
 	if v.State != StateExited || v.Status.EndedBy != EndedByExit {
 		t.Fatalf("state %s, status %+v", v.State, v.Status)
 	}
 	// unchanged on re-read: lost, with the fresh copy installed
 	fresh := Status{State: StateRunning, Monitor: &dead, BootID: boot, Generation: 1}
 	v = &View{Status: Status{State: StateRunning, Monitor: &dead, BootID: boot}}
-	v.resolve(time.Second, time.Now(), func() (Status, *LauncherRecord, *Plan, error) { return fresh, nil, nil, nil })
+	v.resolve(time.Second, time.Now(), proc.Check, func() (Status, *LauncherRecord, *Plan, error) { return fresh, nil, nil, nil })
 	if v.State != StateLost || v.Status.Generation != 1 {
 		t.Fatalf("state %s, status %+v", v.State, v.Status)
 	}
@@ -210,7 +210,7 @@ func TestResolveRereadBeforeLost(t *testing.T) {
 	self, _ := proc.Self()
 	live := Status{State: StateRunning, Monitor: &self, BootID: boot}
 	v = &View{Status: Status{State: StateRunning, Monitor: &dead, BootID: boot}}
-	v.resolve(time.Second, time.Now(), func() (Status, *LauncherRecord, *Plan, error) { return live, nil, nil, nil })
+	v.resolve(time.Second, time.Now(), proc.Check, func() (Status, *LauncherRecord, *Plan, error) { return live, nil, nil, nil })
 	if v.State != StateRunning {
 		t.Fatalf("state %s", v.State)
 	}
@@ -329,7 +329,7 @@ func TestResolveUnknownStateNotLost(t *testing.T) {
 	boot, _ := proc.BootID()
 	dead := deadIdentity(t)
 	v := &View{Status: Status{State: StateRunning, Monitor: &dead, BootID: boot}}
-	v.resolve(time.Second, time.Now(), func() (Status, *LauncherRecord, *Plan, error) {
+	v.resolve(time.Second, time.Now(), proc.Check, func() (Status, *LauncherRecord, *Plan, error) {
 		return Status{State: "future-state"}, nil, nil, nil
 	})
 	if v.State != "future-state" {
@@ -361,5 +361,94 @@ func TestRootAbsoluteForRelativeStateDir(t *testing.T) {
 	t.Setenv("FASTENER_STATE_DIR", "rel/state")
 	if r := Root(); !filepath.IsAbs(r) || !strings.HasSuffix(r, "rel/state") {
 		t.Fatalf("Root() = %q", r)
+	}
+}
+
+func TestLoadWarnsOnNewerSchemaVersion(t *testing.T) {
+	setup(t)
+	boot, _ := proc.BootID()
+	dead := deadIdentity(t)
+	d := writeSession(t, "future", time.Now(), Status{SchemaVersion: SchemaVersion + 1, State: StateExited, EndedBy: EndedByExit, Monitor: &dead, BootID: boot},
+		&LauncherRecord{SchemaVersion: SchemaVersion + 2, Launcher: "setsid", Monitor: &dead, BootID: boot})
+	if err := WriteJSON(d.SessionPath(), Session{SchemaVersion: SchemaVersion + 3, Name: "future", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteJSON(d.PlanPath(1), Plan{SchemaVersion: SchemaVersion + 4, Generation: 1, Marker: "future:1:x"}); err != nil {
+		t.Fatal(err)
+	}
+	v, err := Load("future", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"session.json has schema_version 4; this fastener understands up to 1, so some fields may be ignored",
+		"status.json has schema_version 2; this fastener understands up to 1, so some fields may be ignored",
+		"generations/1.json has schema_version 5; this fastener understands up to 1, so some fields may be ignored",
+		"generations/1.launcher.json has schema_version 3; this fastener understands up to 1, so some fields may be ignored",
+	}
+	if strings.Join(v.Warnings, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("warnings:\n%s\nwant:\n%s", strings.Join(v.Warnings, "\n"), strings.Join(want, "\n"))
+	}
+	if v.State != StateExited {
+		t.Fatalf("state %s", v.State)
+	}
+}
+
+func TestLoadNoWarningsAtCurrentOrOlderSchema(t *testing.T) {
+	setup(t)
+	boot, _ := proc.BootID()
+	dead := deadIdentity(t)
+	writeSession(t, "now", time.Now(), Status{SchemaVersion: SchemaVersion, State: StateExited, Monitor: &dead, BootID: boot},
+		&LauncherRecord{SchemaVersion: SchemaVersion, Launcher: "setsid", Monitor: &dead, BootID: boot})
+	v, err := Load("now", time.Second)
+	if err != nil || len(v.Warnings) != 0 {
+		t.Fatalf("%v %v", v.Warnings, err)
+	}
+}
+
+func TestResolveRecordsUnknownLiveness(t *testing.T) {
+	boot := "boot-1"
+	id := proc.Identity{PID: 4242, StartTime: 1}
+	boom := errors.New("read /proc/4242/stat: permission denied")
+	unknown := func(proc.Identity, string) (bool, error) { return false, boom }
+	gone := func(proc.Identity, string) (bool, error) { return false, nil }
+	alive := func(proc.Identity, string) (bool, error) { return true, nil }
+	noReload := func() (Status, *LauncherRecord, *Plan, error) { return Status{}, nil, nil, errors.New("unused") }
+	mk := func() *View { return &View{Status: Status{State: StateRunning, Monitor: &id, BootID: boot}} }
+
+	v := mk()
+	v.resolve(time.Second, time.Now(), unknown, noReload)
+	if v.State != StateRunning || v.LivenessError != boom.Error() {
+		t.Fatalf("unknown: state %s, err %q", v.State, v.LivenessError)
+	}
+
+	v = mk()
+	v.resolve(time.Second, time.Now(), alive, noReload)
+	if v.State != StateRunning || v.LivenessError != "" {
+		t.Fatalf("alive: state %s, err %q", v.State, v.LivenessError)
+	}
+
+	v = mk()
+	v.resolve(time.Second, time.Now(), gone, noReload)
+	if v.State != StateLost || v.LivenessError != "" {
+		t.Fatalf("gone: state %s, err %q", v.State, v.LivenessError)
+	}
+
+	// An exited session never consults the checker.
+	v = &View{Status: Status{State: StateExited, Monitor: &id, BootID: boot}}
+	v.resolve(time.Second, time.Now(), func(proc.Identity, string) (bool, error) {
+		t.Fatal("checker called for exited session")
+		return false, nil
+	}, noReload)
+	if v.State != StateExited || v.LivenessError != "" {
+		t.Fatalf("exited: state %s, err %q", v.State, v.LivenessError)
+	}
+
+	// Unknown liveness is not kept if the re-read shows the session ended.
+	v = mk()
+	exited := Status{State: StateExited, Monitor: &id, BootID: boot}
+	v.resolve(time.Second, time.Now(), gone, func() (Status, *LauncherRecord, *Plan, error) { return exited, nil, nil, nil })
+	if v.State != StateExited || v.LivenessError != "" {
+		t.Fatalf("reloaded: state %s, err %q", v.State, v.LivenessError)
 	}
 }
