@@ -85,7 +85,16 @@ var (
 	fakeOnce sync.Once
 	fakeBin  string
 	fakeErr  error
+	fakeDir  string
 )
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if fakeDir != "" {
+		os.RemoveAll(fakeDir)
+	}
+	os.Exit(code)
+}
 
 func buildFake(t *testing.T) string {
 	t.Helper()
@@ -95,6 +104,7 @@ func buildFake(t *testing.T) string {
 			fakeErr = err
 			return
 		}
+		fakeDir = dir
 		fakeBin = filepath.Join(dir, "fakeagent")
 		if out, err := exec.Command("go", "build", "-o", fakeBin, "../testbin/fakeagent").CombinedOutput(); err != nil {
 			fakeErr = fmt.Errorf("%v\n%s", err, out)

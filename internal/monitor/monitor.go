@@ -164,6 +164,12 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	}
 	defer errLog.Close()
 
+	if fi, err := os.Stat(m.sess.Cwd); err != nil {
+		return m.launchFailed(fmt.Errorf("cwd %s: %w", m.sess.Cwd, err))
+	} else if !fi.IsDir() {
+		return m.launchFailed(fmt.Errorf("cwd %s: not a directory", m.sess.Cwd))
+	}
+
 	cmd := exec.Command(m.plan.Argv[0], m.plan.Argv[1:]...)
 	cmd.Dir = m.sess.Cwd
 	cmd.Env = env
