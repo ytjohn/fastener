@@ -39,6 +39,7 @@ func (none) Line([]byte, *Fields) bool { return false }
 var registry = map[string]Parser{
 	"none":               none{},
 	"claude-stream-json": claudeStreamJSON{},
+	"pi-json":            piJSON{},
 }
 
 // Get returns the named parser.

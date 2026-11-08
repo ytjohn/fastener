@@ -376,7 +376,10 @@ Phase B adds `check --interactive [--remote]`. It launches with a pty, confirms 
 
 ## 7. Parsers
 
-Named Go functions selected by profile. v0.1 ships `claude-stream-json` and `none`; `codex-jsonl` arrives in v0.2 (Codex and Pi use `none` until then, so their `parse` step is `skip` and `reply` searches `output.log`).
+Named Go functions selected by profile. v0.1 ships `claude-stream-json`, `pi-json` and `none`; `codex-jsonl` arrives in v0.2 (Codex uses `none` until then, so its `parse` step is `skip` and `reply` searches `output.log`).
+
+- **`claude-stream-json`** (`claude -p --output-format stream-json --verbose`): `conversation_id` from any event's `session_id`; `model` from the `system/init` event (a bare model id); `final_message`, `agent_error` (`is_error`) and `usage` from the `result` event.
+- **`pi-json`** (`pi -p --mode json`): `conversation_id` from the `session` event's `id`. Everything else comes from the last assistant `message_end`: `model` is `provider/model`; `final_message` is the concatenated `text` content blocks (`thinking` blocks are skipped), or `errorMessage` when `stopReason` is `error`; `agent_error` is `stopReason == "error"`; `usage` is `input + cacheRead + cacheWrite` input tokens, `output` output tokens and `cost.total`. Pi exits 0 even when the model call failed, so `agent_error` is what catches it.
 
 - Run inside the monitor, streaming, one line at a time, while raw output is written to `output.log` unchanged.
 - **Extracted fields** (all optional, omitted when unknown):
