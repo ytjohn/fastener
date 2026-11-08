@@ -99,7 +99,16 @@ func TestRejectsBadValues(t *testing.T) {
 func TestRelativeXDGIgnored(t *testing.T) {
 	t.Setenv("FASTENER_CONFIG_DIR", "")
 	t.Setenv("XDG_CONFIG_HOME", "relative")
-	if d := Dir(); d == filepath.Join("relative", "fastener") {
+	if d := Dir(); !(filepath.IsAbs(d) || d == "") {
 		t.Fatalf("relative XDG_CONFIG_HOME used: %q", d)
+	}
+}
+
+func TestBackendsDirEmptyWithoutConfigDir(t *testing.T) {
+	t.Setenv("FASTENER_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HOME", "")
+	if d := BackendsDir(); d != "" {
+		t.Fatalf("BackendsDir = %q, want empty", d)
 	}
 }

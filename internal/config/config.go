@@ -39,7 +39,14 @@ func Dir() string {
 }
 
 // BackendsDir holds user backend profiles (<name>.toml).
-func BackendsDir() string { return filepath.Join(Dir(), "backends") }
+// It is "" when there is no config dir, never a relative path.
+func BackendsDir() string {
+	d := Dir()
+	if d == "" {
+		return ""
+	}
+	return filepath.Join(d, "backends")
+}
 
 func defaults() Config {
 	return Config{
