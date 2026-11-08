@@ -8,13 +8,20 @@ import (
 
 // claudeStreamJSON parses `claude -p --output-format stream-json --verbose`.
 // Every event carries session_id; the final "result" event carries the reply,
-// is_error, total_cost_usd and usage. The system/init event names the model.
+// is_error, total_cost_usd and usage.
+//
+// The served model is the last assistant event's message.model, which the
+// Anthropic API reports. Until one arrives, the system/init event's model (the
+// CLI's own setting) stands in as client-reported. An error result clears it.
 type claudeStreamJSON struct{}
 
 type claudeEvent struct {
-	Type         string   `json:"type"`
-	Subtype      string   `json:"subtype"`
-	Model        string   `json:"model"`
+	Type    string `json:"type"`
+	Subtype string `json:"subtype"`
+	Model   string `json:"model"`
+	Message *struct {
+		Model string `json:"model"`
+	} `json:"message"`
 	SessionID    string   `json:"session_id"`
 	Result       *string  `json:"result"`
 	IsError      *bool    `json:"is_error"`
@@ -46,9 +53,11 @@ func (claudeStreamJSON) Line(line []byte, f *Fields) bool {
 		f.ConversationID = e.SessionID
 		changed = true
 	}
-	if e.Type == "system" && e.Subtype == "init" && e.Model != "" && e.Model != f.Model {
-		f.Model = e.Model
-		changed = true
+	switch {
+	case e.Type == "system" && e.Subtype == "init" && e.Model != "" && f.ModelSource != "server":
+		changed = setModel(f, e.Model, "client") || changed
+	case e.Type == "assistant" && e.Message != nil && e.Message.Model != "" && e.Message.Model != "<synthetic>":
+		changed = setModel(f, e.Message.Model, "server") || changed
 	}
 	if e.Type != "result" {
 		return changed
@@ -61,6 +70,9 @@ func (claudeStreamJSON) Line(line []byte, f *Fields) bool {
 		v := *e.IsError
 		f.AgentError = &v
 		changed = true
+		if v {
+			f.Model, f.ModelSource = "", ""
+		}
 	}
 	if e.Usage != nil {
 		u := &Usage{
@@ -78,4 +90,12 @@ func (claudeStreamJSON) Line(line []byte, f *Fields) bool {
 		changed = true
 	}
 	return changed
+}
+
+func setModel(f *Fields, model, source string) bool {
+	if f.Model == model && f.ModelSource == source {
+		return false
+	}
+	f.Model, f.ModelSource = model, source
+	return true
 }

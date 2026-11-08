@@ -12,7 +12,8 @@
 //	FAKE_GRANDCHILD=1          start a long-lived child in the same process group
 //	FAKE_GRANDCHILD_PIDFILE=p  write that child's pid to p
 //	FAKE_CRASH=1               kill itself with SIGKILL after init
-//	FAKE_MODEL=id              report id as the init event's model (absent when unset)
+//	FAKE_MODEL=id              report id as the init event's model and in an assistant
+//	                           event's message.model (both absent when unset)
 package main
 
 import (
@@ -73,6 +74,10 @@ func main() {
 	if d := os.Getenv("FAKE_SLEEP"); d != "" {
 		dur, _ := time.ParseDuration(d)
 		time.Sleep(dur)
+	}
+	if m := os.Getenv("FAKE_MODEL"); m != "" {
+		emit(map[string]any{"type": "assistant", "session_id": sid,
+			"message": map[string]any{"role": "assistant", "model": m, "content": []any{}}})
 	}
 	reply := "pong"
 	if v, ok := os.LookupEnv("FAKE_REPLY"); ok {

@@ -40,8 +40,8 @@ func TestClaudeStreamJSONFixture(t *testing.T) {
 	if got.FinalMessage != "pong" {
 		t.Errorf("FinalMessage = %q", got.FinalMessage)
 	}
-	if got.Model != "claude-opus-5-5" {
-		t.Errorf("Model = %q", got.Model)
+	if got.Model != "claude-opus-5-5" || got.ModelSource != "server" {
+		t.Errorf("Model = %q, ModelSource = %q", got.Model, got.ModelSource)
 	}
 	if got.AgentError == nil || *got.AgentError {
 		t.Errorf("AgentError = %v, want false", got.AgentError)
@@ -127,16 +127,34 @@ func TestClaudeCostOnlyNoFakeTokens(t *testing.T) {
 	}
 }
 
-func TestClaudeModelOnlyFromInit(t *testing.T) {
+func TestClaudeModelPrefersAssistant(t *testing.T) {
 	p, _ := Get("claude-stream-json")
 	var f Fields
-	if p.Line([]byte(`{"type":"assistant","model":"not-this","session_id":"s"}`), &f); f.Model != "" {
-		t.Errorf("non-init event set Model = %q", f.Model)
+	if p.Line([]byte(`{"type":"result","model":"not-this","session_id":"s"}`), &f); f.Model != "" {
+		t.Errorf("result event set Model = %q", f.Model)
 	}
-	if !p.Line([]byte(`{"type":"system","subtype":"init","model":"m1","session_id":"s"}`), &f) || f.Model != "m1" {
-		t.Errorf("init model not captured: %+v", f)
+	// init alone: the CLI's own setting, so client-reported.
+	if !p.Line([]byte(`{"type":"system","subtype":"init","model":"A","session_id":"s"}`), &f) || f.Model != "A" || f.ModelSource != "client" {
+		t.Fatalf("init fallback: %+v", f)
 	}
-	if p.Line([]byte(`{"type":"system","subtype":"init","model":"m1","session_id":"s"}`), &f) {
-		t.Error("repeated init model reported a change")
+	if !p.Line([]byte(`{"type":"assistant","message":{"role":"assistant","model":"B","content":[]},"session_id":"s"}`), &f) || f.Model != "B" || f.ModelSource != "server" {
+		t.Fatalf("assistant model not preferred: %+v", f)
+	}
+	if p.Line([]byte(`{"type":"system","subtype":"init","model":"A","session_id":"s"}`), &f) || f.Model != "B" {
+		t.Errorf("a later init overrode the assistant model: %+v", f)
+	}
+	// Claude Code's synthetic messages (local errors) name no real model.
+	p.Line([]byte(`{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[]},"session_id":"s"}`), &f)
+	if f.Model != "B" {
+		t.Errorf("synthetic model taken: %+v", f)
+	}
+	p.Line([]byte(`{"type":"assistant","message":{"role":"assistant","model":"C","content":[]},"session_id":"s"}`), &f)
+	if f.Model != "C" {
+		t.Errorf("last assistant model not taken: %+v", f)
+	}
+	// An error result clears it: the model is not proven to have answered.
+	p.Line([]byte(`{"type":"result","is_error":true,"result":"API Error","session_id":"s"}`), &f)
+	if f.Model != "" || f.ModelSource != "" {
+		t.Errorf("model kept after an error result: %+v", f)
 	}
 }

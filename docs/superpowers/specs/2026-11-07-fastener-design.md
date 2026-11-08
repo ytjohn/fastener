@@ -383,7 +383,7 @@ Phase B adds `check --interactive [--remote]`. It launches with a pty, confirms 
 
 Named Go functions selected by profile. v0.1 ships `claude-stream-json`, `pi-json` and `none`; `codex-jsonl` arrives in v0.2 (Codex uses `none` until then, so its `parse` step is `skip` and `reply` searches `output.log`).
 
-- **`claude-stream-json`** (`claude -p --output-format stream-json --verbose`): `conversation_id` from any event's `session_id`; `model` from the `system/init` event (a bare model id); `final_message`, `agent_error` (`is_error`) and `usage` from the `result` event.
+- **`claude-stream-json`** (`claude -p --output-format stream-json --verbose`): `conversation_id` from any event's `session_id`; `model` from the last assistant event's `message.model` (a bare model id the Anthropic API reports; `model_source` `server`; Claude Code's `<synthetic>` placeholder is ignored), falling back to the `system/init` event's `model` (the CLI's own setting; `model_source` `client`) until an assistant event arrives; an error `result` clears `model`; `final_message`, `agent_error` (`is_error`) and `usage` from the `result` event.
 - **`pi-json`** (`pi -p --mode json`): `conversation_id` from the `session` event's `id`. `model`, `model_source`, `final_message` and `agent_error` come from the last assistant `message_end`:
   - `agent_error` is `stopReason` `error` or `aborted` (as pi's print mode treats them);
   - `final_message` is the concatenated `text` content blocks (`thinking` blocks are skipped); on `error` it is `errorMessage`, and on `aborted` it is `errorMessage` or else `Request aborted`;
