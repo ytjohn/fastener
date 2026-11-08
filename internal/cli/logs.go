@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -66,6 +67,11 @@ func followLog(name, path string, stdout, stderr io.Writer) (int, *session.View)
 		}
 		v, err := loadView(name)
 		if err != nil {
+			if errors.Is(err, session.ErrNotFound) {
+				// The caller loaded the session before following, so it existed.
+				fmt.Fprintf(stderr, "fastener: session %s was removed while following\n", name)
+				return exitAbnormal, nil
+			}
 			return fail(stderr, err), nil
 		}
 		if !v.Alive() {

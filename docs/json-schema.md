@@ -87,6 +87,7 @@ An array of `{name, source, sha256, command, parser, permissions, default_permis
   - 124 if `--timeout` elapsed;
   - 125 for `launch-failed`, `lost` or `restore-failed`, for a session removed while `wait` was running (it exists when `wait` starts, then disappears), for an exited session with neither an exit code nor a known signal, and for an agent that exited 0 while status `agent_error` is true (Pi's json mode exits 0 on a model error); a non-zero exit code is returned as is;
   - 127 for a session that never existed (unknown name at the time `wait` starts).
+- **`run --follow`:** same as `wait` (except 124, as there is no timeout). If the session is removed while following, it prints `session <name> was removed while following` and exits 125.
 - **Other commands:**
   - 0 for success;
   - 1 for failure (for `check`, any non-skipped backend failed, or `--all` checked nothing);

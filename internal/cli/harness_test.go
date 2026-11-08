@@ -134,6 +134,7 @@ type inspectJSON struct {
 		ExitCode       *int   `json:"exit_code"`
 		Signal         string `json:"signal"`
 		Error          string `json:"error"`
+		PGID           int    `json:"pgid"`
 		ConversationID string `json:"conversation_id"`
 		FinalMessage   string `json:"final_message"`
 		AgentError     *bool  `json:"agent_error"`

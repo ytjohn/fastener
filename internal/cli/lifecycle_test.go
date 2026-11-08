@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -503,6 +504,8 @@ func TestRunFollowReportsAgentOutcome(t *testing.T) {
 func TestWaitSessionRemovedMidWaitExits125(t *testing.T) {
 	h := newHarness(t)
 	h.start("rmw", []string{"FAKE_SLEEP=30s"})
+	v := h.waitState("rmw", "running", 10*time.Second)
+	t.Cleanup(func() { killGroup(v.Status.PGID) })
 	type result struct {
 		errOut string
 		code   int
@@ -512,22 +515,8 @@ func TestWaitSessionRemovedMidWaitExits125(t *testing.T) {
 		_, e, c := h.cmd("wait", "rmw", "--timeout", "30s")
 		done <- result{e, c}
 	}()
-	time.Sleep(600 * time.Millisecond) // let wait observe the live session
-	// `rm --force` stops the agent first, so a poll could legitimately see the
-	// exited state (143) before the directory goes. To test the removal path
-	// deterministically, drop the directory under the running session, then
-	// kill the agent the way cleanup would.
-	v := h.inspect("rmw")
-	if v.Status.Monitor == nil {
-		t.Fatal("no monitor pid")
-	}
-	if err := os.RemoveAll(filepath.Join(h.state, "sessions", "rmw")); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		syscall.Kill(-v.Status.Monitor.PID, syscall.SIGKILL)
-		syscall.Kill(v.Status.Monitor.PID, syscall.SIGKILL)
-	})
+	time.Sleep(500 * time.Millisecond) // let wait load the running session at least once
+	h.removeSessionDir("rmw")
 	select {
 	case r := <-done:
 		if r.code != 125 || !strings.Contains(r.errOut, "session rmw was removed while waiting") {
@@ -538,6 +527,67 @@ func TestWaitSessionRemovedMidWaitExits125(t *testing.T) {
 	}
 	if _, _, code := h.cmd("wait", "rmw"); code != 127 {
 		t.Fatalf("never-existed/now-gone session: code %d, want 127", code)
+	}
+}
+
+// removeSessionDir drops a session's directory under a running agent.
+// `rm --force` stops the agent first, so a poll could legitimately see the
+// exited state before the directory goes; this tests the removal path alone.
+func (h *harness) removeSessionDir(name string) {
+	h.t.Helper()
+	if err := os.RemoveAll(filepath.Join(h.state, "sessions", name)); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// pollRunningPGID waits for a session that may not exist yet to be running.
+func (h *harness) pollRunningPGID(name string) int {
+	h.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if out, _, code := h.cmd("inspect", name, "--json"); code == 0 {
+			var v inspectJSON
+			if json.Unmarshal([]byte(out), &v) == nil && v.State == "running" && v.Status.PGID > 0 {
+				return v.Status.PGID
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	h.t.Fatalf("%s never reached running", name)
+	return 0
+}
+
+func killGroup(pgid int) {
+	if pgid > 1 {
+		syscall.Kill(-pgid, syscall.SIGKILL)
+	}
+}
+
+func TestRunFollowSessionRemovedExits125(t *testing.T) {
+	h := newHarness(t)
+	c := exec.Command(fastenerBin, "run", "fake", "--name", "rmf", "--cwd", h.work, "--prompt", "hello",
+		"--env", "FAKE_SLEEP=30s", "--follow")
+	c.Env = append(os.Environ(), "FASTENER_STATE_DIR="+h.state, "FASTENER_CONFIG_DIR="+h.config, "TMPDIR="+h.work)
+	var out, errb bytes.Buffer
+	c.Stdout, c.Stderr = &out, &errb
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan error, 1)
+	go func() { waited <- c.Wait() }()
+	pgid := h.pollRunningPGID("rmf")
+	t.Cleanup(func() { killGroup(pgid) })
+	time.Sleep(500 * time.Millisecond)
+	h.removeSessionDir("rmf")
+	select {
+	case err := <-waited:
+		ee, ok := err.(*exec.ExitError)
+		if !ok || ee.ExitCode() != 125 || !strings.Contains(errb.String(), "session rmf was removed while following") {
+			t.Fatalf("err %v, stderr %q; want 125 with removal message", err, errb.String())
+		}
+	case <-time.After(15 * time.Second):
+		c.Process.Kill()
+		t.Fatal("run --follow did not return after the session was removed")
 	}
 }
 

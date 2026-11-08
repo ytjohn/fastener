@@ -464,7 +464,7 @@ fastener install-restore
 
 - **`run`:**
   - Detached by default; prints the session name, or the full status with `--json`.
-  - `--follow` follows the logs after launch, then exits with the code `wait` would report for the session (the agent's exit code, 128+N for a signal, 125 for an abnormal end). (This is not `attach`, which is the phase B pty command.)
+  - `--follow` follows the logs after launch, then exits with the code `wait` would report for the session (the agent's exit code, 128+N for a signal, 125 for an abnormal end, including a session removed while following). (This is not `attach`, which is the phase B pty command.)
   - `--prompt` and `--prompt-file` are mutually exclusive. One is required for headless runs, and `--cwd` is required.
   - `--prompt-file -` reads the prompt from stdin. A prompt (from a file or stdin) larger than 4 MiB is a usage error (exit 2) naming the limit, and `--prompt-file` rejects anything that is not a regular file (a FIFO or device such as `/dev/zero`) rather than reading it.
   - Labels are stored in v0.1 (`check` uses `fastener.check=true`); filtering by them is v0.2.
