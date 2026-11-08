@@ -129,11 +129,19 @@ func TestLoadUserFileProblems(t *testing.T) {
 	}
 }
 
-func TestArgPromptGuard(t *testing.T) {
-	pi, err := Load("pi", t.TempDir())
+// argModeProfile is an inline profile that takes its prompt as an argument.
+// No built-in does any more (Pi moved to stdin), but the mode is supported.
+func argModeProfile(t *testing.T) *Profile {
+	t.Helper()
+	p, err := Parse([]byte("schema_version = 1\nname = \"argy\"\ncommand = \"argy\"\n[headless]\nargs = [\"-p\"]\nprompt = \"arg\"\nparser = \"none\"\n[options]\nmodel = [\"--model\", \"{value}\"]\n[permissions]\nskip = []\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	return p
+}
+
+func TestArgPromptGuard(t *testing.T) {
+	pi := argModeProfile(t)
 	r, err := pi.RenderHeadless(Request{Permissions: "skip", Prompt: "a\n-- b"})
 	if err != nil {
 		t.Fatal(err)
@@ -180,13 +188,24 @@ func TestRenderNoSilentFallback(t *testing.T) {
 	if _, err := pi.RenderHeadless(Request{Permissions: "auto"}); err == nil || !strings.Contains(err.Error(), "skip") {
 		t.Fatalf("pi auto: %v (want error naming defined levels)", err)
 	}
-	r, err := pi.RenderHeadless(Request{Permissions: "skip", Prompt: "-rf hello"})
+	argy := argModeProfile(t)
+	r, err := argy.RenderHeadless(Request{Permissions: "skip", Prompt: "-rf hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	n := len(r.Args)
 	if r.Args[n-2] != "--" || r.Args[n-1] != "-rf hello" {
 		t.Fatalf("arg prompt not guarded by --: %q", r.Args)
+	}
+	// Pi's prompt goes on stdin, so a leading "@" (a file include to pi) never reaches its argv.
+	r, err = pi.RenderHeadless(Request{Permissions: "skip", Prompt: "@team please review"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range r.Args {
+		if strings.Contains(a, "@team") {
+			t.Fatalf("pi prompt leaked into argv: %q", r.Args)
+		}
 	}
 	if _, err := pi.RenderHeadless(Request{Permissions: "skip", Model: "--evil", Prompt: "p"}); err == nil {
 		t.Fatal("model starting with '-' accepted")
@@ -307,8 +326,8 @@ func TestPiRendersJSONWithDefaultSkip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"-p", "--mode", "json", "--model", "github-copilot/claude-haiku-4.5", "--", "hi"}
-	if !reflect.DeepEqual(r.Args, want) || r.Parser != "pi-json" || r.PromptMode != "arg" {
+	want := []string{"-p", "--mode", "json", "--model", "github-copilot/claude-haiku-4.5"}
+	if !reflect.DeepEqual(r.Args, want) || r.Parser != "pi-json" || r.PromptMode != "stdin" {
 		t.Fatalf("render = %+v", r)
 	}
 	// An explicit auto still errors: no silent fallback.

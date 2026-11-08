@@ -9,9 +9,12 @@ default_permissions = "skip"
 
 [headless]
 args   = ["-p", "--mode", "json"]
-# Fastener appends "--" and then the prompt. Unverified: pi may treat a prompt
-# starting with "@" as a file include; revisit in v0.2.
-prompt = "arg"
+# The prompt goes on stdin. Pi treats any argument starting with "@" as a file
+# to attach, even after "--" (pi 0.84.4, dist/cli/args.js), so passing the
+# prompt as an argument would misread prompts like "@team please review".
+# Piped stdin becomes the initial message verbatim. It also keeps the prompt
+# out of argv (ps, plan.argv).
+prompt = "stdin"
 parser = "pi-json"
 
 [options]
