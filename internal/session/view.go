@@ -24,6 +24,9 @@ type View struct {
 
 // Load reads a session. handshake is the configured handshake timeout; a
 // starting session with no monitor record is lost once older than 2×handshake.
+// A missing status.json reads as "starting"; a missing session.json is
+// replaced by a stub named after the directory. Corrupt files are errors.
+// Load does not scan for orphans; use LoadFull for that.
 func Load(name string, handshake time.Duration) (*View, error) {
 	if !ValidName(name) {
 		return nil, fmt.Errorf("%w: %q", ErrNotFound, name)
@@ -32,27 +35,70 @@ func Load(name string, handshake time.Duration) (*View, error) {
 	if d == "" {
 		return nil, ErrNoStateDir
 	}
-	if _, err := os.Stat(string(d)); errors.Is(err, fs.ErrNotExist) {
+	fi, err := os.Stat(string(d))
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, name)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	v := &View{Dir: d}
 	if err := ReadJSON(d.SessionPath(), &v.Session); err != nil {
-		return nil, fmt.Errorf("%s: %w", name, err)
+		if !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		v.Session = Session{Name: name, CreatedAt: fi.ModTime()}
 	}
 	if err := ReadJSON(d.StatusPath(), &v.Status); err != nil {
-		return nil, fmt.Errorf("%s: %w", name, err)
+		if !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		v.Status = Status{State: StateStarting}
 	}
 	gen := v.Generation()
 	var p Plan
 	if ReadJSON(d.PlanPath(gen), &p) == nil {
 		v.Plan = &p
 	}
+	v.Launcher = readLauncher(d, gen)
+	v.resolve(handshake, time.Now(), func() (Status, *LauncherRecord, error) {
+		var st Status
+		if err := ReadJSON(d.StatusPath(), &st); err != nil {
+			return Status{}, nil, err
+		}
+		g := 1
+		if st.Generation > 0 {
+			g = st.Generation
+		}
+		return st, readLauncher(d, g), nil
+	})
+	return v, nil
+}
+
+func readLauncher(d Dir, gen int) *LauncherRecord {
 	var l LauncherRecord
 	if ReadJSON(d.LauncherPath(gen), &l) == nil {
-		v.Launcher = &l
+		return &l
 	}
-	v.resolve(handshake, time.Now())
+	return nil
+}
+
+// LoadFull is Load plus an orphan scan for lost sessions.
+func LoadFull(name string, handshake time.Duration) (*View, error) {
+	v, err := Load(name, handshake)
+	if err != nil {
+		return nil, err
+	}
+	v.FindOrphans()
 	return v, nil
+}
+
+// FindOrphans fills Orphans with marked processes still alive in a lost
+// session. It is a no-op for other states.
+func (v *View) FindOrphans() {
+	if v.State == StateLost && v.Plan != nil {
+		v.Orphans, _ = proc.FindMarked(v.Status.PGID, v.Plan.Marker, v.Status.BootID)
+	}
 }
 
 // Generation is the current generation (1 if status predates the field).
@@ -78,20 +124,35 @@ func (v *View) MonitorIdentity() (proc.Identity, string, bool) {
 // Alive reports whether the session is still being supervised.
 func (v *View) Alive() bool { return v.State == StateRunning || v.State == StateStarting }
 
-func (v *View) resolve(handshake time.Duration, now time.Time) {
+// resolve computes the effective state. reload re-reads status.json and the
+// current launcher record; it is consulted once before declaring a session
+// lost, because the monitor always writes before it exits.
+func (v *View) resolve(handshake time.Duration, now time.Time, reload func() (Status, *LauncherRecord, error)) {
 	v.State = v.Status.State
-	if v.State == StateRunning || v.State == StateStarting {
-		id, boot, ok := v.MonitorIdentity()
-		switch {
-		case ok && proc.MaybeAlive(id, boot):
-			// still supervised (or liveness unknown: never declare lost on a read error)
-		case !ok && v.State == StateStarting && now.Sub(v.Session.CreatedAt) < 2*handshake:
-			// launcher record not written yet; give it time
-		default:
-			v.State = StateLost
+	if v.State != StateRunning && v.State != StateStarting {
+		return
+	}
+	// TODO(v0.2): a systemd launcher record with only Unit must check the unit's state.
+	id, boot, ok := v.MonitorIdentity()
+	switch {
+	case ok && proc.MaybeAlive(id, boot):
+		return // still supervised (or liveness unknown: never declare lost on a read error)
+	case !ok && v.State == StateStarting && now.Sub(v.Session.CreatedAt) < 2*handshake:
+		return // launcher record not written yet; give it time
+	}
+	if reload != nil {
+		if st, l, err := reload(); err == nil {
+			v.Status, v.Launcher = st, l
+			switch st.State {
+			case StateExited, StateRestoreFailed:
+				v.State = st.State
+				return
+			}
+			if id2, boot2, ok2 := v.MonitorIdentity(); ok2 && (!ok || id2 != id) && proc.MaybeAlive(id2, boot2) {
+				v.State = st.State
+				return
+			}
 		}
 	}
-	if v.State == StateLost && v.Plan != nil {
-		v.Orphans, _ = proc.FindMarked(v.Status.PGID, v.Plan.Marker, v.Status.BootID)
-	}
+	v.State = StateLost
 }

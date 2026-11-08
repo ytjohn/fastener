@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"syscall"
 )
 
 var (
@@ -96,6 +97,7 @@ func Create(name string) (Dir, error) {
 		return "", err
 	}
 	if err := os.Mkdir(d.join("generations"), 0o700); err != nil {
+		os.Remove(string(d))
 		return "", err
 	}
 	return d, nil
@@ -160,9 +162,11 @@ func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 		f.Close()
 		return err
 	}
-	if err := f.Chmod(perm); err != nil {
-		f.Close()
-		return err
+	if perm != 0o600 { // CreateTemp already makes 0600
+		if err := f.Chmod(perm); err != nil {
+			f.Close()
+			return err
+		}
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
@@ -171,7 +175,18 @@ func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	// Make the rename durable. Some filesystems reject fsync on directories.
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		if err := dir.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) {
+			dir.Close()
+			return err
+		}
+		dir.Close()
+	}
+	return nil
 }
 
 func ReadJSON(path string, v any) error {

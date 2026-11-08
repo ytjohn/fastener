@@ -1,11 +1,13 @@
 package session
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -61,11 +63,17 @@ func writeSession(t *testing.T, name string, created time.Time, st Status, l *La
 	if err != nil {
 		t.Fatal(err)
 	}
-	WriteJSON(d.SessionPath(), Session{SchemaVersion: 1, Name: name, CreatedAt: created})
-	WriteJSON(d.PlanPath(1), Plan{SchemaVersion: 1, Generation: 1, Marker: name + ":1:x"})
-	WriteJSON(d.StatusPath(), st)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(WriteJSON(d.SessionPath(), Session{SchemaVersion: 1, Name: name, CreatedAt: created}))
+	must(WriteJSON(d.PlanPath(1), Plan{SchemaVersion: 1, Generation: 1, Marker: name + ":1:x"}))
+	must(WriteJSON(d.StatusPath(), st))
 	if l != nil {
-		WriteJSON(d.LauncherPath(1), l)
+		must(WriteJSON(d.LauncherPath(1), l))
 	}
 	return d
 }
@@ -177,5 +185,125 @@ func TestRelativeXDGStateIgnored(t *testing.T) {
 	t.Setenv("HOME", "/home/x")
 	if r := Root(); r != "/home/x/.local/state/fastener" {
 		t.Fatalf("Root = %q", r)
+	}
+}
+
+func TestResolveRereadBeforeLost(t *testing.T) {
+	setup(t)
+	boot, _ := proc.BootID()
+	dead := deadIdentity(t)
+	exited := Status{State: StateExited, EndedBy: EndedByExit, Monitor: &dead, BootID: boot}
+	v := &View{Status: Status{State: StateRunning, Monitor: &dead, BootID: boot}}
+	v.resolve(time.Second, time.Now(), func() (Status, *LauncherRecord, error) { return exited, nil, nil })
+	if v.State != StateExited || v.Status.EndedBy != EndedByExit {
+		t.Fatalf("state %s, status %+v", v.State, v.Status)
+	}
+	// unchanged on re-read: lost, with the fresh copy installed
+	fresh := Status{State: StateRunning, Monitor: &dead, BootID: boot, Generation: 1}
+	v = &View{Status: Status{State: StateRunning, Monitor: &dead, BootID: boot}}
+	v.resolve(time.Second, time.Now(), func() (Status, *LauncherRecord, error) { return fresh, nil, nil })
+	if v.State != StateLost || v.Status.Generation != 1 {
+		t.Fatalf("state %s, status %+v", v.State, v.Status)
+	}
+	// a different, live monitor appears
+	self, _ := proc.Self()
+	live := Status{State: StateRunning, Monitor: &self, BootID: boot}
+	v = &View{Status: Status{State: StateRunning, Monitor: &dead, BootID: boot}}
+	v.resolve(time.Second, time.Now(), func() (Status, *LauncherRecord, error) { return live, nil, nil })
+	if v.State != StateRunning {
+		t.Fatalf("state %s", v.State)
+	}
+}
+
+func TestFinalizeRefusesLiveMonitor(t *testing.T) {
+	setup(t)
+	boot, _ := proc.BootID()
+	self, _ := proc.Self()
+	d := writeSession(t, "live", time.Now(), Status{State: StateRunning, Monitor: &self, BootID: boot}, nil)
+	ok, err := Finalize(d, func(s *Status) { s.State = StateExited })
+	if ok || !errors.Is(err, ErrMonitorAlive) {
+		t.Fatalf("status.json monitor: ok=%v err=%v", ok, err)
+	}
+	d2 := writeSession(t, "live2", time.Now(), Status{State: StateStarting}, &LauncherRecord{Monitor: &self, BootID: boot})
+	ok, err = Finalize(d2, func(s *Status) { s.State = StateExited })
+	if ok || !errors.Is(err, ErrMonitorAlive) {
+		t.Fatalf("launcher monitor: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestFinalizeKeepsExitedContent(t *testing.T) {
+	setup(t)
+	d := writeSession(t, "kept", time.Now(), Status{SchemaVersion: 1, State: StateExited, EndedBy: EndedByLimit}, nil)
+	ok, err := Finalize(d, func(s *Status) { s.State = StateExited; s.EndedBy = EndedBySignal })
+	if ok || err != nil {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	var st Status
+	if err := ReadJSON(d.StatusPath(), &st); err != nil || st.EndedBy != EndedByLimit {
+		t.Fatalf("status %+v %v", st, err)
+	}
+}
+
+func TestFinalizeKeepsNewerSchema(t *testing.T) {
+	setup(t)
+	d := writeSession(t, "schema", time.Now(), Status{SchemaVersion: 99, State: StateRunning}, nil)
+	if ok, err := Finalize(d, func(s *Status) { s.State = StateExited }); !ok || err != nil {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	var st Status
+	ReadJSON(d.StatusPath(), &st)
+	if st.SchemaVersion != 99 {
+		t.Fatalf("schema_version = %d", st.SchemaVersion)
+	}
+}
+
+func TestLoadFullFindsOrphans(t *testing.T) {
+	setup(t)
+	boot, _ := proc.BootID()
+	dead := deadIdentity(t)
+	cmd := exec.Command("sleep", "30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Env = append(os.Environ(), "FASTENER_SESSION=orph:1:x")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { cmd.Process.Kill(); cmd.Wait() }()
+	writeSession(t, "orph", time.Now(), Status{State: StateRunning, Monitor: &dead, BootID: boot, PGID: cmd.Process.Pid}, nil)
+	v, err := Load("orph", time.Second)
+	if err != nil || v.State != StateLost || len(v.Orphans) != 0 {
+		t.Fatalf("Load: %v state=%s orphans=%v", err, v.State, v.Orphans)
+	}
+	v, err = LoadFull("orph", time.Second)
+	if err != nil || len(v.Orphans) != 1 || v.Orphans[0].PID != cmd.Process.Pid {
+		t.Fatalf("LoadFull: %v orphans=%v", err, v.Orphans)
+	}
+}
+
+func TestHalfCreatedSessions(t *testing.T) {
+	setup(t)
+	d, _ := Create("nostatus")
+	WriteJSON(d.SessionPath(), Session{Name: "nostatus", CreatedAt: time.Now().Add(-time.Minute)})
+	v, err := Load("nostatus", time.Second)
+	if err != nil || v.State != StateLost {
+		t.Fatalf("no status.json: %v %v", err, v)
+	}
+	d, _ = Create("nosession")
+	v, err = Load("nosession", time.Hour)
+	if err != nil || v.State != StateStarting || v.Session.Name != "nosession" || v.Session.CreatedAt.IsZero() {
+		t.Fatalf("no session.json: %v %+v", err, v)
+	}
+	os.WriteFile(d.SessionPath(), []byte("{bad"), 0o600)
+	if _, err := Load("nosession", time.Hour); err == nil {
+		t.Fatal("corrupt session.json accepted")
+	}
+}
+
+func TestDurationNullAndNumber(t *testing.T) {
+	var s Session
+	if err := json.Unmarshal([]byte(`{"grace":null,"max_runtime":1500000000}`), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Grace != 0 || time.Duration(s.MaxRuntime) != 1500*time.Millisecond {
+		t.Fatalf("%+v", s)
 	}
 }

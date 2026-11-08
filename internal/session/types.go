@@ -36,6 +36,15 @@ type Duration time.Duration
 func (d Duration) MarshalJSON() ([]byte, error) { return json.Marshal(time.Duration(d).String()) }
 
 func (d *Duration) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		*d = 0
+		return nil
+	}
+	var n int64
+	if json.Unmarshal(b, &n) == nil {
+		*d = Duration(n)
+		return nil
+	}
 	var s string
 	if err := json.Unmarshal(b, &s); err != nil {
 		return err
