@@ -107,6 +107,50 @@ func (p *prepared) selectLauncher(o launchOptions) (launcher.Launcher, error) {
 	return l, nil
 }
 
+// maxPromptBytes caps a prompt read from --prompt-file (or stdin).
+const maxPromptBytes = 4 << 20
+
+// readPromptFile reads the prompt for --prompt-file. "-" means stdin and is
+// recorded as the source "stdin"; anything else must be a regular file or a pipe (never a
+// device or directory), and is
+// recorded by absolute path. Both are capped at maxPromptBytes.
+func readPromptFile(path string, stdin io.Reader) (text, source string, err error) {
+	var r io.Reader
+	if path == "-" {
+		r, source = stdin, "stdin"
+	} else {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return "", "", err
+		}
+		// Stat first (it follows symlinks) so a device is never opened:
+		// opening one can have side effects. Regular files and pipes (a FIFO,
+		// or process substitution such as <(cmd), /dev/fd/N) are read; opening
+		// a FIFO blocks until a writer appears, as usual.
+		fi, err := os.Stat(abs)
+		if err != nil {
+			return "", "", err
+		}
+		if m := fi.Mode(); !m.IsRegular() && m&os.ModeNamedPipe == 0 {
+			return "", "", usagef("--prompt-file %s: not a regular file or pipe (use - to read the prompt from stdin)", path)
+		}
+		f, err := os.Open(abs)
+		if err != nil {
+			return "", "", err
+		}
+		defer f.Close()
+		r, source = f, abs
+	}
+	b, err := io.ReadAll(io.LimitReader(r, maxPromptBytes+1))
+	if err != nil {
+		return "", "", err
+	}
+	if len(b) > maxPromptBytes {
+		return "", "", usagef("prompt from %s is larger than the %d MiB limit", source, maxPromptBytes>>20)
+	}
+	return string(b), source, nil
+}
+
 // launch creates a session and starts its monitor. On a handshake failure it
 // returns the view (if one exists) together with the error.
 func launch(o launchOptions, stderr io.Writer) (*session.View, error) {
@@ -121,15 +165,10 @@ func launch(o launchOptions, stderr io.Writer) (*session.View, error) {
 		if prompt != "" {
 			return nil, usagef("--prompt and --prompt-file are mutually exclusive")
 		}
-		abs, err := filepath.Abs(o.PromptFile)
-		if err != nil {
+		var err error
+		if prompt, source, err = readPromptFile(o.PromptFile, os.Stdin); err != nil {
 			return nil, err
 		}
-		b, err := os.ReadFile(abs)
-		if err != nil {
-			return nil, err
-		}
-		prompt, source = string(b), abs
 	}
 	if strings.TrimSpace(prompt) == "" {
 		return nil, usagef("a prompt is required (--prompt or --prompt-file)")

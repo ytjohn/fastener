@@ -87,7 +87,7 @@ ${FASTENER_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/fastener}/
 ### `session.json` (intent; immutable after creation)
 
 - `schema_version`, `name`, `created_at`, `kind` (`headless` | `interactive`), `backend`, `cwd`
-- `prompt_source`: `inline`, or the `--prompt-file` path. The text is always in `prompt.txt`, copied by the CLI at `run` time, so later edits to the file don't change what a session ran.
+- `prompt_source`: `inline`, `stdin` (for `--prompt-file -`), or the `--prompt-file` path. The text is always in `prompt.txt`, copied by the CLI at `run` time, so later edits to the file don't change what a session ran.
 - `permissions`, `model`, `max_runtime` (absent = no limit), `grace`
 - **Environment:** `env_base` (variables captured from the caller by the passthrough list), `env` (the `--env` values) and `env_file` (the path only, made absolute). They are stored separately because the env-file is read later, by the monitor, and precedence is base, then env-file, then `--env`.
 - `labels`, `restart` (`no` | `on-reboot`), `remote` (bool)
@@ -463,9 +463,11 @@ fastener install-restore
 ```
 
 - **`run`:**
+  - Flags and positionals may interleave. A bare `--` ends flag parsing: every later argument is positional, even one starting with `-`. (A `--` that is itself a value flag's value, as in `--cwd --`, is just that value.)
   - Detached by default; prints the session name, or the full status with `--json`.
-  - `--follow` follows the logs after launch. (This is not `attach`, which is the phase B pty command.)
+  - `--follow` follows the logs after launch, then exits with the code `wait` would report for the session (the agent's exit code, 128+N for a signal, 125 for an abnormal end, including a session removed while following). (This is not `attach`, which is the phase B pty command.)
   - `--prompt` and `--prompt-file` are mutually exclusive. One is required for headless runs, and `--cwd` is required.
+  - `--prompt-file -` reads the prompt from stdin. A prompt (from a file or stdin) larger than 4 MiB is a usage error (exit 2) naming the limit, and `--prompt-file` accepts regular files and pipes (a FIFO, or process substitution such as `<(cmd)`; reading blocks until a writer appears) but rejects devices such as `/dev/zero`, directories and sockets before opening them.
   - Labels are stored in v0.1 (`check` uses `fastener.check=true`); filtering by them is v0.2.
   - `--launcher systemd` is a clear error in v0.1.
 - **`ps`:**
@@ -477,8 +479,8 @@ fastener install-restore
   - Exits with the agent's exit code.
   - Exits 128+N when the agent was killed by signal N.
   - Exits 124 if `--timeout` elapses while the session is still running.
-  - Exits 125 if the session did not complete normally (`launch-failed`, `lost`, `restore-failed`), and when the agent exited 0 but the parser's `agent_error` is true: Pi's json mode exits 0 after a failed model call, which would otherwise read as success. A non-zero exit code is returned unchanged.
-  - Exits 127 for an unknown session name.
+  - Exits 125 if the session did not complete normally (`launch-failed`, `lost`, `restore-failed`), if it was removed (`rm`) while `wait` was running (the message is `session <name> was removed while waiting`), and when the agent exited 0 but the parser's `agent_error` is true: Pi's json mode exits 0 after a failed model call, which would otherwise read as success. A non-zero exit code is returned unchanged.
+  - Exits 127 for a session name that never existed.
 
   A caller can therefore tell "timed out" from "lost" without a follow-up `inspect`. As with Podman, 124, 125 and 127 can collide with real agent exit codes. The documentation names `inspect --json` as the authoritative answer.
 - **`logs`:** prints `output.log`; `--stderr` prints `stderr.log`; `-f` follows until the session ends.

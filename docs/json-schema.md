@@ -23,7 +23,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 
 `session` fields:
 - `schema_version`, `name`, `created_at`, `kind` (`headless`), `backend`, `cwd` (absolute)
-- `prompt_source`: `inline`, or the absolute `--prompt-file` path. The text itself is not in the JSON.
+- `prompt_source`: `inline`, `stdin` (for `--prompt-file -`), or the absolute `--prompt-file` path. The text itself is not in the JSON.
 - `permissions`, `model`, `max_runtime`, `grace`
 - `env_base`: environment values captured from the caller (the passthrough list); `env`: the `--env` values; `env_file`: the path only. Precedence is base, then env-file, then `--env`.
 - `labels`, `restart` (`no`), `remote` (false)
@@ -85,8 +85,9 @@ An array of `{name, source, sha256, command, parser, permissions, default_permis
   - the agent's exit code;
   - 128+N if the agent was killed by signal N;
   - 124 if `--timeout` elapsed;
-  - 125 for `launch-failed`, `lost` or `restore-failed`, for an exited session with neither an exit code nor a known signal, and for an agent that exited 0 while status `agent_error` is true (Pi's json mode exits 0 on a model error); a non-zero exit code is returned as is;
-  - 127 for an unknown session, including one removed while `wait` was running.
+  - 125 for `launch-failed`, `lost` or `restore-failed`, for a session removed while `wait` was running (it exists when `wait` starts, then disappears), for an exited session with neither an exit code nor a known signal, and for an agent that exited 0 while status `agent_error` is true (Pi's json mode exits 0 on a model error); a non-zero exit code is returned as is;
+  - 127 for a session that never existed (unknown name at the time `wait` starts).
+- **`run --follow`:** same as `wait` (except 124, as there is no timeout). If the session is removed while following, it prints `session <name> was removed while following` and exits 125.
 - **Other commands:**
   - 0 for success;
   - 1 for failure (for `check`, any non-skipped backend failed, or `--all` checked nothing);

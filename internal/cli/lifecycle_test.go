@@ -1,10 +1,12 @@
 package cli_test
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -471,5 +473,217 @@ func TestRmForceKillsDescendantsOfExitedSession(t *testing.T) {
 	h.ok("rm", "--force", "s1")
 	if pidAlive(gcPid) {
 		t.Fatalf("grandchild %d survived rm --force", gcPid)
+	}
+}
+
+func TestRunFollowReportsAgentOutcome(t *testing.T) {
+	h := newHarness(t)
+	run := func(name string, env ...string) (string, string, int) {
+		args := []string{"run", "fake", "--name", name, "--cwd", h.work, "--prompt", "hello", "--follow"}
+		for _, e := range env {
+			args = append(args, "--env", e)
+		}
+		return h.cmd(args...)
+	}
+	out, errOut, code := run("f3", "FAKE_EXIT=3")
+	if code != 3 || !strings.Contains(out, `"result":"pong"`) {
+		t.Fatalf("exit 3 agent: code %d, want 3\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+	if _, errOut, code = run("f0"); code != 0 {
+		t.Fatalf("exit 0 agent: code %d (%s)", code, errOut)
+	}
+	_, errOut, code = run("fe", "FAKE_IS_ERROR=1", "FAKE_EXIT=0")
+	if code != 125 || !strings.Contains(errOut, "agent reported an error") {
+		t.Fatalf("agent_error: code %d, want 125 (%s)", code, errOut)
+	}
+	if _, _, code = run("fc", "FAKE_CRASH=1"); code != 128+9 {
+		t.Fatalf("crash: code %d, want 137", code)
+	}
+}
+
+func TestWaitSessionRemovedMidWaitExits125(t *testing.T) {
+	h := newHarness(t)
+	h.start("rmw", []string{"FAKE_SLEEP=30s"})
+	v := h.waitState("rmw", "running", 10*time.Second)
+	t.Cleanup(func() { killGroup(v.Status.PGID) })
+	type result struct {
+		errOut string
+		code   int
+	}
+	done := make(chan result, 1)
+	go func() {
+		_, e, c := h.cmd("wait", "rmw", "--timeout", "30s")
+		done <- result{e, c}
+	}()
+	time.Sleep(500 * time.Millisecond) // let wait load the running session at least once
+	h.removeSessionDir("rmw")
+	select {
+	case r := <-done:
+		if r.code != 125 || !strings.Contains(r.errOut, "session rmw was removed while waiting") {
+			t.Fatalf("code %d, want 125 with removal message: %s", r.code, r.errOut)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("wait did not return after the session was removed")
+	}
+	if _, _, code := h.cmd("wait", "rmw"); code != 127 {
+		t.Fatalf("never-existed/now-gone session: code %d, want 127", code)
+	}
+}
+
+// removeSessionDir drops a session's directory under a running agent.
+// `rm --force` stops the agent first, so a poll could legitimately see the
+// exited state before the directory goes; this tests the removal path alone.
+func (h *harness) removeSessionDir(name string) {
+	h.t.Helper()
+	if err := os.RemoveAll(filepath.Join(h.state, "sessions", name)); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// pollRunningPGID waits for a session that may not exist yet to be running.
+func (h *harness) pollRunningPGID(name string) int {
+	h.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if out, _, code := h.cmd("inspect", name, "--json"); code == 0 {
+			var v inspectJSON
+			if json.Unmarshal([]byte(out), &v) == nil && v.State == "running" && v.Status.PGID > 0 {
+				return v.Status.PGID
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	h.t.Fatalf("%s never reached running", name)
+	return 0
+}
+
+func killGroup(pgid int) {
+	if pgid > 1 {
+		syscall.Kill(-pgid, syscall.SIGKILL)
+	}
+}
+
+func TestRunFollowSessionRemovedExits125(t *testing.T) {
+	h := newHarness(t)
+	c := exec.Command(fastenerBin, "run", "fake", "--name", "rmf", "--cwd", h.work, "--prompt", "hello",
+		"--env", "FAKE_SLEEP=30s", "--follow")
+	c.Env = append(os.Environ(), "FASTENER_STATE_DIR="+h.state, "FASTENER_CONFIG_DIR="+h.config, "TMPDIR="+h.work)
+	var out, errb bytes.Buffer
+	c.Stdout, c.Stderr = &out, &errb
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan error, 1)
+	go func() { waited <- c.Wait() }()
+	pgid := h.pollRunningPGID("rmf")
+	t.Cleanup(func() { killGroup(pgid) })
+	time.Sleep(500 * time.Millisecond)
+	h.removeSessionDir("rmf")
+	select {
+	case err := <-waited:
+		ee, ok := err.(*exec.ExitError)
+		if !ok || ee.ExitCode() != 125 || !strings.Contains(errb.String(), "session rmf was removed while following") {
+			t.Fatalf("err %v, stderr %q; want 125 with removal message", err, errb.String())
+		}
+	case <-time.After(15 * time.Second):
+		c.Process.Kill()
+		t.Fatal("run --follow did not return after the session was removed")
+	}
+}
+
+func TestPromptFileStdin(t *testing.T) {
+	h := newHarness(t)
+	c := exec.Command(fastenerBin, "run", "fake", "--name", "pin", "--cwd", h.work, "--prompt-file", "-")
+	c.Env = append(os.Environ(), "FASTENER_STATE_DIR="+h.state, "FASTENER_CONFIG_DIR="+h.config, "TMPDIR="+h.work)
+	c.Stdin = strings.NewReader("prompt from stdin")
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	h.ok("wait", "pin", "--timeout", "10s")
+	b, err := os.ReadFile(filepath.Join(h.state, "sessions", "pin", "prompt.txt"))
+	if err != nil || string(b) != "prompt from stdin" {
+		t.Fatalf("prompt.txt = %q, %v", b, err)
+	}
+	var v struct {
+		Session struct {
+			PromptSource string `json:"prompt_source"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal([]byte(h.ok("inspect", "pin", "--json")), &v); err != nil {
+		t.Fatal(err)
+	}
+	if v.Session.PromptSource != "stdin" {
+		t.Fatalf("prompt_source = %q, want stdin", v.Session.PromptSource)
+	}
+}
+
+func TestPromptSizeCap(t *testing.T) {
+	h := newHarness(t)
+	big := strings.Repeat("a", 4<<20+1)
+	pf := filepath.Join(t.TempDir(), "big.txt")
+	if err := os.WriteFile(pf, []byte(big), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut, code := h.cmd("run", "fake", "--name", "bigf", "--cwd", h.work, "--prompt-file", pf)
+	if code != 2 || !strings.Contains(errOut, "4 MiB") {
+		t.Fatalf("oversize file: code %d, want 2 naming the cap: %s", code, errOut)
+	}
+	c := exec.Command(fastenerBin, "run", "fake", "--name", "bigs", "--cwd", h.work, "--prompt-file", "-")
+	c.Env = append(os.Environ(), "FASTENER_STATE_DIR="+h.state, "FASTENER_CONFIG_DIR="+h.config, "TMPDIR="+h.work)
+	c.Stdin = strings.NewReader(big)
+	out, err := c.CombinedOutput()
+	if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 2 || !strings.Contains(string(out), "4 MiB") {
+		t.Fatalf("oversize stdin: %v\n%s", err, out)
+	}
+	// Exactly the cap is fine.
+	if err := os.WriteFile(pf, []byte(big[:4<<20]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.ok("run", "fake", "--name", "capok", "--cwd", h.work, "--prompt-file", pf)
+	for _, n := range []string{"bigf", "bigs"} {
+		if _, _, code := h.cmd("inspect", n); code != 127 {
+			t.Errorf("%s: a session was created for a rejected prompt", n)
+		}
+	}
+}
+
+func TestPromptFileReadsFIFO(t *testing.T) {
+	h := newHarness(t)
+	fifo := filepath.Join(t.TempDir(), "p.fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Skipf("mkfifo unsupported: %v", err)
+	}
+	go func() { // stands in for process substitution: <(cmd)
+		if f, err := os.OpenFile(fifo, os.O_WRONLY, 0); err == nil {
+			f.WriteString("prompt from a pipe")
+			f.Close()
+		}
+	}()
+	h.ok("run", "fake", "--name", "pipe", "--cwd", h.work, "--prompt-file", fifo)
+	h.ok("wait", "pipe", "--timeout", "10s")
+	b, err := os.ReadFile(filepath.Join(h.state, "sessions", "pipe", "prompt.txt"))
+	if err != nil || string(b) != "prompt from a pipe" {
+		t.Fatalf("prompt.txt = %q, %v", b, err)
+	}
+}
+
+func TestPromptFileRejectsDevicesAndDirs(t *testing.T) {
+	h := newHarness(t)
+	for name, p := range map[string]string{"zero": "/dev/zero", "dir": t.TempDir()} {
+		done := make(chan struct{})
+		var errOut string
+		var code int
+		go func() {
+			defer close(done)
+			_, errOut, code = h.cmd("run", "fake", "--name", "nr-"+name, "--cwd", h.work, "--prompt-file", p)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: run hung", name)
+		}
+		if code != 2 || !strings.Contains(errOut, "not a regular file or pipe") {
+			t.Errorf("%s: code %d, want 2 with a not-a-regular-file error: %s", name, code, errOut)
+		}
 	}
 }
