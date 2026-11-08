@@ -72,7 +72,11 @@ func MaybeAlive(id Identity, bootID string) bool {
 
 // Signal sends sig to id after re-verifying the identity.
 func Signal(id Identity, bootID string, sig syscall.Signal) error {
-	if !Alive(id, bootID) {
+	ok, err := Check(id, bootID)
+	if err != nil {
+		return err
+	}
+	if !ok {
 		return ErrNoProcess
 	}
 	if err := syscall.Kill(id.PID, sig); err != nil {
