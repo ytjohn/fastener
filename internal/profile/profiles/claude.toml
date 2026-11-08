@@ -1,0 +1,25 @@
+schema_version = 1
+name    = "claude"
+command = "claude"
+
+[headless]
+args   = ["-p", "--output-format", "stream-json", "--verbose"]
+prompt = "stdin"
+parser = "claude-stream-json"
+
+[options]
+model = ["--model", "{value}"]
+
+[permissions]
+auto = ["--permission-mode", "auto"]
+skip = ["--dangerously-skip-permissions"]
+
+[resume]
+args = ["--resume", "{conversation_id}"]
+
+[check]
+version_args = ["--version"]
+diagnose = [
+  { match = '(?i)not logged in|please run /login|invalid api key|authentication_error|oauth token has expired', hint = "auth: run `claude` interactively and log in (/login)" },
+  { match = '(?i)model\b.*\b(not found|not_found_error|does not exist|not available)', hint = "model unavailable: pass a valid --model" },
+]

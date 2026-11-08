@@ -1,0 +1,24 @@
+schema_version = 1
+name    = "codex"
+command = "codex"
+
+# --skip-git-repo-check: Fastener sessions name their cwd explicitly; the repo
+# check is an interactive guard and would fail `fastener check` in a temp dir.
+[headless]
+args   = ["exec", "--json", "--skip-git-repo-check"]
+prompt = "stdin"
+parser = "none"   # codex-jsonl arrives in v0.2
+
+[options]
+model = ["--model", "{value}"]
+
+[permissions]
+auto = ["--approve-for-me"]
+skip = ["--dangerously-bypass-approvals-and-sandbox"]
+
+[check]
+version_args = ["--version"]
+diagnose = [
+  { match = '(?i)not logged in|please (run )?`?codex login|unauthorized|401', hint = "auth: run `codex login`" },
+  { match = '(?i)model\b.*\b(not found|does not exist|not supported)', hint = "model unavailable: pass a valid --model" },
+]

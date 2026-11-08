@@ -1,0 +1,23 @@
+schema_version = 1
+name    = "pi"
+command = "pi"
+
+# Pi has no permission system, so only "skip" is defined and Pi sessions need
+# --permissions skip. Mapping "auto" to nothing would be a silent fallback.
+[headless]
+args   = ["-p", "--mode", "text"]
+prompt = "arg"    # Fastener appends "--" and then the prompt
+parser = "none"   # a Pi JSON parser arrives in v0.2
+
+[options]
+model = ["--model", "{value}"]
+
+[permissions]
+skip = []
+
+[check]
+version_args = ["--version"]
+diagnose = [
+  { match = '(?i)(model|no model).*(not found|unavailable|does not exist|no longer)|404', hint = "model unavailable: pass --model, or update pi's default model" },
+  { match = '(?i)no api key|missing credentials|not authenticated|401', hint = "auth: check `pi auth` for the provider" },
+]
