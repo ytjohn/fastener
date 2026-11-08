@@ -75,6 +75,8 @@ func TestValidationErrors(t *testing.T) {
 		{"conversation_id in headless", strings.Replace(base, "args = []", `args = ["{conversation_id}"]`, 1), "placeholders"},
 		{"relative command", strings.Replace(base, `command = "x"`, `command = "bin/agent"`, 1), "command"},
 		{"command with space", strings.Replace(base, `command = "x"`, `command = "/opt/my agent"`, 1), "whitespace"},
+		{"command dot", strings.Replace(base, `command = "x"`, `command = "."`, 1), "command"},
+		{"command dotdot", strings.Replace(base, `command = "x"`, `command = ".."`, 1), "command"},
 		{"command leading dash", strings.Replace(base, `command = "x"`, `command = "-x"`, 1), "command"},
 		{"default level undefined", "default_permissions = \"skip\"\n" + base, "default_permissions"},
 		{"default level unknown", "default_permissions = \"yolo\"\n" + base, "default_permissions"},

@@ -21,14 +21,30 @@ type Fields struct {
 	ParseErrors int    `json:"parse_errors,omitempty"`
 }
 
-// Usage counts all tokens the backend reported for the run.
+// Usage counts all tokens the backend reported for the run. The token fields
+// are nil when the backend reported none (for example a result carrying only
+// a cost), so they are omitted from JSON rather than faked as zero.
 type Usage struct {
 	// InputTokens is all input tokens for the run, including cache reads and
 	// writes (differs from Anthropic's usage.input_tokens, which excludes cache).
-	InputTokens  int64   `json:"input_tokens"`
-	OutputTokens int64   `json:"output_tokens"`
+	InputTokens  *int64  `json:"input_tokens,omitempty"`
+	OutputTokens *int64  `json:"output_tokens,omitempty"`
 	CostUSD      float64 `json:"cost_usd"`
 }
+
+// equal reports whether a and b hold the same values (not the same pointers).
+func (a Usage) equal(b Usage) bool {
+	return ptrEq(a.InputTokens, b.InputTokens) && ptrEq(a.OutputTokens, b.OutputTokens) && a.CostUSD == b.CostUSD
+}
+
+func ptrEq(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+func i64(v int64) *int64 { return &v }
 
 // Parser consumes one stdout line (without its newline) and updates f.
 // It reports whether f changed. Implementations are stateless.
