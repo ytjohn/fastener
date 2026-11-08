@@ -57,7 +57,12 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, v.Session.Name)
 	}
 	if follow {
-		return followLog(v.Session.Name, v.Dir.OutputLog(), stdout, stderr)
+		code, fv := followLog(v.Session.Name, v.Dir.OutputLog(), stdout, stderr)
+		if fv == nil {
+			return code
+		}
+		// Report the agent's outcome exactly as `wait` would.
+		return outcomeCode(v.Session.Name, fv, stderr)
 	}
 	return exitOK
 }

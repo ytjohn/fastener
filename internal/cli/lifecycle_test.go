@@ -473,3 +473,28 @@ func TestRmForceKillsDescendantsOfExitedSession(t *testing.T) {
 		t.Fatalf("grandchild %d survived rm --force", gcPid)
 	}
 }
+
+func TestRunFollowReportsAgentOutcome(t *testing.T) {
+	h := newHarness(t)
+	run := func(name string, env ...string) (string, string, int) {
+		args := []string{"run", "fake", "--name", name, "--cwd", h.work, "--prompt", "hello", "--follow"}
+		for _, e := range env {
+			args = append(args, "--env", e)
+		}
+		return h.cmd(args...)
+	}
+	out, errOut, code := run("f3", "FAKE_EXIT=3")
+	if code != 3 || !strings.Contains(out, `"result":"pong"`) {
+		t.Fatalf("exit 3 agent: code %d, want 3\nstdout: %s\nstderr: %s", code, out, errOut)
+	}
+	if _, errOut, code = run("f0"); code != 0 {
+		t.Fatalf("exit 0 agent: code %d (%s)", code, errOut)
+	}
+	_, errOut, code = run("fe", "FAKE_IS_ERROR=1", "FAKE_EXIT=0")
+	if code != 125 || !strings.Contains(errOut, "agent reported an error") {
+		t.Fatalf("agent_error: code %d, want 125 (%s)", code, errOut)
+	}
+	if _, _, code = run("fc", "FAKE_CRASH=1"); code != 128+9 {
+		t.Fatalf("crash: code %d, want 137", code)
+	}
+}

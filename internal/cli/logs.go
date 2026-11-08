@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"os"
 	"time"
+
+	"github.com/ytjohn/fastener/internal/session"
 )
 
 func cmdLogs(args []string, stdout, stderr io.Writer) int {
@@ -29,7 +31,8 @@ func cmdLogs(args []string, stdout, stderr io.Writer) int {
 		path = v.Dir.StderrLog()
 	}
 	if *follow {
-		return followLog(name, path, stdout, stderr)
+		code, _ := followLog(name, path, stdout, stderr)
+		return code
 	}
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -43,8 +46,9 @@ func cmdLogs(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-// followLog copies path to stdout until the session is no longer alive.
-func followLog(name, path string, stdout, stderr io.Writer) int {
+// followLog copies path to stdout until the session is no longer alive. It
+// returns the final view (nil on error) so callers can report the outcome.
+func followLog(name, path string, stdout, stderr io.Writer) (int, *session.View) {
 	var f *os.File
 	defer func() {
 		if f != nil {
@@ -62,7 +66,7 @@ func followLog(name, path string, stdout, stderr io.Writer) int {
 		}
 		v, err := loadView(name)
 		if err != nil {
-			return fail(stderr, err)
+			return fail(stderr, err), nil
 		}
 		if !v.Alive() {
 			if f == nil {
@@ -73,7 +77,7 @@ func followLog(name, path string, stdout, stderr io.Writer) int {
 			if f != nil {
 				_, _ = io.Copy(stdout, f)
 			}
-			return exitOK
+			return exitOK, v
 		}
 		time.Sleep(200 * time.Millisecond)
 	}

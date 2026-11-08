@@ -464,7 +464,7 @@ fastener install-restore
 
 - **`run`:**
   - Detached by default; prints the session name, or the full status with `--json`.
-  - `--follow` follows the logs after launch. (This is not `attach`, which is the phase B pty command.)
+  - `--follow` follows the logs after launch, then exits with the code `wait` would report for the session (the agent's exit code, 128+N for a signal, 125 for an abnormal end). (This is not `attach`, which is the phase B pty command.)
   - `--prompt` and `--prompt-file` are mutually exclusive. One is required for headless runs, and `--cwd` is required.
   - Labels are stored in v0.1 (`check` uses `fastener.check=true`); filtering by them is v0.2.
   - `--launcher systemd` is a clear error in v0.1.

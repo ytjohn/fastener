@@ -31,16 +31,8 @@ func cmdWait(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return fail(stderr, err)
 		}
-		switch v.State {
-		case session.StateExited:
-			code := exitCodeOf(v.Status)
-			if code == exitAbnormal && v.Status.ExitCode != nil && *v.Status.ExitCode == 0 {
-				fmt.Fprintf(stderr, "fastener: session %s: agent reported an error (exit code 0)\n", name)
-			}
-			return code
-		case session.StateLost, session.StateRestoreFailed:
-			fmt.Fprintf(stderr, "fastener: session %s is %s\n", name, v.State)
-			return exitAbnormal
+		if v.State == session.StateExited || v.State == session.StateLost || v.State == session.StateRestoreFailed {
+			return outcomeCode(name, v, stderr)
 		}
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			return exitWaitTimeout
@@ -69,4 +61,20 @@ func exitCodeOf(s session.Status) int {
 		return *s.ExitCode
 	}
 	return exitAbnormal
+}
+
+// outcomeCode is the exit code `wait` (and `run --follow`) reports for a
+// session that is no longer alive, with the matching diagnostic on stderr.
+func outcomeCode(name string, v *session.View, stderr io.Writer) int {
+	switch v.State {
+	case session.StateExited:
+		code := exitCodeOf(v.Status)
+		if code == exitAbnormal && v.Status.ExitCode != nil && *v.Status.ExitCode == 0 {
+			fmt.Fprintf(stderr, "fastener: session %s: agent reported an error (exit code 0)\n", name)
+		}
+		return code
+	default:
+		fmt.Fprintf(stderr, "fastener: session %s is %s\n", name, v.State)
+		return exitAbnormal
+	}
 }
