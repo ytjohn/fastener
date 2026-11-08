@@ -713,3 +713,29 @@ func TestRmForceCorruptStatusKillsMarkedOrphans(t *testing.T) {
 		t.Fatalf("grandchild %d survived rm --force", gcPid)
 	}
 }
+
+func TestRmForceWarnsWhenPlanUnreadable(t *testing.T) {
+	h := newHarness(t)
+	h.start("p1", nil)
+	h.ok("wait", "p1", "--timeout", "10s")
+	dir := filepath.Join(h.state, "sessions", "p1")
+	// A corrupt session.json makes the session fail to load, so rm --force
+	// takes the corrupt path; status.json stays readable and carries the pgid,
+	// and the plan holding the marker is unreadable.
+	if err := os.WriteFile(filepath.Join(dir, "session.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "generations", "1.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, errOut, code := h.cmd("rm", "p1"); code != 1 || !strings.Contains(errOut, "--force") {
+		t.Fatalf("rm without --force: %d %s", code, errOut)
+	}
+	_, errOut, code := h.cmd("rm", "--force", "p1")
+	if code != 0 || !strings.Contains(errOut, "cannot read plan for orphan cleanup") {
+		t.Fatalf("rm --force: exit %d, stderr %q; want a plan-read warning", code, errOut)
+	}
+	if _, _, code := h.cmd("inspect", "p1"); code != 127 {
+		t.Fatal("session not removed")
+	}
+}

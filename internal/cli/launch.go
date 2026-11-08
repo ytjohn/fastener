@@ -16,6 +16,10 @@ import (
 	"github.com/ytjohn/fastener/internal/version"
 )
 
+// selectFunc picks the launcher. It is a variable only so a test in this
+// package can substitute one whose Start fails; production never reassigns it.
+var selectFunc = launcher.Select
+
 type launchOptions struct {
 	Backend, Name, Cwd string
 	Prompt, PromptFile string
@@ -100,7 +104,7 @@ func (p *prepared) selectLauncher(o launchOptions, warn io.Writer) (launcher.Lau
 	if pref == "" {
 		pref = p.cfg.Launcher
 	}
-	l, err := launcher.Select(pref, warn)
+	l, err := selectFunc(pref, warn)
 	if err != nil {
 		return nil, inStep("launch", err)
 	}
