@@ -332,7 +332,7 @@ url_pattern = 'https://claude\.ai/\S+'
 ### Rules
 
 - **No shell.** Arguments are passed to `exec` directly, never through a shell. Placeholders (`{value}`, `{conversation_id}`) are replaced by plain string substitution within a single argument. Prompts and values can never add or split arguments, and tests cover this against injection attempts.
-  - `prompt = "arg"` always appends `--` and then the prompt, so a prompt starting with `-` cannot become a flag. (`--` protects only the next positional argument; an agent CLI may still interpret the prompt itself, such as a leading `@`.)
+  - `prompt = "arg"` always appends `--` and then the prompt, so a prompt starting with `-` cannot become a flag. An agent CLI may still interpret the prompt argument itself (Pi reads a leading `@` as a file to attach, even after `--`), so prefer `prompt = "stdin"` whenever the backend reads piped stdin; every built-in profile does.
   - `--model` values starting with `-` are rejected, as an injection guard.
   - `argv[0]` is resolved to an absolute path at plan time, against the session's PATH (the base environment plus env-file plus `--env`, not the caller's shell).
 - **Command validation.** `command` is a bare name (`[A-Za-z0-9._+][A-Za-z0-9._+-]*`) or an absolute path, with no whitespace. A relative path such as `./x` is rejected so the plan never depends on the launch directory.
