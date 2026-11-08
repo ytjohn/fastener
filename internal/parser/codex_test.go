@@ -89,9 +89,12 @@ func TestCodexJSONLErrors(t *testing.T) {
 		t.Fatalf("last top-level error should win: %+v", f)
 	}
 	p.Line([]byte(`{"type":"turn.failed","error":{"message":"failed msg"}}`), &f)
+	if !*f.AgentError || f.FinalMessage != "failed msg" {
+		t.Fatalf("turn.failed after error: %+v", f)
+	}
 	p.Line([]byte(`{"type":"error","message":"late top"}`), &f)
-	if *f.AgentError != true || f.FinalMessage != "failed msg" {
-		t.Fatalf("turn.failed message should be preferred: %+v", f)
+	if !*f.AgentError || f.FinalMessage != "late top" {
+		t.Fatalf("the last error event should win: %+v", f)
 	}
 	// A turn.failed without a message still flags the error.
 	var g Fields

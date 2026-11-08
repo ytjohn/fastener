@@ -12,8 +12,8 @@ import (
 //     one is the final message.
 //   - turn.completed carries usage, summed over every turn in the run.
 //   - turn.failed and a top-level error event mean the run failed
-//     (agent_error); the message comes from turn.failed's error.message, else
-//     the last top-level error's message.
+//     (agent_error); the message is the last error event's, turn.failed's
+//     error.message or a top-level error's message, whichever comes last.
 //   - an item.completed with an "error" item is only a warning (for example
 //     "Model metadata not found"); the real failure follows as error and
 //     turn.failed events, so the item alone records nothing.
@@ -90,9 +90,9 @@ func (codexJSONL) Line(line []byte, f *Fields) bool {
 			changed = true
 		}
 	case "turn.failed":
-		changed = codexFail(f, e.errorMessage(), true) || changed
+		changed = codexFail(f, e.errorMessage()) || changed
 	case "error":
-		changed = codexFail(f, e.Message, false) || changed
+		changed = codexFail(f, e.Message) || changed
 	}
 	return changed
 }
@@ -104,19 +104,15 @@ func (e *codexEvent) errorMessage() string {
 	return ""
 }
 
-// codexFail marks the run failed. A turn.failed message is authoritative and a
-// later top-level error does not replace it; before one arrives, the last
-// top-level error's message stands.
-func codexFail(f *Fields, msg string, authoritative bool) bool {
+// codexFail marks the run failed. The last error event wins: whichever of
+// turn.failed and a top-level error comes last sets the message.
+func codexFail(f *Fields, msg string) bool {
 	changed := f.AgentError == nil || !*f.AgentError
 	t := true
 	f.AgentError = &t
-	if msg != "" && (authoritative || !f.codexTurnFailed) && msg != f.FinalMessage {
+	if msg != "" && msg != f.FinalMessage {
 		f.FinalMessage = msg
 		changed = true
-	}
-	if authoritative {
-		f.codexTurnFailed = true
 	}
 	return changed
 }
