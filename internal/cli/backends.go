@@ -17,7 +17,9 @@ type backendOut struct {
 	Command     string   `json:"command,omitempty"`
 	Parser      string   `json:"parser,omitempty"`
 	Permissions []string `json:"permissions,omitempty"`
-	Error       string   `json:"error,omitempty"`
+	// DefaultPermissions is the profile's own default level, if it sets one.
+	DefaultPermissions string `json:"default_permissions,omitempty"`
+	Error              string `json:"error,omitempty"`
 }
 
 func cmdBackends(args []string, stdout, stderr io.Writer) int {
@@ -38,20 +40,24 @@ func cmdBackends(args []string, stdout, stderr io.Writer) int {
 			continue
 		}
 		out = append(out, backendOut{Name: n, Source: p.Source, SHA256: p.SHA256, Command: p.Command,
-			Parser: p.Headless.Parser, Permissions: p.Levels()})
+			Parser: p.Headless.Parser, Permissions: p.Levels(), DefaultPermissions: p.DefaultPermissions})
 	}
 	if *asJSON {
 		writeJSON(stdout, out)
 		return exitOK
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSOURCE\tPARSER\tPERMISSIONS")
+	fmt.Fprintln(tw, "NAME\tSOURCE\tPARSER\tPERMISSIONS\tDEFAULT")
 	for _, b := range out {
 		if b.Error != "" {
-			fmt.Fprintf(tw, "%s\tERROR: %s\t\t\n", b.Name, b.Error)
+			fmt.Fprintf(tw, "%s\tERROR: %s\t\t\t\n", b.Name, b.Error)
 			continue
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%v\n", b.Name, b.Source, b.Parser, b.Permissions)
+		def := b.DefaultPermissions
+		if def == "" {
+			def = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%v\t%s\n", b.Name, b.Source, b.Parser, b.Permissions, def)
 	}
 	tw.Flush()
 	return exitOK

@@ -73,7 +73,7 @@ An array, one entry per backend checked: `{backend, passed, session?, skipped?, 
 
 ## `backends --json`
 
-An array of `{name, source, sha256, command, parser, permissions}`, or `{name, error}` for a profile that fails to load. `source` is `builtin` or the file path; `permissions` lists the defined levels.
+An array of `{name, source, sha256, command, parser, permissions, default_permissions?}`, or `{name, error}` for a profile that fails to load. `source` is `builtin` or the file path; `permissions` lists the defined levels; `default_permissions` is the profile's own default level, present only when the profile sets one (the config's `default_permissions` and `--permissions` still take precedence).
 
 ## `version --json`
 

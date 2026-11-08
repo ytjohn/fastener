@@ -316,7 +316,7 @@ url_pattern = 'https://claude\.ai/\S+'
 - **No silent fallback.**
   - A requested permission level, option, mode or `--remote` that the profile does not define is a hard error before anything is created.
   - The permission level comes from the `--permissions` flag if given, else the `default_permissions` config, else the profile's own optional `default_permissions`, else `auto`. This holds for both `run` and `check`, and the resolved level is recorded in `session.json`. A profile's `default_permissions` must name a level that profile defines (validated at load). An explicit `--permissions` must be a known level (`auto` or `skip`); anything else is a usage error (exit 2) for `run` and `check`.
-  - Fastener never substitutes the backend's default permissions or `skip`.
+  - Fastener never substitutes a level that the flag, config or profile did not name.
 - **Resolution:** `~/.config/fastener/backends/<name>.toml` (`$XDG_CONFIG_HOME`) **replaces** the embedded built-in of the same name entirely. There is no merging.
 - **Validation:** an unknown key, a missing required section or an unknown parser or finder name is an error, both at load time and in `fastener check --static`.
 - **Built-ins** (`profiles/*.toml`, embedded with `go:embed`): `claude`, `codex`, `pi`. Every flag in a built-in profile is verified against the real CLI by `fastener check` (the opt-in smoke tests, §12) before release; all three passed on the development machine.

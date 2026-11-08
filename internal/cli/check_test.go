@@ -509,3 +509,24 @@ func TestCheckStaticWarnsAboutExpectModel(t *testing.T) {
 		t.Fatalf("code %d, stderr %q", code, errOut)
 	}
 }
+
+func TestBackendsShowsDefaultPermissions(t *testing.T) {
+	h := newHarness(t)
+	var rows []struct {
+		Name               string `json:"name"`
+		DefaultPermissions string `json:"default_permissions"`
+	}
+	if err := json.Unmarshal([]byte(h.ok("backends", "--json")), &rows); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range rows {
+		got[r.Name] = r.DefaultPermissions
+	}
+	if got["pi"] != "skip" || got["claude"] != "" {
+		t.Fatalf("default_permissions: %v", got)
+	}
+	if out := h.ok("backends"); !strings.Contains(out, "DEFAULT") {
+		t.Errorf("table lacks the default:\n%s", out)
+	}
+}
