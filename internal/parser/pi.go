@@ -14,11 +14,16 @@ import (
 // last one; usage is summed over all of them. Streaming events (message_update
 // and friends) are ignored.
 //
-// Which model answered depends on pi's API adapter (pi 0.84.4):
+// Which model answered depends on pi's API adapter. Basis: pi 0.84.4
+// (pi-ai/dist/api/*):
 //   - anthropic-messages overwrites message.model with the server's id;
 //   - openai-completions keeps the requested id in model and sets
-//     responseModel only when the server reported a different one;
-//   - openai-responses records only the requested id (client-reported).
+//     responseModel only when the server reported a different one, so both
+//     cases are server-reported;
+//   - every other adapter only echoes the requested id: openai-responses,
+//     azure-openai-responses, openai-codex-responses, bedrock-converse-stream,
+//     google-generative-ai, google-vertex, mistral-conversations, pi-messages
+//     and cloudflare. These, and any unknown adapter, are client-reported.
 //
 // After an agent error Model is cleared: the attempted model never answered.
 type piJSON struct{}
@@ -91,12 +96,12 @@ func piAssistant(m *piMessage, f *Fields) bool {
 		served = m.ResponseModel
 	}
 	if served != "" && !isErr {
-		f.Model, f.ModelSource = served, "server"
+		f.Model, f.ModelSource = served, "client"
 		if m.Provider != "" {
 			f.Model = m.Provider + "/" + served
 		}
-		if m.API == "openai-responses" {
-			f.ModelSource = "client"
+		if m.ResponseModel != "" || m.API == "anthropic-messages" || m.API == "openai-completions" {
+			f.ModelSource = "server"
 		}
 	}
 	var text strings.Builder

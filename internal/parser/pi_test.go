@@ -122,6 +122,11 @@ func TestPiJSONResponseModelAndSource(t *testing.T) {
 		// openai-responses records only the requested id.
 		{`{"type":"message_end","message":{"role":"assistant","api":"openai-responses","provider":"p","model":"gpt-5","content":[{"type":"text","text":"pong"}],"stopReason":"stop"}}`, "p/gpt-5", "client"},
 		{`{"type":"message_end","message":{"role":"assistant","api":"anthropic-messages","model":"claude-haiku-4-5","content":[{"type":"text","text":"pong"}],"stopReason":"stop"}}`, "claude-haiku-4-5", "server"},
+		{`{"type":"message_end","message":{"role":"assistant","api":"google-generative-ai","provider":"google","model":"gemini-3","content":[{"type":"text","text":"pong"}],"stopReason":"stop"}}`, "google/gemini-3", "client"},
+		{`{"type":"message_end","message":{"role":"assistant","api":"some-future-api","provider":"p","model":"m","content":[{"type":"text","text":"pong"}],"stopReason":"stop"}}`, "p/m", "client"},
+		{`{"type":"message_end","message":{"role":"assistant","provider":"p","model":"m","content":[{"type":"text","text":"pong"}],"stopReason":"stop"}}`, "p/m", "client"},
+		// responseModel is server-reported whatever the adapter.
+		{`{"type":"message_end","message":{"role":"assistant","api":"some-future-api","provider":"p","model":"m","responseModel":"m2","content":[{"type":"text","text":"pong"}],"stopReason":"stop"}}`, "p/m2", "server"},
 	}
 	for _, c := range cases {
 		var f Fields
