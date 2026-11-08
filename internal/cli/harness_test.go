@@ -89,11 +89,12 @@ func (h *harness) writeProfile(name, body string) {
 func (h *harness) cmd(args ...string) (string, string, int) {
 	h.t.Helper()
 	c := exec.Command(fastenerBin, args...)
-	c.Env = append([]string{
-		"FASTENER_STATE_DIR=" + h.state, "FASTENER_CONFIG_DIR=" + h.config,
-		"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"),
-		"TMPDIR=" + h.work,
-	}, h.extraEnv...)
+	// extraEnv first: with duplicate keys the last entry wins, so the
+	// harness's own values must come after it.
+	c.Env = append(append([]string{}, h.extraEnv...),
+		"FASTENER_STATE_DIR="+h.state, "FASTENER_CONFIG_DIR="+h.config,
+		"PATH="+os.Getenv("PATH"), "HOME="+os.Getenv("HOME"),
+		"TMPDIR="+h.work)
 	var o, e bytes.Buffer
 	c.Stdout, c.Stderr = &o, &e
 	err := c.Run()
