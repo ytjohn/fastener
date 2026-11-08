@@ -15,7 +15,7 @@ func cmdWait(args []string, stdout, stderr io.Writer) int {
 	timeout := fs.Duration("timeout", 0, "give up after this long (exit 124)")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
-		return exitUsage
+		return parseFail(err)
 	}
 	name, ok := oneName(pos, stderr, "wait <name> [--timeout D]")
 	if !ok {
@@ -25,8 +25,9 @@ func cmdWait(args []string, stdout, stderr io.Writer) int {
 	if *timeout > 0 {
 		deadline = time.Now().Add(*timeout)
 	}
+	hs := handshakeTimeout()
 	for {
-		v, err := loadView(name)
+		v, err := session.LoadFull(name, hs)
 		if err != nil {
 			return fail(stderr, err)
 		}

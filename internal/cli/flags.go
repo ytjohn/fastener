@@ -2,9 +2,12 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
+	"regexp"
 	"strings"
+	"time"
 )
 
 type multiFlag []string
@@ -54,4 +57,36 @@ func writeJSON(w io.Writer, v any) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(v)
+}
+
+// parseFail maps a flag-parse error to an exit code: -h/--help is success.
+func parseFail(err error) int {
+	if errors.Is(err, flag.ErrHelp) {
+		return exitOK
+	}
+	return exitUsage
+}
+
+var envKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validateEnv checks --env items (KEY=VALUE with a portable key).
+func validateEnv(items []string) error {
+	for _, kv := range items {
+		k, _, ok := strings.Cut(kv, "=")
+		if !ok || !envKeyRE.MatchString(k) {
+			return usagef("--env %q: want KEY=VALUE with KEY matching %s", kv, envKeyRE)
+		}
+	}
+	return nil
+}
+
+// validateDurations rejects negative --grace / --max-runtime values.
+func validateDurations(grace, maxRuntime time.Duration) error {
+	if grace < 0 {
+		return usagef("--grace must not be negative")
+	}
+	if maxRuntime < 0 {
+		return usagef("--max-runtime must not be negative")
+	}
+	return nil
 }

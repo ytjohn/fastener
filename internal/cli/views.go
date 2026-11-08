@@ -6,6 +6,7 @@ import (
 	"sort"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ytjohn/fastener/internal/config"
 	"github.com/ytjohn/fastener/internal/session"
@@ -77,7 +78,7 @@ func cmdInspect(args []string, stdout, stderr io.Writer) int {
 	asJSON := fs.Bool("json", false, "print JSON")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
-		return exitUsage
+		return parseFail(err)
 	}
 	name, ok := oneName(pos, stderr, "inspect <name> [--json]")
 	if !ok {
@@ -132,6 +133,9 @@ func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
 	return s[:n] + "…"
 }
 
@@ -140,7 +144,7 @@ func cmdPs(args []string, stdout, stderr io.Writer) int {
 	all := fs.Bool("all", false, "include everything retained, not just recent")
 	asJSON := fs.Bool("json", false, "print JSON")
 	if _, err := parseArgs(fs, args); err != nil {
-		return exitUsage
+		return parseFail(err)
 	}
 	names, err := session.Names()
 	if err != nil {
@@ -167,7 +171,7 @@ func cmdPs(args []string, stdout, stderr io.Writer) int {
 			Labels: v.Session.Labels,
 		})
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].CreatedAt.After(rows[j].CreatedAt) })
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].CreatedAt.After(rows[j].CreatedAt) })
 	if *asJSON {
 		writeJSON(stdout, rows)
 		return exitOK

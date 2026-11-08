@@ -70,7 +70,7 @@ type Session struct {
 	Model         string            `json:"model,omitempty"`
 	MaxRuntime    Duration          `json:"max_runtime,omitempty"`
 	Grace         Duration          `json:"grace"`
-	EnvBase       []string          `json:"env_base"`
+	EnvBase       []string          `json:"env_base,omitempty"`
 	Env           []string          `json:"env,omitempty"`
 	EnvFile       string            `json:"env_file,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`

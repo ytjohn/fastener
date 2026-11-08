@@ -14,7 +14,7 @@ func cmdLogs(args []string, stdout, stderr io.Writer) int {
 	useStderr := flags.Bool("stderr", false, "show the agent's stderr instead of stdout")
 	pos, err := parseArgs(flags, args)
 	if err != nil {
-		return exitUsage
+		return parseFail(err)
 	}
 	name, ok := oneName(pos, stderr, "logs <name> [-f] [--stderr]")
 	if !ok {
@@ -65,6 +65,11 @@ func followLog(name, path string, stdout, stderr io.Writer) int {
 			return fail(stderr, err)
 		}
 		if !v.Alive() {
+			if f == nil {
+				if g, err := os.Open(path); err == nil {
+					f = g
+				}
+			}
 			if f != nil {
 				_, _ = io.Copy(stdout, f)
 			}

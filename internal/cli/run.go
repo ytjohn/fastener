@@ -27,7 +27,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&asJSON, "json", false, "print the session as JSON")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
-		return exitUsage
+		return parseFail(err)
 	}
 	if len(pos) != 1 {
 		fmt.Fprintln(stderr, "usage: fastener run <backend> --cwd DIR (--prompt TEXT | --prompt-file F) [flags]")
@@ -39,6 +39,9 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	}
 	v, err := launch(o)
 	if err != nil {
+		if v != nil && asJSON {
+			writeJSON(stdout, inspectOf(v))
+		}
 		return fail(stderr, err)
 	}
 	if asJSON {

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,7 +19,7 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 	grace := fs.Duration("grace", 0, "time between SIGTERM and SIGKILL (default: the session's)")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
-		return exitUsage
+		return parseFail(err)
 	}
 	name, ok := oneName(pos, stderr, "stop <name> [--grace D]")
 	if !ok {
@@ -38,7 +40,7 @@ func cmdRm(args []string, stdout, stderr io.Writer) int {
 	force := fs.Bool("force", false, "stop the session first if it is alive or has orphans")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
-		return exitUsage
+		return parseFail(err)
 	}
 	name, ok := oneName(pos, stderr, "rm <name> [--force]")
 	if !ok {
@@ -46,7 +48,16 @@ func cmdRm(args []string, stdout, stderr io.Writer) int {
 	}
 	v, err := loadView(name)
 	if err != nil {
-		return fail(stderr, err)
+		if errors.Is(err, session.ErrNotFound) {
+			return fail(stderr, err)
+		}
+		if !*force {
+			return fail(stderr, fmt.Errorf("%w (the session may be corrupt; use --force to remove it)", err))
+		}
+		if err := cleanCorrupt(name, stderr); err != nil {
+			return fail(stderr, err)
+		}
+		return exitOK
 	}
 	if v.Alive() || len(v.Orphans) > 0 {
 		if !*force {
@@ -96,7 +107,9 @@ func stopOnce(v *session.View, grace time.Duration, by string, retried bool) err
 		return waitStopped(v.Session.Name, grace+2*handshakeTimeout()+10*time.Second, grace, by)
 	case v.State == session.StateLost:
 		if len(v.Orphans) > 0 {
-			killOrphans(v.Orphans, v.Status.BootID, grace)
+			if left := killOrphans(v.Orphans, v.Status.BootID, grace); len(left) > 0 {
+				return fmt.Errorf("session %s: %d orphaned process(es) survived SIGKILL (%s); not finalizing", v.Session.Name, len(left), pidList(left))
+			}
 		}
 		_, err := session.Finalize(v.Dir, func(s *session.Status) {
 			now := time.Now().UTC()
@@ -138,8 +151,9 @@ func waitStopped(name string, timeout, grace time.Duration, by string) error {
 	}
 }
 
-// killOrphans signals each identified pid (never the pgid as a whole).
-func killOrphans(ids []proc.Identity, boot string, grace time.Duration) {
+// killOrphans signals each identified pid (never the pgid as a whole) and
+// returns the ones that may still be alive afterwards.
+func killOrphans(ids []proc.Identity, boot string, grace time.Duration) []proc.Identity {
 	for _, id := range ids {
 		_ = proc.Signal(id, boot, syscall.SIGTERM)
 	}
@@ -147,5 +161,40 @@ func killOrphans(ids []proc.Identity, boot string, grace time.Duration) {
 	for _, id := range left {
 		_ = proc.Signal(id, boot, syscall.SIGKILL)
 	}
-	proc.WaitGone(left, boot, 2*time.Second)
+	return proc.WaitGone(left, boot, 2*time.Second)
+}
+
+func pidList(ids []proc.Identity) string {
+	var parts []string
+	for _, id := range ids {
+		parts = append(parts, strconv.Itoa(id.PID))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// cleanCorrupt is rm --force for a session that cannot be loaded: kill any
+// marked processes it can still identify from whatever parses, then delete.
+func cleanCorrupt(name string, stderr io.Writer) error {
+	d := session.DirFor(name)
+	if d == "" {
+		return session.ErrNoStateDir
+	}
+	var st session.Status
+	if err := session.ReadJSON(d.StatusPath(), &st); err == nil && st.PGID > 0 {
+		gen := st.Generation
+		if gen <= 0 {
+			gen = 1
+		}
+		var p session.Plan
+		if err := session.ReadJSON(d.PlanPath(gen), &p); err == nil && p.Marker != "" {
+			if ids, _ := proc.FindMarked(st.PGID, p.Marker, st.BootID); len(ids) > 0 {
+				if left := killOrphans(ids, st.BootID, 10*time.Second); len(left) > 0 {
+					return fmt.Errorf("session %s: %d orphaned process(es) survived SIGKILL (%s); not removing", name, len(left), pidList(left))
+				}
+			}
+		}
+	} else if err != nil {
+		fmt.Fprintf(stderr, "fastener: warning: %s: cannot read status for orphan cleanup: %v\n", name, err)
+	}
+	return os.RemoveAll(string(d))
 }

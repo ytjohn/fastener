@@ -74,13 +74,14 @@ func prepare(o launchOptions, prompt string) (*prepared, error) {
 	if err != nil {
 		return nil, inStep("profile", err)
 	}
-	for _, kv := range o.Env {
-		if k, _, ok := strings.Cut(kv, "="); !ok || k == "" {
-			return nil, inStep("binary", usagef("--env %q: want KEY=VALUE", kv))
-		}
+	if err := validateEnv(o.Env); err != nil {
+		return nil, inStep("binary", err)
 	}
 	p := &prepared{cfg: cfg, prof: prof, perms: perms, rendered: r}
 	p.envBase = runenv.Base(cfg.EnvPassthrough, os.Environ())
+	if p.envBase == nil {
+		p.envBase = []string{}
+	}
 	if o.EnvFile != "" {
 		abs, err := filepath.Abs(o.EnvFile)
 		if err != nil {
@@ -108,6 +109,12 @@ func prepare(o launchOptions, prompt string) (*prepared, error) {
 // launch creates a session and starts its monitor. On a handshake failure it
 // returns the view (if one exists) together with the error.
 func launch(o launchOptions) (*session.View, error) {
+	if err := validateDurations(o.Grace, o.MaxRuntime); err != nil {
+		return nil, err
+	}
+	if err := validateEnv(o.Env); err != nil {
+		return nil, err
+	}
 	prompt, source := o.Prompt, "inline"
 	if o.PromptFile != "" {
 		if prompt != "" {
@@ -170,10 +177,12 @@ func launch(o launchOptions) (*session.View, error) {
 		{d.StatusPath(), session.Status{SchemaVersion: session.SchemaVersion, State: session.StateStarting, Generation: 1, UpdatedAt: now}},
 	}
 	if err := session.WriteFileAtomic(d.PromptPath(), []byte(prompt), 0o600); err != nil {
+		os.RemoveAll(string(d))
 		return nil, inStep("launch", err)
 	}
 	for _, w := range writes {
 		if err := session.WriteJSON(w.path, w.v); err != nil {
+			os.RemoveAll(string(d))
 			return nil, inStep("launch", err)
 		}
 	}
@@ -183,10 +192,11 @@ func launch(o launchOptions) (*session.View, error) {
 			t := time.Now().UTC()
 			s.State, s.EndedBy, s.EndedAt, s.Error = session.StateExited, session.EndedByLaunchFailed, &t, "monitor: "+err.Error()
 		})
-		return nil, inStep("launch", fmt.Errorf("start monitor: %w", err))
+		return nil, inStep("launch", fmt.Errorf("session %s: start monitor: %w", name, err))
 	}
 	if err := session.WriteJSON(d.LauncherPath(1), rec); err != nil {
-		return nil, inStep("launch", err)
+		// Not fatal: status.json carries the monitor identity once it starts.
+		fmt.Fprintf(os.Stderr, "fastener: warning: session %s: cannot write launcher record: %v\n", name, err)
 	}
 	return handshake(name, p.cfg.Handshake())
 }
@@ -203,11 +213,19 @@ func handshake(name string, timeout time.Duration) (*session.View, error) {
 			return v, nil
 		case session.StateExited:
 			if v.Status.EndedBy == session.EndedByLaunchFailed {
-				return v, inStep("launch", fmt.Errorf("launch failed: %s", v.Status.Error))
+				return v, inStep("launch", fmt.Errorf("session %s: launch failed: %s", name, v.Status.Error))
 			}
 			return v, nil // a fast agent may already have finished
 		case session.StateLost:
-			return v, inStep("launch", fmt.Errorf("monitor died during launch; see %s", v.Dir.MonitorLog()))
+			msg := fmt.Sprintf("monitor died during launch; see %s", v.Dir.MonitorLog())
+			_, _ = session.Finalize(v.Dir, func(s *session.Status) {
+				t := time.Now().UTC()
+				s.State, s.EndedBy, s.EndedAt, s.Error = session.StateExited, session.EndedByLaunchFailed, &t, msg
+			})
+			if nv, lerr := session.Load(name, timeout); lerr == nil {
+				v = nv
+			}
+			return v, inStep("launch", fmt.Errorf("session %s: %s", name, msg))
 		}
 		if time.Now().After(deadline) {
 			return v, inStep("launch", fmt.Errorf("session %s did not start within %s; see %s", name, timeout, v.Dir.MonitorLog()))

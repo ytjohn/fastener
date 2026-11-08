@@ -24,7 +24,7 @@ func cmdBackends(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("backends", stderr)
 	asJSON := fs.Bool("json", false, "print JSON")
 	if _, err := parseArgs(fs, args); err != nil {
-		return exitUsage
+		return parseFail(err)
 	}
 	names, err := profile.Names(config.BackendsDir())
 	if err != nil {
@@ -61,7 +61,7 @@ func cmdVersion(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("version", stderr)
 	asJSON := fs.Bool("json", false, "print JSON")
 	if _, err := parseArgs(fs, args); err != nil {
-		return exitUsage
+		return parseFail(err)
 	}
 	if *asJSON {
 		writeJSON(stdout, map[string]any{"schema_version": JSONSchemaVersion, "version": version.Version})
