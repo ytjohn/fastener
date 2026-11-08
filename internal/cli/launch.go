@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/ytjohn/fastener/internal/config"
@@ -112,7 +111,8 @@ func (p *prepared) selectLauncher(o launchOptions) (launcher.Launcher, error) {
 const maxPromptBytes = 4 << 20
 
 // readPromptFile reads the prompt for --prompt-file. "-" means stdin and is
-// recorded as the source "stdin"; anything else must be a regular file, and is
+// recorded as the source "stdin"; anything else must be a regular file or a pipe (never a
+// device or directory), and is
 // recorded by absolute path. Both are capped at maxPromptBytes.
 func readPromptFile(path string, stdin io.Reader) (text, source string, err error) {
 	var r io.Reader
@@ -123,19 +123,22 @@ func readPromptFile(path string, stdin io.Reader) (text, source string, err erro
 		if err != nil {
 			return "", "", err
 		}
-		// O_NONBLOCK so opening a FIFO cannot hang before we can reject it.
-		f, err := os.OpenFile(abs, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		// Stat first (it follows symlinks) so a device is never opened:
+		// opening one can have side effects. Regular files and pipes (a FIFO,
+		// or process substitution such as <(cmd), /dev/fd/N) are read; opening
+		// a FIFO blocks until a writer appears, as usual.
+		fi, err := os.Stat(abs)
+		if err != nil {
+			return "", "", err
+		}
+		if m := fi.Mode(); !m.IsRegular() && m&os.ModeNamedPipe == 0 {
+			return "", "", usagef("--prompt-file %s: not a regular file or pipe (use - to read the prompt from stdin)", path)
+		}
+		f, err := os.Open(abs)
 		if err != nil {
 			return "", "", err
 		}
 		defer f.Close()
-		fi, err := f.Stat()
-		if err != nil {
-			return "", "", err
-		}
-		if !fi.Mode().IsRegular() {
-			return "", "", usagef("--prompt-file %s: not a regular file (use - to read the prompt from stdin)", path)
-		}
 		r, source = f, abs
 	}
 	b, err := io.ReadAll(io.LimitReader(r, maxPromptBytes+1))

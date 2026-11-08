@@ -621,7 +621,9 @@ func TestPromptSizeCap(t *testing.T) {
 	h := newHarness(t)
 	big := strings.Repeat("a", 4<<20+1)
 	pf := filepath.Join(t.TempDir(), "big.txt")
-	os.WriteFile(pf, []byte(big), 0o600)
+	if err := os.WriteFile(pf, []byte(big), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	_, errOut, code := h.cmd("run", "fake", "--name", "bigf", "--cwd", h.work, "--prompt-file", pf)
 	if code != 2 || !strings.Contains(errOut, "4 MiB") {
 		t.Fatalf("oversize file: code %d, want 2 naming the cap: %s", code, errOut)
@@ -634,7 +636,9 @@ func TestPromptSizeCap(t *testing.T) {
 		t.Fatalf("oversize stdin: %v\n%s", err, out)
 	}
 	// Exactly the cap is fine.
-	os.WriteFile(pf, []byte(big[:4<<20]), 0o600)
+	if err := os.WriteFile(pf, []byte(big[:4<<20]), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	h.ok("run", "fake", "--name", "capok", "--cwd", h.work, "--prompt-file", pf)
 	for _, n := range []string{"bigf", "bigs"} {
 		if _, _, code := h.cmd("inspect", n); code != 127 {
@@ -643,16 +647,29 @@ func TestPromptSizeCap(t *testing.T) {
 	}
 }
 
-func TestPromptFileRejectsNonRegular(t *testing.T) {
+func TestPromptFileReadsFIFO(t *testing.T) {
 	h := newHarness(t)
-	paths := map[string]string{"zero": "/dev/zero"}
 	fifo := filepath.Join(t.TempDir(), "p.fifo")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Logf("mkfifo unsupported, skipping FIFO case: %v", err)
-	} else {
-		paths["fifo"] = fifo
+		t.Skipf("mkfifo unsupported: %v", err)
 	}
-	for name, p := range paths {
+	go func() { // stands in for process substitution: <(cmd)
+		if f, err := os.OpenFile(fifo, os.O_WRONLY, 0); err == nil {
+			f.WriteString("prompt from a pipe")
+			f.Close()
+		}
+	}()
+	h.ok("run", "fake", "--name", "pipe", "--cwd", h.work, "--prompt-file", fifo)
+	h.ok("wait", "pipe", "--timeout", "10s")
+	b, err := os.ReadFile(filepath.Join(h.state, "sessions", "pipe", "prompt.txt"))
+	if err != nil || string(b) != "prompt from a pipe" {
+		t.Fatalf("prompt.txt = %q, %v", b, err)
+	}
+}
+
+func TestPromptFileRejectsDevicesAndDirs(t *testing.T) {
+	h := newHarness(t)
+	for name, p := range map[string]string{"zero": "/dev/zero", "dir": t.TempDir()} {
 		done := make(chan struct{})
 		var errOut string
 		var code int
@@ -665,8 +682,8 @@ func TestPromptFileRejectsNonRegular(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("%s: run hung", name)
 		}
-		if code != 2 || !strings.Contains(errOut, "regular file") {
-			t.Errorf("%s: code %d, want 2 with a regular-file error: %s", name, code, errOut)
+		if code != 2 || !strings.Contains(errOut, "not a regular file or pipe") {
+			t.Errorf("%s: code %d, want 2 with a not-a-regular-file error: %s", name, code, errOut)
 		}
 	}
 }
