@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -132,9 +131,6 @@ func TestPruneKeepsLost(t *testing.T) {
 }
 
 func TestPruneKeepsExitedWithOrphans(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("process scan test is Linux-specific")
-	}
 	h := newHarness(t)
 	pidfile := filepath.Join(t.TempDir(), "gc.pid")
 	h.start("orph", []string{"FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile}, "--grace", "1s")
@@ -262,9 +258,6 @@ func orphanedSession(t *testing.T, h *harness, name string) {
 }
 
 func TestPruneKeepsWhenPlanMissingOrCorrupt(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("process scan test is Linux-specific")
-	}
 	for _, mode := range []string{"missing", "corrupt"} {
 		t.Run(mode, func(t *testing.T) {
 			h := newHarness(t)

@@ -136,7 +136,7 @@ func TestMaxRuntime(t *testing.T) {
 
 func TestMonitorKilledLeavesLostWithOrphans(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("pdeathsig behaviour is Linux-specific")
+		t.Skip("needs Pdeathsig, which macOS lacks: the agent itself can outlive the killed monitor there")
 	}
 	h := newHarness(t)
 	pidfile := filepath.Join(t.TempDir(), "gc.pid")
@@ -365,7 +365,7 @@ func TestHelpExitsZero(t *testing.T) {
 
 func TestRmForceCleansLostWithOrphans(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("pdeathsig behaviour is Linux-specific")
+		t.Skip("needs Pdeathsig, which macOS lacks: the agent itself can outlive the killed monitor there")
 	}
 	h := newHarness(t)
 	pidfile := filepath.Join(t.TempDir(), "gc.pid")
@@ -434,9 +434,6 @@ func TestHandshakeTimeoutStopsTheSession(t *testing.T) {
 }
 
 func TestExitedSessionTracksAndCleansDescendants(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("process scan test is Linux-specific")
-	}
 	h := newHarness(t)
 	pidfile := filepath.Join(t.TempDir(), "gc.pid")
 	h.start("s1", []string{"FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile})
@@ -463,9 +460,6 @@ func TestExitedSessionTracksAndCleansDescendants(t *testing.T) {
 }
 
 func TestRmForceKillsDescendantsOfExitedSession(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("process scan test is Linux-specific")
-	}
 	h := newHarness(t)
 	pidfile := filepath.Join(t.TempDir(), "gc.pid")
 	h.start("s1", []string{"FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile}, "--grace", "1s")
@@ -693,7 +687,7 @@ func TestPromptFileRejectsDevicesAndDirs(t *testing.T) {
 // falls back to a marker-only scan scoped to the current boot.
 func TestRmForceCorruptStatusKillsMarkedOrphans(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("pdeathsig behaviour is Linux-specific")
+		t.Skip("needs Pdeathsig, which macOS lacks: the agent itself can outlive the killed monitor there")
 	}
 	h := newHarness(t)
 	pidfile := filepath.Join(t.TempDir(), "gc.pid")
@@ -745,7 +739,7 @@ func TestRmForceWarnsWhenPlanUnreadable(t *testing.T) {
 // the other must end cleanly, nothing may survive, and no tombstone may remain.
 func TestConcurrentStopAndRmOnLostSession(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("pdeathsig behaviour is Linux-specific")
+		t.Skip("needs Pdeathsig, which macOS lacks: the agent itself can outlive the killed monitor there")
 	}
 	h := newHarness(t)
 	for round := 0; round < 4; round++ {

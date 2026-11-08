@@ -97,13 +97,16 @@ setsid mode keeps them running and tracks them** (`inspect` shows `orphans: N`,
   session ends; setsid leaves them running, tracked.
 - **`fastener stop`:** both send the agent's process group SIGTERM, wait the
   grace period, then SIGKILL; systemd also SIGKILLs anything that left the group.
-- **The monitor dies:** both kill the agent (Linux); systemd SIGKILLs the rest at
-  once, setsid leaves grandchildren running, tracked.
+- **The monitor dies:** both kill the agent (Linux; on macOS the agent keeps
+  running, tracked); systemd SIGKILLs the rest at once, setsid leaves
+  grandchildren running, tracked.
 - **Logout without linger, or the runtime backstop:** systemd stops the session
   like an outside SIGTERM (`ended_by=signal`, with the normal grace) and then
   kills the leftovers; under setsid, logout does not touch the session.
 
 Use `--launcher setsid` if an agent's background processes must keep running.
 
-Linux is the tested platform. macOS builds, but its lifecycle tests have not run
-yet (see `docs/followups.md`).
+Linux and macOS both run the full test suite in CI. macOS has no parent-death
+signal, so there a killed monitor leaves the agent itself running too (setsid is
+the only launcher on macOS); it is tracked as an orphan of the `lost` session and
+`stop` or `rm --force` cleans it up. The tests of that path run on Linux only.

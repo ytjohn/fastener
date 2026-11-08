@@ -242,7 +242,9 @@ This rules out a reused pid, including one reused after a reboot, being mistaken
   - **Clocks.** The first stop's deadline is measured from when the monitor received the signal, on the monotonic clock. A later request's deadline is `requested_at + grace`, a wall-clock time written by the CLI, so a step of the system clock can move it earlier or later (never past the deadline already in force).
   - **`ended_by`.** It is `stop` if any stop request was seen, including a newer one that did not shorten the wait. A `--max-runtime` termination stays `limit` even if a stop request shortened its grace.
 - **A pending exit beats a signal or limit.** If the agent has already exited by the time the monitor handles a stop signal or the `--max-runtime` timer, the exit stands (`ended_by=exit`); the monitor does not relabel a finished agent as stopped.
-- **Zombie pinning (Linux).** After the agent dies, the monitor leaves it unreaped (`waitid` with `WNOWAIT`) until group signalling is finished, then reaps. While the zombie exists its pid and pgid cannot be reused, so the final SIGKILL of the group cannot reach a stranger. macOS has no such pin in v0.1 (`x/sys/unix` has no `Waitid`); the agent is reaped immediately and there is a small pgid-reuse window (see `docs/followups.md`).
+- **Zombie pinning.** After the agent dies, the monitor leaves it unreaped until group signalling is finished, then reaps it with `cmd.Wait`, the only reaper. While the zombie exists its pid and pgid cannot be reused, so the final SIGKILL of the group cannot reach a stranger. How the exit is seen without reaping:
+  - **Linux:** `waitid` with `WNOWAIT`.
+  - **macOS** (`x/sys/unix` has no `Waitid` there): a kqueue `EVFILT_PROC` / `NOTE_EXIT` knote, registered by the spawn goroutine right after `cmd.Start`; `kevent` blocks until the exit. If the agent exited before the registration, `kevent` fails with `ESRCH` and the monitor waits for the zombie instead (`sysctl kern.proc.pid` shows `p_stat == SZOMB`). The non-blocking check used when a signal or the limit races the exit is that same zombie check. The kqueue is close-on-exec and closed once the exit is seen.
 - **Output drain.** After the agent exits the monitor waits up to 2 s for its stdout to close. A descendant that keeps the pipe open cannot hold the session open, so this is deliberate: anything written to stdout after those 2 s is lost and never reaches `output.log`. When the drain times out the monitor says so in `monitor.log` and records `output_truncated: true` in `status.json`, so callers can tell the log may be incomplete. (stderr goes straight to `stderr.log` through the descendant's own file descriptor and is not affected.)
 - **`--max-runtime`** follows the same path and records `ended_by=limit`. With no `--max-runtime` there is no limit, and `RuntimeMaxSec` is omitted.
 - **systemd settings:**
@@ -259,11 +261,11 @@ This rules out a reused pid, including one reused after a reboot, being mistaken
 |---|---|
 | systemd | The monitor is the unit's main process, so its death stops the unit and, with `KillMode=mixed`, systemd SIGKILLs everything left in the cgroup at once, including a grandchild that ignores SIGTERM (the agent also dies by `PR_SET_PDEATHSIG`). The session reads `lost` with no orphans. |
 | setsid, Linux | The agent itself is killed by `PR_SET_PDEATHSIG=SIGKILL`. Grandchildren in its process group can survive. They show as `lost` with `orphans: N`, and `stop` or `rm` cleans them up. |
-| setsid, macOS | The agent and grandchildren may survive. Same handling: `lost` with `orphans`, cleaned up by `stop` or `rm`. |
+| setsid, macOS | macOS has no parent-death signal, so the agent itself survives, along with any grandchildren. Same handling: `lost` with `orphans` (the agent counts as one), cleaned up by `stop` or `rm`. |
 
 A parser panic is recovered: it is logged, counted in `parse_errors`, and never ends the session.
 
-**Go implementation constraint:** Linux delivers `PR_SET_PDEATHSIG` when the *thread* that spawned the child exits, not when the process exits (golang/go#27505). The monitor must spawn the agent from a goroutine locked to its OS thread (`runtime.LockOSThread`) that stays alive for the whole session.
+**Go implementation constraint:** Linux delivers `PR_SET_PDEATHSIG` when the *thread* that spawned the child exits, not when the process exits (golang/go#27505). The monitor must spawn the agent from a goroutine locked to its OS thread (`runtime.LockOSThread`) that stays alive for the whole session. macOS uses the same locked-thread spawn and wait, though it has no `PDEATHSIG`.
 
 ### Reboot
 
@@ -614,7 +616,7 @@ docs/                  json-schema.md, design specs
   - label filtering (shipped as `ps --filter`).
 - **Live smoke** (opt-in, `FASTENER_SMOKE=1`; costs model calls): runs `fastener check --all --json` and requires every built-in backend to pass. This is the release check that built-in flags are correct. There is no separate smoke-test logic.
 - **`check` itself** is tested against the fake agent: a passing reply, a wrong reply, `agent_error`, a timeout (built-in hint), a `diagnose` pattern match in `stderr.log`, and a missing binary.
-- **CI:** Linux and macOS runners; `go vet`, `go test -race`. The macOS job is `continue-on-error` in v0.1 because its lifecycle tests have never run there. `staticcheck` is not wired in yet.
+- **CI:** Linux and macOS runners; `go vet`, `go test -race -v`. Both jobs are blocking. The pinned-zombie tests (`internal/monitor/pinned_test.go`: the no-reap wait before and after the exit, exit beating a signal, stop killing a grandchild), the stop tests and the orphan-scan lifecycle tests run on both. The tests that SIGKILL the monitor and expect only grandchildren to survive need `PDEATHSIG` and skip on macOS. `staticcheck` is not wired in yet.
 - **Deferred to v0.2:** concurrent `stop`/`rm` through the CLI (`Finalize` has a unit test) and schema fixtures per release.
 
 ## 13. Milestones
@@ -632,7 +634,7 @@ docs/                  json-schema.md, design specs
    - (done: `codex-jsonl` and `pi-json` parsers, from captured real output);
    - prune and retention;
    - more `diagnose` patterns;
-   - macOS hardening (see `docs/followups.md`).
+   - macOS hardening (done: zombie pinning with kqueue, blocking macOS CI; see `docs/followups.md`).
 3. **v0.3, phase B:** pty monitor, `attach`, `--remote`, conversation finders, `restore`, `install-restore`.
 
 **Acceptance for v0.3:**
@@ -650,7 +652,7 @@ No Fastener daemon is involved at any point.
 - The exact flag names for headless runs, permissions and remote control for each backend are unverified (they are gated by smoke tests).
 - Finding conversation IDs for interactive Codex and Pi sessions is uninvestigated.
 - How Claude auto-permission mode and Codex's equivalent behave in a headless run when an action is denied: whether the denial is reported to the model or the run blocks.
-- On macOS the exited agent is reaped immediately, so its pgid is not pinned while the group is signalled, and the TERM/KILL sequence has small race windows. Linux pins the zombie with `waitid(WNOWAIT)`.
+- macOS has no parent-death signal, so in setsid mode (the only mode there) an agent can outlive a killed monitor. It is handled as an orphan of the `lost` session (`stop` or `rm --force` cleans it up), not prevented. The zombie is pinned on both platforms (§4).
 - Unknown liveness (an unreadable `/proc` or failed sysctl) is treated as maybe-alive, so a session can stay `running` or block finalization until liveness can be read.
 - A normally exited agent can leave descendants running. In setsid mode they are tracked (`inspect` shows `orphans: N` for the `exited` session; `rm` refuses without `--force`), never killed implicitly; `stop` or `rm --force` cleans them up. In systemd mode they are SIGKILLed with the unit's cgroup as soon as the monitor exits, with no grace of their own: a caller that wants an agent's background processes to outlive it must use `--launcher setsid`.
 - Without linger, `auto` uses setsid and an explicit `--launcher systemd` warns, because the user manager (and every session unit) stops at logout.
