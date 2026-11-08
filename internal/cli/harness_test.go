@@ -109,6 +109,12 @@ func (h *harness) writeProfile(name, body string) {
 
 func (h *harness) cmd(args ...string) (string, string, int) {
 	h.t.Helper()
+	return h.run(args...)
+}
+
+// run is cmd without t.Helper, safe to call from goroutines. A failure to
+// start the process reports exit code -1.
+func (h *harness) run(args ...string) (string, string, int) {
 	c := exec.Command(fastenerBin, args...)
 	if h.softNofile != "" {
 		c = exec.Command("/bin/sh", append([]string{"-c", `ulimit -Sn "$0" && exec "$@"`, h.softNofile, fastenerBin}, args...)...)
@@ -126,7 +132,7 @@ func (h *harness) cmd(args ...string) (string, string, int) {
 	if ee, ok := err.(*exec.ExitError); ok {
 		code = ee.ExitCode()
 	} else if err != nil {
-		h.t.Fatal(err)
+		return o.String(), e.String(), -1
 	}
 	return o.String(), e.String(), code
 }

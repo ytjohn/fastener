@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -118,5 +119,12 @@ func TestFinalizeUnitOnly(t *testing.T) {
 	d := writeSession(t, "gone", time.Now(), Status{State: StateStarting}, unitRecord("gone.service"))
 	if ok, err := Finalize(d, func(s *Status) { s.State = StateExited }); !ok || err != nil {
 		t.Fatalf("collected unit: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestFinalizeRemovedSessionIsNotFound(t *testing.T) {
+	d := Dir(filepath.Join(t.TempDir(), "gone"))
+	if _, err := Finalize(d, func(*Status) {}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }

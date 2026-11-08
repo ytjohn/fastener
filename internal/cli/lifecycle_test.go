@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -737,5 +738,67 @@ func TestRmForceWarnsWhenPlanUnreadable(t *testing.T) {
 	}
 	if _, _, code := h.cmd("inspect", "p1"); code != 127 {
 		t.Fatal("session not removed")
+	}
+}
+
+// stop and rm --force racing on a session whose monitor died: whichever wins,
+// the other must end cleanly, nothing may survive, and no tombstone may remain.
+func TestConcurrentStopAndRmOnLostSession(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("pdeathsig behaviour is Linux-specific")
+	}
+	h := newHarness(t)
+	for round := 0; round < 4; round++ {
+		name := fmt.Sprintf("race%d", round)
+		pidfile := filepath.Join(t.TempDir(), "gc.pid")
+		h.start(name, []string{"FAKE_SLEEP=60s", "FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile}, "--grace", "1s")
+		v := h.waitState(name, "running", 5*time.Second)
+		gc := waitPid(t, pidfile)
+		syscall.Kill(v.Status.Monitor.PID, syscall.SIGKILL)
+		if v = h.waitState(name, "lost", 5*time.Second); v.Orphans < 1 {
+			t.Fatalf("%s: orphans = %d, want the grandchild", name, v.Orphans)
+		}
+
+		type result struct {
+			what, errOut string
+			code         int
+		}
+		results := make(chan result, 2)
+		start := make(chan struct{})
+		for _, args := range [][]string{{"stop", name, "--grace", "1s"}, {"rm", "--force", name}} {
+			go func(args []string) {
+				<-start
+				_, errOut, code := h.run(args...)
+				results <- result{args[0], errOut, code}
+			}(args)
+		}
+		close(start)
+		for i := 0; i < 2; i++ {
+			r := <-results
+			if r.code != 0 && r.code != 127 {
+				t.Errorf("%s: %s exited %d: %s", name, r.what, r.code, r.errOut)
+			}
+			if strings.Contains(strings.ToLower(r.errOut), "panic") {
+				t.Errorf("%s: %s crashed: %s", name, r.what, r.errOut)
+			}
+		}
+
+		// Either the session is gone (rm won or ran last) or it is finalized once.
+		if _, _, code := h.cmd("inspect", name); code != 127 {
+			after := h.inspect(name)
+			if after.State != "exited" || after.Orphans != 0 || after.Status.EndedBy != "stop" {
+				t.Errorf("%s: leftover session %+v", name, after)
+			}
+			h.ok("rm", "--force", name)
+		}
+		if pidAlive(gc) {
+			t.Errorf("%s: grandchild %d survived", name, gc)
+		}
+		entries, _ := os.ReadDir(filepath.Join(h.state, "sessions"))
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), ".prune-") {
+				t.Errorf("%s: tombstone %s left behind", name, e.Name())
+			}
+		}
 	}
 }
