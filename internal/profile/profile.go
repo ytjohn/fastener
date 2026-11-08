@@ -55,7 +55,7 @@ func KnownLevels() []string { return []string{"auto", "skip"} }
 
 var levels = map[string]bool{"auto": true, "skip": true}
 var options = map[string]bool{"model": true}
-var commandRE = regexp.MustCompile(`^[A-Za-z0-9._+][A-Za-z0-9._+-]*$`)
+var commandRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 
 type Profile struct {
