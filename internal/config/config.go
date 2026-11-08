@@ -15,7 +15,8 @@ import (
 )
 
 type Config struct {
-	Retention          string   `toml:"retention"` // used from v0.2
+	Retention          string   `toml:"retention"`
+	AutoPrune          bool     `toml:"auto_prune"` // opportunistic pruning by run and ps
 	DefaultPermissions string   `toml:"default_permissions"`
 	HandshakeTimeout   string   `toml:"handshake_timeout"`
 	Launcher           string   `toml:"launcher"`
@@ -55,6 +56,7 @@ func BackendsDir() string {
 func defaults() Config {
 	return Config{
 		Retention:        "168h",
+		AutoPrune:        true,
 		HandshakeTimeout: "5s",
 		Launcher:         "auto",
 		EnvPassthrough:   append([]string(nil), runenv.DefaultPassthrough...),
@@ -109,6 +111,15 @@ func (c Config) Handshake() time.Duration {
 	d, err := time.ParseDuration(c.HandshakeTimeout)
 	if err != nil || d <= 0 {
 		return 5 * time.Second
+	}
+	return d
+}
+
+// RetentionDuration returns the retention period (validated by Load).
+func (c Config) RetentionDuration() time.Duration {
+	d, err := time.ParseDuration(c.Retention)
+	if err != nil || d <= 0 {
+		return 168 * time.Hour
 	}
 	return d
 }
