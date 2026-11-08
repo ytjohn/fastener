@@ -133,3 +133,49 @@ func TestWaitGone(t *testing.T) {
 		t.Fatalf("WaitGone took %v", el)
 	}
 }
+
+func TestHandleClose(t *testing.T) {
+	boot := mustBoot(t)
+	cmd := startInGroup(t, os.Environ())
+	id, err := Of(cmd.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := Open(id, boot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.Close()
+	h.Close() // idempotent
+	if err := h.Signal(syscall.SIGKILL); err == nil || errors.Is(err, ErrNoProcess) {
+		t.Fatalf("Signal on closed handle = %v, want a closed error", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if !Alive(id, boot) {
+		t.Fatal("closed handle signalled its target")
+	}
+}
+
+func TestOpenRejectsMismatch(t *testing.T) {
+	boot := mustBoot(t)
+	id, err := Self()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		id   Identity
+		boot string
+	}{
+		{Identity{PID: id.PID, StartTime: id.StartTime + 1}, boot},
+		{id, "other-boot"},
+		{id, ""},
+		{Identity{}, boot},
+	} {
+		if h, err := Open(c.id, c.boot); !errors.Is(err, ErrNoProcess) {
+			if h != nil {
+				h.Close()
+			}
+			t.Fatalf("Open(%+v, %q) = %v, want ErrNoProcess", c.id, c.boot, err)
+		}
+	}
+}

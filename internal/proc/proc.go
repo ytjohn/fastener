@@ -70,22 +70,100 @@ func MaybeAlive(id Identity, bootID string) bool {
 	return ok || err != nil
 }
 
-// Signal sends sig to id after re-verifying the identity.
+// Signal sends sig to id after re-verifying the identity. On Linux it pins the
+// process with a pidfd before verifying and signals through it, so the process
+// cannot exit and have its pid reused between the check and the signal.
 func Signal(id Identity, bootID string, sig syscall.Signal) error {
+	h, err := Open(id, bootID)
+	if err != nil {
+		return err
+	}
+	defer h.Close()
+	return h.Signal(sig)
+}
+
+// Handle refers to one verified process instance. On Linux it holds a pidfd
+// opened before the identity was verified, so every signal sent through it
+// reaches that instance or nobody, however long the handle is held. Where
+// pidfds are unavailable (macOS, Linux before 5.3, a seccomp sandbox) it holds
+// only the identity and each Signal re-verifies it before kill(2), which
+// leaves a small pid-reuse window. A Handle is not safe for concurrent use.
+type Handle struct {
+	id     Identity
+	boot   string
+	fd     int // pidfd, or -1 when none
+	closed bool
+}
+
+// errClosed is returned by Signal on a closed Handle.
+var errClosed = errors.New("proc: handle is closed")
+
+// Open pins and verifies id: it opens a pidfd first (where available) and
+// only then checks pid, start time and boot, so a process that dies after the
+// open fails the check instead of being replaced by a stranger. It returns
+// ErrNoProcess when id is not alive, and another error when liveness could not
+// be determined. The caller must Close the handle.
+func Open(id Identity, bootID string) (*Handle, error) {
+	if id.PID <= 0 || bootID == "" {
+		return nil, ErrNoProcess
+	}
+	fd, err := openPin(id.PID)
+	if err != nil {
+		return nil, err
+	}
+	h := &Handle{id: id, boot: bootID, fd: fd}
 	ok, err := Check(id, bootID)
+	if err == nil && !ok {
+		err = ErrNoProcess
+	}
+	if err != nil {
+		h.Close()
+		return nil, err
+	}
+	return h, nil
+}
+
+// Identity returns the identity the handle was opened for.
+func (h *Handle) Identity() Identity { return h.id }
+
+// Alive is true only when Check confirms the process is still alive.
+func (h *Handle) Alive() bool { return Alive(h.id, h.boot) }
+
+// Signal sends sig to the process. ErrNoProcess means it has exited (on Linux
+// with a pidfd: been reaped; a zombie still accepts and ignores the signal).
+func (h *Handle) Signal(sig syscall.Signal) error {
+	if h.closed {
+		return errClosed
+	}
+	if h.fd >= 0 {
+		return signalPin(h.fd, sig)
+	}
+	ok, err := Check(h.id, h.boot)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return ErrNoProcess
 	}
-	if err := syscall.Kill(id.PID, sig); err != nil {
+	if err := syscall.Kill(h.id.PID, sig); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return ErrNoProcess
 		}
 		return err
 	}
 	return nil
+}
+
+// Close releases the pidfd, if any. It is idempotent.
+func (h *Handle) Close() {
+	if h.closed {
+		return
+	}
+	h.closed = true
+	if h.fd >= 0 {
+		closePin(h.fd)
+		h.fd = -1
+	}
 }
 
 // FindMarked returns the live processes in process group pgid whose environment

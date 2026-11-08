@@ -206,14 +206,31 @@ func waitStopped(name string, timeout, grace time.Duration, by string) error {
 }
 
 // killOrphans signals each identified pid (never the pgid as a whole) and
-// returns the ones that may still be alive afterwards.
+// returns the ones that may still be alive afterwards. Each orphan is opened
+// as a proc.Handle up front and both TERM and KILL go through it, so on Linux
+// a pid that exits and is reused during the grace period is never signalled.
 func killOrphans(ids []proc.Identity, boot string, grace time.Duration) []proc.Identity {
+	hs := make(map[proc.Identity]*proc.Handle, len(ids))
 	for _, id := range ids {
-		_ = proc.Signal(id, boot, syscall.SIGTERM)
+		if h, err := proc.Open(id, boot); err == nil {
+			hs[id] = h
+			defer h.Close()
+		}
+	}
+	signal := func(id proc.Identity, sig syscall.Signal) {
+		if h := hs[id]; h != nil {
+			_ = h.Signal(sig)
+			return
+		}
+		// Not opened: gone already, or liveness was unknown; re-verify now.
+		_ = proc.Signal(id, boot, sig)
+	}
+	for _, id := range ids {
+		signal(id, syscall.SIGTERM)
 	}
 	left := proc.WaitGone(ids, boot, grace)
 	for _, id := range left {
-		_ = proc.Signal(id, boot, syscall.SIGKILL)
+		signal(id, syscall.SIGKILL)
 	}
 	return proc.WaitGone(left, boot, 2*time.Second)
 }
