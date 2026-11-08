@@ -1,0 +1,66 @@
+package parser
+
+import (
+	"bytes"
+	"encoding/json"
+)
+
+// claudeStreamJSON parses `claude -p --output-format stream-json --verbose`.
+// Every event carries session_id; the final "result" event carries the reply,
+// is_error, total_cost_usd and usage.
+type claudeStreamJSON struct{}
+
+type claudeEvent struct {
+	Type         string   `json:"type"`
+	SessionID    string   `json:"session_id"`
+	Result       *string  `json:"result"`
+	IsError      *bool    `json:"is_error"`
+	TotalCostUSD *float64 `json:"total_cost_usd"`
+	Usage        *struct {
+		InputTokens              int64 `json:"input_tokens"`
+		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+		OutputTokens             int64 `json:"output_tokens"`
+	} `json:"usage"`
+}
+
+func (claudeStreamJSON) Line(line []byte, f *Fields) bool {
+	if len(bytes.TrimSpace(line)) == 0 {
+		return false
+	}
+	var e claudeEvent
+	if err := json.Unmarshal(line, &e); err != nil {
+		f.ParseErrors++
+		return true
+	}
+	changed := false
+	if e.SessionID != "" && e.SessionID != f.ConversationID {
+		f.ConversationID = e.SessionID
+		changed = true
+	}
+	if e.Type != "result" {
+		return changed
+	}
+	if e.Result != nil {
+		f.FinalMessage = *e.Result
+		changed = true
+	}
+	if e.IsError != nil {
+		v := *e.IsError
+		f.AgentError = &v
+		changed = true
+	}
+	if e.Usage != nil || e.TotalCostUSD != nil {
+		u := &Usage{}
+		if e.Usage != nil {
+			u.InputTokens = e.Usage.InputTokens + e.Usage.CacheCreationInputTokens + e.Usage.CacheReadInputTokens
+			u.OutputTokens = e.Usage.OutputTokens
+		}
+		if e.TotalCostUSD != nil {
+			u.CostUSD = *e.TotalCostUSD
+		}
+		f.Usage = u
+		changed = true
+	}
+	return changed
+}

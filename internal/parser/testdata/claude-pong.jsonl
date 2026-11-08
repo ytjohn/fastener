@@ -1,0 +1,6 @@
+{"type":"system","subtype":"hook_started","hook_id":"h1","hook_name":"SessionStart","session_id":"07a30733-a1d1-48ef-b822-91ae107e12a5"}
+{"type":"system","subtype":"init","cwd":"/tmp/x","session_id":"07a30733-a1d1-48ef-b822-91ae107e12a5","model":"claude-opus-5-5","permissionMode":"auto"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"pong"}],"usage":{"input_tokens":2,"output_tokens":4}},"session_id":"07a30733-a1d1-48ef-b822-91ae107e12a5"}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"},"session_id":"07a30733-a1d1-48ef-b822-91ae107e12a5"}
+{"type":"system","subtype":"post_turn_summary","status_category":"done","session_id":"07a30733-a1d1-48ef-b822-91ae107e12a5"}
+{"type":"result","subtype":"success","is_error":false,"result":"pong","session_id":"07a30733-a1d1-48ef-b822-91ae107e12a5","num_turns":1,"total_cost_usd":0.1082614,"usage":{"input_tokens":2,"cache_creation_input_tokens":13240,"cache_read_input_tokens":11267,"output_tokens":4},"permission_denials":[]}
