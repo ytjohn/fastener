@@ -56,16 +56,19 @@ func (claudeStreamJSON) Line(line []byte, f *Fields) bool {
 		f.AgentError = &v
 		changed = true
 	}
-	if e.Usage != nil || e.TotalCostUSD != nil {
-		u := &Usage{}
-		if e.Usage != nil {
-			u.InputTokens = e.Usage.InputTokens + e.Usage.CacheCreationInputTokens + e.Usage.CacheReadInputTokens
-			u.OutputTokens = e.Usage.OutputTokens
+	if e.Usage != nil {
+		u := &Usage{
+			InputTokens:  e.Usage.InputTokens + e.Usage.CacheCreationInputTokens + e.Usage.CacheReadInputTokens,
+			OutputTokens: e.Usage.OutputTokens,
 		}
-		if e.TotalCostUSD != nil {
-			u.CostUSD = *e.TotalCostUSD
+		if f.Usage != nil {
+			u.CostUSD = f.Usage.CostUSD
 		}
 		f.Usage = u
+		changed = true
+	}
+	if e.TotalCostUSD != nil && f.Usage != nil {
+		f.Usage.CostUSD = *e.TotalCostUSD
 		changed = true
 	}
 	return changed

@@ -109,3 +109,17 @@ func TestClaudeTypeMismatchKeepsPartial(t *testing.T) {
 		t.Errorf("is_error not captured: %+v", f)
 	}
 }
+
+func TestClaudeCostOnlyNoFakeTokens(t *testing.T) {
+	p, _ := Get("claude-stream-json")
+	var f Fields
+	p.Line([]byte(`{"type":"result","total_cost_usd":0.5}`), &f)
+	if f.Usage != nil {
+		t.Fatalf("cost-only result fabricated Usage: %+v", f.Usage)
+	}
+	p.Line([]byte(`{"type":"result","usage":{"input_tokens":3,"output_tokens":4}}`), &f)
+	p.Line([]byte(`{"type":"result","total_cost_usd":0.5}`), &f)
+	if f.Usage == nil || f.Usage.InputTokens != 3 || f.Usage.OutputTokens != 4 || f.Usage.CostUSD != 0.5 {
+		t.Fatalf("Usage = %+v", f.Usage)
+	}
+}
