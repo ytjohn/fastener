@@ -247,6 +247,90 @@ func TestStopIgnoringTermIsKilled(t *testing.T) {
 	}
 }
 
+// TestSecondStopShortensGrace starts a stop with a 10s grace against an agent
+// that ignores TERM, then sends a newer request with a 200ms grace: the KILL
+// must follow the second request's deadline, not the first's.
+func TestSecondStopShortensGrace(t *testing.T) {
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), []string{"FAKE_IGNORE_TERM=1", "FAKE_SLEEP=30s"}, 0)
+	stopAt := func(grace time.Duration) {
+		t.Helper()
+		if err := session.WriteJSON(d.StopPath(), session.StopRequest{SchemaVersion: 1, Generation: 1,
+			RequestedAt: time.Now().UTC(), Grace: session.Duration(grace), By: "stop"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sigs := make(chan os.Signal, 4)
+	var first time.Time
+	st := runWith(t, d, sigs, func() {
+		waitFor(t, "running", func() bool { return runningStatus(d) })
+		time.Sleep(100 * time.Millisecond)
+		first = time.Now()
+		stopAt(10 * time.Second)
+		sigs <- syscall.SIGTERM
+		time.Sleep(500 * time.Millisecond)
+		stopAt(200 * time.Millisecond)
+		sigs <- syscall.SIGTERM
+	})
+	took := time.Since(first)
+	if st.EndedBy != session.EndedByStop || st.Signal != "SIGKILL" || st.ExitCode != nil {
+		t.Fatalf("ended_by=%s signal=%s code=%v", st.EndedBy, st.Signal, st.ExitCode)
+	}
+	if took > 2*time.Second {
+		t.Fatalf("KILL came after %v; the second request's 200ms grace was not honoured", took)
+	}
+}
+
+// TestLaterLongerStopDoesNotExtend checks that a newer request with a longer
+// grace never extends the wait.
+func TestLaterLongerStopDoesNotExtend(t *testing.T) {
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), []string{"FAKE_IGNORE_TERM=1", "FAKE_SLEEP=30s"}, 0)
+	sigs := make(chan os.Signal, 4)
+	var first time.Time
+	st := runWith(t, d, sigs, func() {
+		waitFor(t, "running", func() bool { return runningStatus(d) })
+		first = time.Now()
+		session.WriteJSON(d.StopPath(), session.StopRequest{SchemaVersion: 1, Generation: 1,
+			RequestedAt: time.Now().UTC(), Grace: session.Duration(500 * time.Millisecond), By: "stop"})
+		sigs <- syscall.SIGTERM
+		time.Sleep(100 * time.Millisecond)
+		session.WriteJSON(d.StopPath(), session.StopRequest{SchemaVersion: 1, Generation: 1,
+			RequestedAt: time.Now().UTC(), Grace: session.Duration(30 * time.Second), By: "rm"})
+		sigs <- syscall.SIGTERM
+	})
+	if st.EndedBy != session.EndedByStop || st.Signal != "SIGKILL" {
+		t.Fatalf("ended_by=%s signal=%s", st.EndedBy, st.Signal)
+	}
+	if took := time.Since(first); took > 2*time.Second {
+		t.Fatalf("took %v; a longer second grace extended the wait", took)
+	}
+}
+
+// TestStopAfterPlainSignalIsStop: a signal without a request starts the
+// termination, then a stop request arrives; ended_by is stop.
+func TestStopAfterPlainSignalIsStop(t *testing.T) {
+	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), []string{"FAKE_IGNORE_TERM=1", "FAKE_SLEEP=30s"}, 0)
+	var s session.Session
+	if err := session.ReadJSON(d.SessionPath(), &s); err != nil {
+		t.Fatal(err)
+	}
+	s.Grace = session.Duration(10 * time.Second)
+	if err := session.WriteJSON(d.SessionPath(), s); err != nil {
+		t.Fatal(err)
+	}
+	sigs := make(chan os.Signal, 4)
+	st := runWith(t, d, sigs, func() {
+		waitFor(t, "running", func() bool { return runningStatus(d) })
+		sigs <- syscall.SIGTERM
+		time.Sleep(200 * time.Millisecond)
+		session.WriteJSON(d.StopPath(), session.StopRequest{SchemaVersion: 1, Generation: 1,
+			RequestedAt: time.Now().UTC(), Grace: session.Duration(100 * time.Millisecond), By: "stop"})
+		sigs <- syscall.SIGTERM
+	})
+	if st.EndedBy != session.EndedByStop || st.Signal != "SIGKILL" {
+		t.Fatalf("ended_by=%s signal=%s", st.EndedBy, st.Signal)
+	}
+}
+
 func TestMaxRuntimeLimit(t *testing.T) {
 	d := setupRun(t, []string{buildFake(t)}, t.TempDir(), []string{"FAKE_SLEEP=30s"}, 300*time.Millisecond)
 	st := runInProcess(t, d)

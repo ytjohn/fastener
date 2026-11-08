@@ -379,20 +379,23 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	case <-limit:
 		if !exitedAlready() {
 			endedBy = session.EndedByLimit
-			m.terminate(cmd, pid, time.Duration(m.sess.Grace), exitPending)
+			// A stop request during the limit's grace can shorten it, but the
+			// limit is what ended the session.
+			m.terminate(cmd, pid, time.Duration(m.sess.Grace), time.Time{}, exitPending, sigs)
 		}
 	case sig := <-sigs:
 		if !exitedAlready() {
-			grace := time.Duration(m.sess.Grace)
+			grace := m.requestGrace(session.StopRequest{})
 			endedBy = session.EndedBySignal
+			var last time.Time
 			if req, ok := m.stopRequest(); ok {
 				endedBy = session.EndedByStop
-				if req.Grace > 0 {
-					grace = time.Duration(req.Grace)
-				}
+				grace, last = m.requestGrace(req), req.RequestedAt
 			}
 			m.log.Printf("received %v; ended_by=%s grace=%s", sig, endedBy, grace)
-			m.terminate(cmd, pid, grace, exitPending)
+			if m.terminate(cmd, pid, grace, last, exitPending, sigs) {
+				endedBy = session.EndedByStop
+			}
 		}
 	}
 	close(reapNow) // signalling is finished; let the spawn goroutine reap
@@ -410,19 +413,52 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	return 0
 }
 
+// requestGrace is the grace period a stop request asks for, else the session's.
+func (m *monitor) requestGrace(req session.StopRequest) time.Duration {
+	if req.Grace > 0 {
+		return time.Duration(req.Grace)
+	}
+	return time.Duration(m.sess.Grace)
+}
+
 // terminate sends SIGTERM to the agent's process group, waits up to grace for
 // the agent to die, then SIGKILLs the group. The agent is not reaped until the
 // caller closes reapNow, so (on Linux) its pgid cannot be reused meanwhile. It
 // returns once exitPending has been consumed.
-func (m *monitor) terminate(cmd *exec.Cmd, pgid int, grace time.Duration, exitPending <-chan struct{}) bool {
+//
+// While it waits, a further signal with a stop request newer than last
+// (requested_at) can shorten the wait to that request's requested_at + grace;
+// it never extends it. terminate reports whether it honoured such a request.
+func (m *monitor) terminate(cmd *exec.Cmd, pgid int, grace time.Duration, last time.Time,
+	exitPending <-chan struct{}, sigs <-chan os.Signal) (honoured bool) {
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	select {
-	case <-exitPending:
-		if pinsZombie {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL) // reach lingering group members
+	deadline := time.Now().Add(grace)
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+wait:
+	for {
+		select {
+		case <-exitPending:
+			if pinsZombie {
+				_ = syscall.Kill(-pgid, syscall.SIGKILL) // reach lingering group members
+			}
+			return honoured
+		case <-timer.C:
+			break wait
+		case sig := <-sigs:
+			req, ok := m.stopRequest()
+			if !ok || !req.RequestedAt.After(last) {
+				m.log.Printf("received %v during termination; no newer stop request", sig)
+				continue
+			}
+			last, honoured = req.RequestedAt, true
+			if d := req.RequestedAt.Add(m.requestGrace(req)); d.Before(deadline) {
+				deadline = d
+				timer.Reset(time.Until(d)) // Go 1.23+: Reset needs no drain
+			}
+			m.log.Printf("received %v during termination; stop request at %s, killing at %s",
+				sig, req.RequestedAt.Format(time.RFC3339Nano), deadline.UTC().Format(time.RFC3339Nano))
 		}
-		return true
-	case <-time.After(grace):
 	}
 	_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	_ = cmd.Process.Kill() // covers a leader that left the group
@@ -432,7 +468,7 @@ func (m *monitor) terminate(cmd *exec.Cmd, pgid int, grace time.Duration, exitPe
 		m.log.Printf("agent still alive after SIGKILL; still waiting for it to exit")
 		<-exitPending
 	}
-	return true
+	return honoured
 }
 
 func exitFacts(s *session.Status, ps *os.ProcessState) {
