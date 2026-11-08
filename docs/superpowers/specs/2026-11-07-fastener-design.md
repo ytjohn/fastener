@@ -290,7 +290,7 @@ url_pattern = 'https://claude\.ai/\S+'
   - The permission level comes from the `--permissions` flag if given, else the `default_permissions` config, else `auto`.
   - Fastener never substitutes the backend's default permissions or `skip`.
 - **Resolution:** `~/.config/fastener/backends/<name>.toml` (`$XDG_CONFIG_HOME`) **replaces** the embedded built-in of the same name entirely. There is no merging.
-- **Validation:** an unknown key, a missing required section or an unknown parser or finder name is an error, both at load time and in `fastener backends --check`.
+- **Validation:** an unknown key, a missing required section or an unknown parser or finder name is an error, both at load time and in `fastener check --static`.
 - **Built-ins** (`profiles/*.toml`, embedded with `go:embed`): `claude`, `codex`, `pi`. Every flag in a built-in profile must be verified against the real CLI by `fastener check` (the opt-in smoke tests, §12) before release. The values above are illustrative until then.
 - **Adding a backend** means writing a TOML file. Adding a *built-in* backend is a PR containing the profile plus a recorded-output test fixture. If the backend needs a new output format, the PR also adds a parser.
 
