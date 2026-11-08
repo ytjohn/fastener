@@ -477,8 +477,8 @@ fastener install-restore
   - Exits with the agent's exit code.
   - Exits 128+N when the agent was killed by signal N.
   - Exits 124 if `--timeout` elapses while the session is still running.
-  - Exits 125 if the session did not complete normally (`launch-failed`, `lost`, `restore-failed`), and when the agent exited 0 but the parser's `agent_error` is true: Pi's json mode exits 0 after a failed model call, which would otherwise read as success. A non-zero exit code is returned unchanged.
-  - Exits 127 for an unknown session name.
+  - Exits 125 if the session did not complete normally (`launch-failed`, `lost`, `restore-failed`), if it was removed (`rm`) while `wait` was running (the message is `session <name> was removed while waiting`), and when the agent exited 0 but the parser's `agent_error` is true: Pi's json mode exits 0 after a failed model call, which would otherwise read as success. A non-zero exit code is returned unchanged.
+  - Exits 127 for a session name that never existed.
 
   A caller can therefore tell "timed out" from "lost" without a follow-up `inspect`. As with Podman, 124, 125 and 127 can collide with real agent exit codes. The documentation names `inspect --json` as the authoritative answer.
 - **`logs`:** prints `output.log`; `--stderr` prints `stderr.log`; `-f` follows until the session ends.

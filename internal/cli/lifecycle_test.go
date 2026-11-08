@@ -498,3 +498,41 @@ func TestRunFollowReportsAgentOutcome(t *testing.T) {
 		t.Fatalf("crash: code %d, want 137", code)
 	}
 }
+
+func TestWaitSessionRemovedMidWaitExits125(t *testing.T) {
+	h := newHarness(t)
+	h.start("rmw", []string{"FAKE_SLEEP=30s"})
+	type result struct {
+		errOut string
+		code   int
+	}
+	done := make(chan result, 1)
+	go func() {
+		_, e, c := h.cmd("wait", "rmw", "--timeout", "30s")
+		done <- result{e, c}
+	}()
+	time.Sleep(600 * time.Millisecond) // let wait observe the live session
+	// `rm --force` stops the agent first, so a poll could legitimately see the
+	// exited state (143) before the directory goes. To test the removal path
+	// deterministically, drop the directory under the running session, then
+	// kill the agent the way cleanup would.
+	v := h.inspect("rmw")
+	if v.Status.Monitor == nil {
+		t.Fatal("no monitor pid")
+	}
+	if err := os.RemoveAll(filepath.Join(h.state, "sessions", "rmw")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { syscall.Kill(-v.Status.Monitor.PID, syscall.SIGKILL); syscall.Kill(v.Status.Monitor.PID, syscall.SIGKILL) })
+	select {
+	case r := <-done:
+		if r.code != 125 || !strings.Contains(r.errOut, "session rmw was removed while waiting") {
+			t.Fatalf("code %d, want 125 with removal message: %s", r.code, r.errOut)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("wait did not return after the session was removed")
+	}
+	if _, _, code := h.cmd("wait", "rmw"); code != 127 {
+		t.Fatalf("never-existed/now-gone session: code %d, want 127", code)
+	}
+}

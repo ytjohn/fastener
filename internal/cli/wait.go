@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -26,11 +27,19 @@ func cmdWait(args []string, stdout, stderr io.Writer) int {
 		deadline = time.Now().Add(*timeout)
 	}
 	hs := handshakeTimeout()
+	seen := false
 	for {
 		v, err := session.LoadFull(name, hs)
 		if err != nil {
+			if seen && errors.Is(err, session.ErrNotFound) {
+				// It existed when we started waiting: this is not "unknown
+				// session" (127, which could be mistaken for an agent code).
+				fmt.Fprintf(stderr, "fastener: session %s was removed while waiting\n", name)
+				return exitAbnormal
+			}
 			return fail(stderr, err)
 		}
+		seen = true
 		if v.State == session.StateExited || v.State == session.StateLost || v.State == session.StateRestoreFailed {
 			return outcomeCode(name, v, stderr)
 		}
