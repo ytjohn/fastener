@@ -7,8 +7,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
+
+var keyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // DefaultPassthrough is the default env_passthrough list (spec §5).
 var DefaultPassthrough = []string{
@@ -34,8 +39,11 @@ func Base(passthrough, environ []string) []string {
 	return out
 }
 
-// ReadFile parses KEY=VALUE lines; blank lines and # comments are skipped,
-// an optional leading "export " is allowed, and whitespace around key and value is trimmed.
+// ReadFile parses KEY=VALUE lines; blank lines and whole-line # comments are
+// skipped, an optional leading "export " is allowed, and whitespace around key
+// and value is trimmed. If a value is wrapped in one matching pair of " or ',
+// that pair is stripped; quotes inside a value stay as written. A # inside a
+// value is literal (only whole-line comments exist). On error it returns nil.
 func ReadFile(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -44,20 +52,35 @@ func ReadFile(path string) ([]string, error) {
 	defer f.Close()
 	var out []string
 	sc := bufio.NewScanner(f)
+	sc.Buffer(nil, 1<<20)
 	for n := 1; sc.Scan(); n++ {
-		line := strings.TrimSpace(sc.Text())
+		text := sc.Text()
+		if n == 1 {
+			text = strings.TrimPrefix(text, "\uFEFF")
+		}
+		line := strings.TrimSpace(text)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		line = strings.TrimPrefix(line, "export ")
 		k, v, ok := strings.Cut(line, "=")
 		k = strings.TrimSpace(k)
-		if !ok || k == "" || strings.ContainsAny(k, " \t") {
+		if !ok || k == "" {
 			return nil, fmt.Errorf("%s:%d: want KEY=VALUE", path, n)
 		}
-		out = append(out, k+"="+strings.TrimSpace(v))
+		if !keyRE.MatchString(k) {
+			return nil, fmt.Errorf("%s:%d: invalid key %q", path, n, k)
+		}
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+			v = v[1 : len(v)-1]
+		}
+		out = append(out, k+"="+v)
 	}
-	return out, sc.Err()
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return out, nil
 }
 
 // Merge combines layers; a later layer's value wins, order of first appearance is kept.
@@ -111,5 +134,5 @@ func LookPath(name, pathList string) (string, error) {
 
 func isExec(p string) bool {
 	fi, err := os.Stat(p)
-	return err == nil && fi.Mode().IsRegular() && fi.Mode()&0o111 != 0
+	return err == nil && fi.Mode().IsRegular() && unix.Access(p, unix.X_OK) == nil
 }
