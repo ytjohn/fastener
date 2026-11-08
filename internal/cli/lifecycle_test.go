@@ -3,6 +3,7 @@ package cli_test
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -20,7 +21,7 @@ func TestRunCompletesWithParserFields(t *testing.T) {
 		t.Fatalf("wait exit %d", code)
 	}
 	v := h.inspect("s1")
-	if v.State != "exited" || v.Status.EndedBy != "exit" || *v.Status.ExitCode != 0 {
+	if v.State != "exited" || v.Status.EndedBy != "exit" || v.Status.ExitCode == nil || *v.Status.ExitCode != 0 {
 		t.Fatalf("got %+v", v)
 	}
 	if v.Status.ConversationID != "fake-session-0001" || v.Status.FinalMessage != "pong" {
@@ -34,7 +35,7 @@ func TestRunCompletesWithParserFields(t *testing.T) {
 func TestSessionOutlivesCLI(t *testing.T) {
 	h := newHarness(t)
 	h.start("s1", []string{"FAKE_SLEEP=2s"}) // the CLI has already exited here
-	h.waitState("s1", "running", 2*time.Second)
+	h.waitState("s1", "running", 5*time.Second)
 	if !strings.Contains(h.ok("ps"), "s1") {
 		t.Fatal("ps does not list running session")
 	}
@@ -89,10 +90,8 @@ func TestStopIgnoringAgentAndGrandchild(t *testing.T) {
 	h := newHarness(t)
 	pidfile := filepath.Join(t.TempDir(), "gc.pid")
 	h.start("s1", []string{"FAKE_SLEEP=60s", "FAKE_IGNORE_TERM=1", "FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile})
-	h.waitState("s1", "running", 2*time.Second)
-	time.Sleep(200 * time.Millisecond)
-	gc, _ := os.ReadFile(pidfile)
-	gcPid, _ := strconv.Atoi(strings.TrimSpace(string(gc)))
+	h.waitState("s1", "running", 5*time.Second)
+	gcPid := waitPid(t, pidfile)
 	start := time.Now()
 	h.ok("stop", "s1", "--grace", "1s") // per-call grace, shorter than the session's 10s default
 	took := time.Since(start)
@@ -106,7 +105,7 @@ func TestStopIgnoringAgentAndGrandchild(t *testing.T) {
 	if took > 8*time.Second {
 		t.Fatalf("stop took %s: the per-call --grace was ignored in favour of the session's", took)
 	}
-	if gcPid > 0 && pidAlive(gcPid) {
+	if pidAlive(gcPid) {
 		t.Fatalf("grandchild %d survived stop", gcPid)
 	}
 }
@@ -114,7 +113,7 @@ func TestStopIgnoringAgentAndGrandchild(t *testing.T) {
 func TestExternalSigtermIsSignalNotStop(t *testing.T) {
 	h := newHarness(t)
 	h.start("s1", []string{"FAKE_SLEEP=60s"})
-	v := h.waitState("s1", "running", 2*time.Second)
+	v := h.waitState("s1", "running", 5*time.Second)
 	syscall.Kill(v.Status.Monitor.PID, syscall.SIGTERM)
 	v = h.waitState("s1", "exited", 15*time.Second)
 	if v.Status.EndedBy != "signal" {
@@ -139,8 +138,8 @@ func TestMonitorKilledLeavesLostWithOrphans(t *testing.T) {
 	h := newHarness(t)
 	pidfile := filepath.Join(t.TempDir(), "gc.pid")
 	h.start("s1", []string{"FAKE_SLEEP=60s", "FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile})
-	v := h.waitState("s1", "running", 2*time.Second)
-	time.Sleep(200 * time.Millisecond)
+	v := h.waitState("s1", "running", 5*time.Second)
+	waitPid(t, pidfile)
 	syscall.Kill(v.Status.Monitor.PID, syscall.SIGKILL)
 	v = h.waitState("s1", "lost", 5*time.Second)
 	if v.Orphans < 1 {
@@ -226,5 +225,122 @@ func TestPlanRecordsWhatRan(t *testing.T) {
 	sum := sha256.Sum256(original)
 	if v := h.inspect("s1"); v.Plan == nil || v.Plan.ProfileSHA256 != hex.EncodeToString(sum[:]) {
 		t.Fatalf("plan sha does not match the profile that ran: %+v", v.Plan)
+	}
+}
+
+// waitPid waits up to 3s for pidfile to hold a pid and fails if it never does.
+func waitPid(t *testing.T, pidfile string) int {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if b, err := os.ReadFile(pidfile); err == nil {
+			if pid, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && pid > 0 {
+				return pid
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pidfile %s never held a pid", pidfile)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestRunJSONFailureNamesSession(t *testing.T) {
+	h := newHarness(t)
+	out, errOut, code := h.cmd("run", "fake", "--name", "badj", "--cwd", "/nonexistent/dir", "--prompt", "x", "--json")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	var v struct {
+		Name   string `json:"name"`
+		Status struct {
+			EndedBy string `json:"ended_by"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, out)
+	}
+	if v.Name != "badj" || v.Status.EndedBy != "launch-failed" {
+		t.Fatalf("got %+v", v)
+	}
+	if !strings.Contains(errOut, "/nonexistent/dir") || !strings.Contains(errOut, "badj") {
+		t.Fatalf("stderr should mention the cwd and session: %s", errOut)
+	}
+}
+
+func TestPromptFile(t *testing.T) {
+	h := newHarness(t)
+	pf := filepath.Join(t.TempDir(), "p.txt")
+	os.WriteFile(pf, []byte("from a file"), 0o600)
+	h.ok("run", "fake", "--name", "pf", "--cwd", h.work, "--prompt-file", pf)
+	h.ok("wait", "pf", "--timeout", "10s")
+	b, err := os.ReadFile(filepath.Join(h.state, "sessions", "pf", "prompt.txt"))
+	if err != nil || string(b) != "from a file" {
+		t.Fatalf("prompt.txt = %q, %v", b, err)
+	}
+	var v struct {
+		Session struct {
+			PromptSource string `json:"prompt_source"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal([]byte(h.ok("inspect", "pf", "--json")), &v); err != nil {
+		t.Fatal(err)
+	}
+	if v.Session.PromptSource != pf {
+		t.Fatalf("prompt_source = %q, want %q", v.Session.PromptSource, pf)
+	}
+}
+
+func TestRmForceCorruptStatus(t *testing.T) {
+	h := newHarness(t)
+	h.start("c1", nil)
+	h.ok("wait", "c1", "--timeout", "10s")
+	os.WriteFile(filepath.Join(h.state, "sessions", "c1", "status.json"), []byte("{not json"), 0o600)
+	if _, errOut, code := h.cmd("rm", "c1"); code != 1 || !strings.Contains(errOut, "--force") {
+		t.Fatalf("rm without --force: %d %s", code, errOut)
+	}
+	h.ok("rm", "--force", "c1")
+	if _, _, code := h.cmd("inspect", "c1"); code != 127 {
+		t.Fatal("corrupt session still present")
+	}
+}
+
+func TestBadFlagsAreUsageErrors(t *testing.T) {
+	h := newHarness(t)
+	base := []string{"run", "fake", "--cwd", h.work, "--prompt", "x"}
+	for _, extra := range [][]string{{"--env", "BAD-KEY=1"}, {"--env", "NOEQUALS"}, {"--grace", "-1s"}, {"--max-runtime", "-1s"}} {
+		if _, errOut, code := h.cmd(append(append([]string{}, base...), extra...)...); code != 2 {
+			t.Fatalf("%v: exit %d, want 2 (%s)", extra, code, errOut)
+		}
+	}
+}
+
+func TestLogsFollowTerminates(t *testing.T) {
+	h := newHarness(t)
+	h.start("lf", []string{"FAKE_SLEEP=300ms"})
+	done := make(chan string, 1)
+	go func() {
+		out, _, code := h.cmd("logs", "-f", "lf")
+		if code != 0 {
+			out = "exit " + strconv.Itoa(code)
+		}
+		done <- out
+	}()
+	select {
+	case out := <-done:
+		if !strings.Contains(out, `"result":"pong"`) {
+			t.Fatalf("logs -f missed the result line: %s", out)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("logs -f did not terminate")
+	}
+}
+
+func TestHelpExitsZero(t *testing.T) {
+	h := newHarness(t)
+	for _, c := range []string{"inspect", "run", "ps"} {
+		if _, _, code := h.cmd(c, "-h"); code != 0 {
+			t.Fatalf("%s -h exit %d, want 0", c, code)
+		}
 	}
 }

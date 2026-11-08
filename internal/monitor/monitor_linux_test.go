@@ -58,6 +58,9 @@ func TestExitBeatsSignal(t *testing.T) {
 				i := strings.LastIndex(string(stat), ") ")
 				return i >= 0 && strings.HasPrefix(string(stat)[i+2:], "Z")
 			})
+			// the zombie is visible slightly before the monitor's waiter goroutine
+			// has published the exit; let it, so the test is about select order only
+			time.Sleep(100 * time.Millisecond)
 			sigs <- syscall.SIGTERM
 		}
 		done := make(chan int, 1)

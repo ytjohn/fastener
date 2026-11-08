@@ -14,25 +14,31 @@ import (
 
 var fastenerBin, fakeBin string
 
-func TestMain(m *testing.M) {
+func TestMain(m *testing.M) { os.Exit(testMain(m)) }
+
+func testMain(m *testing.M) int {
 	dir, err := os.MkdirTemp("", "fastener-it-")
 	if err != nil {
-		panic(err)
+		fmt.Fprintln(os.Stderr, err)
+		return 1
 	}
-	build := func(out, pkg string) {
+	defer os.RemoveAll(dir)
+	build := func(out, pkg string) bool {
 		cmd := exec.Command("go", "build", "-o", out, pkg)
 		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 		if err := cmd.Run(); err != nil {
-			panic(fmt.Sprintf("build %s: %v", pkg, err))
+			fmt.Fprintf(os.Stderr, "build %s: %v\n", pkg, err)
+			return false
 		}
+		return true
 	}
 	fastenerBin = filepath.Join(dir, "fastener")
 	fakeBin = filepath.Join(dir, "fakeagent")
-	build(fastenerBin, "github.com/ytjohn/fastener/cmd/fastener")
-	build(fakeBin, "github.com/ytjohn/fastener/internal/testbin/fakeagent")
-	code := m.Run()
-	os.RemoveAll(dir)
-	os.Exit(code)
+	if !build(fastenerBin, "github.com/ytjohn/fastener/cmd/fastener") ||
+		!build(fakeBin, "github.com/ytjohn/fastener/internal/testbin/fakeagent") {
+		return 1
+	}
+	return m.Run()
 }
 
 const fakeProfile = `schema_version = 1
@@ -172,7 +178,9 @@ func (h *harness) cleanup() {
 	}
 	json.Unmarshal([]byte(out), &rows)
 	for _, r := range rows {
-		h.cmd("rm", "--force", r.Name)
+		if _, e, code := h.cmd("rm", "--force", r.Name); code != 0 {
+			h.t.Logf("cleanup: rm --force %s: exit %d: %s", r.Name, code, e)
+		}
 	}
 }
 
