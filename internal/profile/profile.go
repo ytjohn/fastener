@@ -1,6 +1,16 @@
 // Package profile loads backend profiles: TOML files that describe how to
 // invoke an agent CLI. User files in the backends directory replace embedded
 // built-ins of the same name entirely (no merging).
+//
+// Profile files are trusted configuration: a profile controls both the command
+// that runs and the permission flags it receives, so the backends directory
+// must be writable only by the user.
+//
+// check.version_args is optional; when it is empty, check's binary step only
+// verifies that the command can be looked up.
+//
+// Names lists every *.toml file it finds, including broken ones, so that
+// `check --all` surfaces them rather than hiding them.
 package profile
 
 import (
@@ -27,6 +37,7 @@ var ErrUnknownBackend = errors.New("unknown backend")
 
 var levels = map[string]bool{"auto": true, "skip": true}
 var options = map[string]bool{"model": true}
+var commandRE = regexp.MustCompile(`^[A-Za-z0-9._+][A-Za-z0-9._+-]*$`)
 var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 
 type Profile struct {
@@ -123,6 +134,9 @@ func (p *Profile) validate() error {
 	if p.Name == "" || p.Command == "" {
 		return errors.New("name and command are required")
 	}
+	if err := validateCommand(p.Command); err != nil {
+		return err
+	}
 	if p.Headless.Prompt != "stdin" && p.Headless.Prompt != "arg" {
 		return fmt.Errorf("headless.prompt %q: want \"stdin\" or \"arg\"", p.Headless.Prompt)
 	}
@@ -141,6 +155,9 @@ func (p *Profile) validate() error {
 		if !options[opt] {
 			return fmt.Errorf("options.%s: unknown option (known: model)", opt)
 		}
+	}
+	if err := p.validateTemplates(); err != nil {
+		return err
 	}
 	for i, d := range p.Check.Diagnose {
 		if _, err := regexp.Compile(d.Match); err != nil {
@@ -190,4 +207,53 @@ func Names(userDir string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func validateCommand(c string) error {
+	if strings.ContainsAny(c, " \t\r\n") {
+		return fmt.Errorf("command %q must not contain whitespace", c)
+	}
+	if filepath.IsAbs(c) || commandRE.MatchString(c) {
+		return nil
+	}
+	return fmt.Errorf("command %q must be a bare name or an absolute path", c)
+}
+
+func countIn(args []string, tok string) int {
+	n := 0
+	for _, a := range args {
+		n += strings.Count(a, tok)
+	}
+	return n
+}
+
+func (p *Profile) validateTemplates() error {
+	const val, conv = "{value}", "{conversation_id}"
+	var plain [][]string // argument lists where no placeholder may appear
+	plain = append(plain, p.Headless.Args, p.Check.VersionArgs)
+	for _, a := range p.Permissions {
+		plain = append(plain, a)
+	}
+	for name, tmpl := range p.Options {
+		if len(tmpl) == 0 || countIn(tmpl, val) != 1 {
+			return fmt.Errorf("options.%s must be non-empty and contain %s exactly once", name, val)
+		}
+		if countIn(tmpl, conv) != 0 {
+			return fmt.Errorf("options.%s must not contain %s", name, conv)
+		}
+	}
+	if p.Resume != nil {
+		if len(p.Resume.Args) == 0 || countIn(p.Resume.Args, conv) != 1 {
+			return fmt.Errorf("resume.args must be non-empty and contain %s exactly once", conv)
+		}
+		if countIn(p.Resume.Args, val) != 0 {
+			return fmt.Errorf("resume.args must not contain %s", val)
+		}
+	}
+	for _, a := range plain {
+		if countIn(a, val) != 0 || countIn(a, conv) != 0 {
+			return fmt.Errorf("placeholders %s and %s are only allowed in options and resume templates", val, conv)
+		}
+	}
+	return nil
 }

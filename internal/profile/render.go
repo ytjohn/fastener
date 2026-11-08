@@ -42,6 +42,9 @@ func (p *Profile) RenderHeadless(r Request) (Rendered, error) {
 		}
 	}
 	if p.Headless.Prompt == "arg" {
+		if strings.TrimSpace(r.Prompt) == "" {
+			return Rendered{}, fmt.Errorf("backend %s takes the prompt as an argument; prompt is empty", p.Name)
+		}
 		args = append(args, "--", r.Prompt)
 	}
 	return Rendered{Args: args, PromptMode: p.Headless.Prompt, Parser: p.Headless.Parser}, nil

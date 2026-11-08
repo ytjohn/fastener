@@ -6,7 +6,9 @@ command = "pi"
 # --permissions skip. Mapping "auto" to nothing would be a silent fallback.
 [headless]
 args   = ["-p", "--mode", "text"]
-prompt = "arg"    # Fastener appends "--" and then the prompt
+# Fastener appends "--" and then the prompt. Unverified: pi may treat a prompt
+# starting with "@" as a file include; revisit in v0.2.
+prompt = "arg"
 parser = "none"   # a Pi JSON parser arrives in v0.2
 
 [options]
