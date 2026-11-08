@@ -23,7 +23,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 
 `session` fields:
 - `schema_version`, `name`, `created_at`, `kind` (`headless`), `backend`, `cwd` (absolute)
-- `prompt_source`: `inline`, or the absolute `--prompt-file` path. The text itself is not in the JSON.
+- `prompt_source`: `inline`, `stdin` (for `--prompt-file -`), or the absolute `--prompt-file` path. The text itself is not in the JSON.
 - `permissions`, `model`, `max_runtime`, `grace`
 - `env_base`: environment values captured from the caller (the passthrough list); `env`: the `--env` values; `env_file`: the path only. Precedence is base, then env-file, then `--env`.
 - `labels`, `restart` (`no`), `remote` (false)

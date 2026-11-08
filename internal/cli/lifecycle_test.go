@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -523,7 +524,10 @@ func TestWaitSessionRemovedMidWaitExits125(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(h.state, "sessions", "rmw")); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { syscall.Kill(-v.Status.Monitor.PID, syscall.SIGKILL); syscall.Kill(v.Status.Monitor.PID, syscall.SIGKILL) })
+	t.Cleanup(func() {
+		syscall.Kill(-v.Status.Monitor.PID, syscall.SIGKILL)
+		syscall.Kill(v.Status.Monitor.PID, syscall.SIGKILL)
+	})
 	select {
 	case r := <-done:
 		if r.code != 125 || !strings.Contains(r.errOut, "session rmw was removed while waiting") {
@@ -534,5 +538,85 @@ func TestWaitSessionRemovedMidWaitExits125(t *testing.T) {
 	}
 	if _, _, code := h.cmd("wait", "rmw"); code != 127 {
 		t.Fatalf("never-existed/now-gone session: code %d, want 127", code)
+	}
+}
+
+func TestPromptFileStdin(t *testing.T) {
+	h := newHarness(t)
+	c := exec.Command(fastenerBin, "run", "fake", "--name", "pin", "--cwd", h.work, "--prompt-file", "-")
+	c.Env = append(os.Environ(), "FASTENER_STATE_DIR="+h.state, "FASTENER_CONFIG_DIR="+h.config, "TMPDIR="+h.work)
+	c.Stdin = strings.NewReader("prompt from stdin")
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	h.ok("wait", "pin", "--timeout", "10s")
+	b, err := os.ReadFile(filepath.Join(h.state, "sessions", "pin", "prompt.txt"))
+	if err != nil || string(b) != "prompt from stdin" {
+		t.Fatalf("prompt.txt = %q, %v", b, err)
+	}
+	var v struct {
+		Session struct {
+			PromptSource string `json:"prompt_source"`
+		} `json:"session"`
+	}
+	if err := json.Unmarshal([]byte(h.ok("inspect", "pin", "--json")), &v); err != nil {
+		t.Fatal(err)
+	}
+	if v.Session.PromptSource != "stdin" {
+		t.Fatalf("prompt_source = %q, want stdin", v.Session.PromptSource)
+	}
+}
+
+func TestPromptSizeCap(t *testing.T) {
+	h := newHarness(t)
+	big := strings.Repeat("a", 4<<20+1)
+	pf := filepath.Join(t.TempDir(), "big.txt")
+	os.WriteFile(pf, []byte(big), 0o600)
+	_, errOut, code := h.cmd("run", "fake", "--name", "bigf", "--cwd", h.work, "--prompt-file", pf)
+	if code != 2 || !strings.Contains(errOut, "4 MiB") {
+		t.Fatalf("oversize file: code %d, want 2 naming the cap: %s", code, errOut)
+	}
+	c := exec.Command(fastenerBin, "run", "fake", "--name", "bigs", "--cwd", h.work, "--prompt-file", "-")
+	c.Env = append(os.Environ(), "FASTENER_STATE_DIR="+h.state, "FASTENER_CONFIG_DIR="+h.config, "TMPDIR="+h.work)
+	c.Stdin = strings.NewReader(big)
+	out, err := c.CombinedOutput()
+	if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 2 || !strings.Contains(string(out), "4 MiB") {
+		t.Fatalf("oversize stdin: %v\n%s", err, out)
+	}
+	// Exactly the cap is fine.
+	os.WriteFile(pf, []byte(big[:4<<20]), 0o600)
+	h.ok("run", "fake", "--name", "capok", "--cwd", h.work, "--prompt-file", pf)
+	for _, n := range []string{"bigf", "bigs"} {
+		if _, _, code := h.cmd("inspect", n); code != 127 {
+			t.Errorf("%s: a session was created for a rejected prompt", n)
+		}
+	}
+}
+
+func TestPromptFileRejectsNonRegular(t *testing.T) {
+	h := newHarness(t)
+	paths := map[string]string{"zero": "/dev/zero"}
+	fifo := filepath.Join(t.TempDir(), "p.fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Logf("mkfifo unsupported, skipping FIFO case: %v", err)
+	} else {
+		paths["fifo"] = fifo
+	}
+	for name, p := range paths {
+		done := make(chan struct{})
+		var errOut string
+		var code int
+		go func() {
+			defer close(done)
+			_, errOut, code = h.cmd("run", "fake", "--name", "nr-"+name, "--cwd", h.work, "--prompt-file", p)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: run hung", name)
+		}
+		if code != 2 || !strings.Contains(errOut, "regular file") {
+			t.Errorf("%s: code %d, want 2 with a regular-file error: %s", name, code, errOut)
+		}
 	}
 }

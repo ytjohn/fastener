@@ -87,7 +87,7 @@ ${FASTENER_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/fastener}/
 ### `session.json` (intent; immutable after creation)
 
 - `schema_version`, `name`, `created_at`, `kind` (`headless` | `interactive`), `backend`, `cwd`
-- `prompt_source`: `inline`, or the `--prompt-file` path. The text is always in `prompt.txt`, copied by the CLI at `run` time, so later edits to the file don't change what a session ran.
+- `prompt_source`: `inline`, `stdin` (for `--prompt-file -`), or the `--prompt-file` path. The text is always in `prompt.txt`, copied by the CLI at `run` time, so later edits to the file don't change what a session ran.
 - `permissions`, `model`, `max_runtime` (absent = no limit), `grace`
 - **Environment:** `env_base` (variables captured from the caller by the passthrough list), `env` (the `--env` values) and `env_file` (the path only, made absolute). They are stored separately because the env-file is read later, by the monitor, and precedence is base, then env-file, then `--env`.
 - `labels`, `restart` (`no` | `on-reboot`), `remote` (bool)
@@ -466,6 +466,7 @@ fastener install-restore
   - Detached by default; prints the session name, or the full status with `--json`.
   - `--follow` follows the logs after launch, then exits with the code `wait` would report for the session (the agent's exit code, 128+N for a signal, 125 for an abnormal end). (This is not `attach`, which is the phase B pty command.)
   - `--prompt` and `--prompt-file` are mutually exclusive. One is required for headless runs, and `--cwd` is required.
+  - `--prompt-file -` reads the prompt from stdin. A prompt (from a file or stdin) larger than 4 MiB is a usage error (exit 2) naming the limit, and `--prompt-file` rejects anything that is not a regular file (a FIFO or device such as `/dev/zero`) rather than reading it.
   - Labels are stored in v0.1 (`check` uses `fastener.check=true`); filtering by them is v0.2.
   - `--launcher systemd` is a clear error in v0.1.
 - **`ps`:**
