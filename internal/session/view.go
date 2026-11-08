@@ -90,7 +90,7 @@ func readLauncher(d Dir, gen int) *LauncherRecord {
 	return nil
 }
 
-// LoadFull is Load plus an orphan scan for lost sessions.
+// LoadFull is Load plus an orphan scan for lost and exited sessions.
 func LoadFull(name string, handshake time.Duration) (*View, error) {
 	v, err := Load(name, handshake)
 	if err != nil {
@@ -101,9 +101,12 @@ func LoadFull(name string, handshake time.Duration) (*View, error) {
 }
 
 // FindOrphans fills Orphans with marked processes still alive in a lost
-// session. It is a no-op for other states.
+// session, or in an exited session whose agent left descendants behind (they
+// are tracked, never killed implicitly). It is a no-op for other states, and
+// for exited sessions that never spawned an agent.
 func (v *View) FindOrphans() {
-	if v.State == StateLost && v.Plan != nil {
+	scan := v.State == StateLost || (v.State == StateExited && v.Status.PGID > 0)
+	if scan && v.Plan != nil {
 		v.Orphans, _ = proc.FindMarked(v.Status.PGID, v.Plan.Marker, v.Status.BootID)
 	}
 }

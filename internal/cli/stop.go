@@ -89,6 +89,13 @@ func stopOnce(v *session.View, grace time.Duration, by string, retried bool) err
 		grace = 10 * time.Second
 	}
 	switch {
+	case v.State == session.StateExited && len(v.Orphans) > 0:
+		// The agent ended normally but left descendants. status.json is already
+		// final, so just clean them up; do not re-finalize.
+		if left := killOrphans(v.Orphans, v.Status.BootID, grace); len(left) > 0 {
+			return fmt.Errorf("session %s: %d orphaned process(es) survived SIGKILL (%s)", v.Session.Name, len(left), pidList(left))
+		}
+		return nil
 	case v.State == session.StateExited || v.State == session.StateRestoreFailed:
 		return nil
 	case v.Alive():

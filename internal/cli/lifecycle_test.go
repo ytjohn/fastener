@@ -351,7 +351,7 @@ func TestRmForceCleansLostWithOrphans(t *testing.T) {
 	}
 	h := newHarness(t)
 	pidfile := filepath.Join(t.TempDir(), "gc.pid")
-	h.start("s1", []string{"FAKE_SLEEP=60s", "FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile})
+	h.start("s1", []string{"FAKE_SLEEP=60s", "FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile}, "--grace", "1s")
 	v := h.waitState("s1", "running", 5*time.Second)
 	waitPid(t, pidfile)
 	syscall.Kill(v.Status.Monitor.PID, syscall.SIGKILL)
@@ -412,5 +412,49 @@ func TestHandshakeTimeoutStopsTheSession(t *testing.T) {
 			t.Fatalf("session still %s after handshake timeout; prompt left running", v.State)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestExitedSessionTracksAndCleansDescendants(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("process scan test is Linux-specific")
+	}
+	h := newHarness(t)
+	pidfile := filepath.Join(t.TempDir(), "gc.pid")
+	h.start("s1", []string{"FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile})
+	if _, _, code := h.cmd("wait", "s1", "--timeout", "10s"); code != 0 {
+		t.Fatalf("wait exit %d", code)
+	}
+	gcPid := waitPid(t, pidfile)
+	v := h.inspect("s1")
+	if v.State != "exited" || v.Orphans < 1 {
+		t.Fatalf("state %s orphans %d, want exited with the grandchild tracked", v.State, v.Orphans)
+	}
+	if _, _, code := h.cmd("rm", "s1"); code != 1 {
+		t.Fatal("rm without --force removed an exited session with orphans")
+	}
+	h.ok("stop", "s1", "--grace", "1s")
+	if pidAlive(gcPid) {
+		t.Fatalf("grandchild %d survived stop", gcPid)
+	}
+	v = h.inspect("s1")
+	if v.State != "exited" || v.Status.EndedBy != "exit" || v.Orphans != 0 {
+		t.Fatalf("stop re-finalized or left orphans: %+v", v)
+	}
+	h.ok("rm", "s1")
+}
+
+func TestRmForceKillsDescendantsOfExitedSession(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("process scan test is Linux-specific")
+	}
+	h := newHarness(t)
+	pidfile := filepath.Join(t.TempDir(), "gc.pid")
+	h.start("s1", []string{"FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile}, "--grace", "1s")
+	h.cmd("wait", "s1", "--timeout", "10s")
+	gcPid := waitPid(t, pidfile)
+	h.ok("rm", "--force", "s1")
+	if pidAlive(gcPid) {
+		t.Fatalf("grandchild %d survived rm --force", gcPid)
 	}
 }
