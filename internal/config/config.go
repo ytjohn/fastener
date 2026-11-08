@@ -98,6 +98,9 @@ func Load() (Config, error) {
 			return c, fmt.Errorf("%s: %s must be positive, got %q", path, d.name, d.v)
 		}
 	}
+	if r, _ := time.ParseDuration(c.Retention); r < time.Hour {
+		return c, fmt.Errorf("%s: retention must be at least 1h, got %q", path, c.Retention)
+	}
 	switch c.Launcher {
 	case "auto", "setsid", "systemd":
 	default:

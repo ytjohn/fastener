@@ -88,6 +88,7 @@ func TestRejectsBadValues(t *testing.T) {
 		"handshake_timeout = \"-1s\"\n",
 		"retention = \"0s\"\n",
 		"retention = \"-1h\"\n",
+		"retention = \"30m\"\n",
 		"launcher = \"sytemd\"\n",
 		"auto_prune = \"no\"\n",
 	} {
