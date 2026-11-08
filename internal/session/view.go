@@ -23,6 +23,9 @@ type View struct {
 	// Warnings are non-fatal read problems, e.g. a file written by a newer
 	// fastener than this one.
 	Warnings []string
+	// LivenessError is why the monitor's liveness could not be determined
+	// (it is then assumed alive). Empty unless State is running or starting.
+	LivenessError string
 }
 
 // warnNewer records a warning when a file's schema_version is newer than this
@@ -80,7 +83,7 @@ func Load(name string, handshake time.Duration) (*View, error) {
 	if v.Launcher != nil {
 		v.warnNewer(fmt.Sprintf("generations/%d.launcher.json", gen), v.Launcher.SchemaVersion)
 	}
-	v.resolve(handshake, time.Now(), func() (Status, *LauncherRecord, *Plan, error) {
+	v.resolve(handshake, time.Now(), proc.Check, func() (Status, *LauncherRecord, *Plan, error) {
 		var st Status
 		if err := ReadJSON(d.StatusPath(), &st); err != nil {
 			return Status{}, nil, nil, err
@@ -156,7 +159,25 @@ func (v *View) Alive() bool { return v.State == StateRunning || v.State == State
 // resolve computes the effective state. reload re-reads status.json and the
 // current launcher record; it is consulted once before declaring a session
 // lost, because the monitor always writes before it exits.
-func (v *View) resolve(handshake time.Duration, now time.Time, reload func() (Status, *LauncherRecord, *Plan, error)) {
+//
+// check is the liveness probe (proc.Check in production). An error means
+// liveness is unknown: the session is then assumed alive, and the error is
+// kept in LivenessError so inspect can explain a session that never resolves.
+func (v *View) resolve(handshake time.Duration, now time.Time,
+	check func(proc.Identity, string) (bool, error),
+	reload func() (Status, *LauncherRecord, *Plan, error)) {
+	maybeAlive := func(id proc.Identity, boot string) bool {
+		ok, err := check(id, boot)
+		if err != nil {
+			v.LivenessError = err.Error()
+		}
+		return ok || err != nil
+	}
+	defer func() {
+		if !v.Alive() {
+			v.LivenessError = "" // moot once the session is resolved
+		}
+	}()
 	v.State = v.Status.State
 	if v.State != StateRunning && v.State != StateStarting {
 		return
@@ -164,7 +185,7 @@ func (v *View) resolve(handshake time.Duration, now time.Time, reload func() (St
 	// TODO(v0.2): a systemd launcher record with only Unit must check the unit's state.
 	id, boot, ok := v.MonitorIdentity()
 	switch {
-	case ok && proc.MaybeAlive(id, boot):
+	case ok && maybeAlive(id, boot):
 		return // still supervised (or liveness unknown: never declare lost on a read error)
 	case !ok && v.State == StateStarting && now.Sub(v.Session.CreatedAt) < 2*handshake:
 		return // launcher record not written yet; give it time
@@ -179,7 +200,7 @@ func (v *View) resolve(handshake time.Duration, now time.Time, reload func() (St
 				v.State = st.State // terminal or unknown future state: use as is
 				return
 			}
-			if id2, boot2, ok2 := v.MonitorIdentity(); ok2 && (!ok || id2 != id) && proc.MaybeAlive(id2, boot2) {
+			if id2, boot2, ok2 := v.MonitorIdentity(); ok2 && (!ok || id2 != id) && maybeAlive(id2, boot2) {
 				v.State = st.State
 				return
 			}
