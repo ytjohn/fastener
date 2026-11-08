@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -236,5 +237,66 @@ func TestReapLeavesTombstoneWhenNameRetaken(t *testing.T) {
 	}
 	if _, err := os.Stat(string(DirFor("foo"))); err != nil {
 		t.Fatal("new session disturbed")
+	}
+}
+
+func tombstone(t *testing.T, name string, ended time.Time, age time.Duration) string {
+	t.Helper()
+	setupSession(t, name, ended)
+	tomb := filepath.Join(SessionsDir(), ".prune-"+name+"-abcdefgh")
+	if err := os.Rename(string(DirFor(name)), tomb); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-age)
+	os.Chtimes(tomb, past, past)
+	return tomb
+}
+
+func TestPruneSweepsLeftoverTombstones(t *testing.T) {
+	t.Setenv("FASTENER_STATE_DIR", t.TempDir())
+	tombstone(t, "stale-old", time.Now().Add(-48*time.Hour), time.Hour)
+	tombstone(t, "stale-new", time.Now(), time.Hour)
+	tombstone(t, "in-flight", time.Now().Add(-48*time.Hour), time.Second) // too fresh to be abandoned
+	r := Prune(PruneOptions{Retention: 24 * time.Hour, Handshake: time.Second})
+	if len(r.Removed) != 1 || r.Removed[0] != "stale-old" {
+		t.Fatalf("result %+v", r)
+	}
+	if _, err := os.Stat(string(DirFor("stale-new"))); err != nil {
+		t.Fatal("recent tombstone not restored")
+	}
+	if _, err := os.Stat(string(DirFor("in-flight"))); err == nil {
+		t.Fatal("tombstone in use was swept")
+	}
+}
+
+func TestSweepLeavesTombstoneWhenNameTaken(t *testing.T) {
+	t.Setenv("FASTENER_STATE_DIR", t.TempDir())
+	tomb := tombstone(t, "foo", time.Now().Add(-48*time.Hour), time.Hour)
+	setupSession(t, "foo", time.Now())
+	var warned []string
+	r := Prune(PruneOptions{Retention: 24 * time.Hour, Handshake: time.Second, Warn: func(s string) { warned = append(warned, s) }})
+	if len(r.Removed) != 0 || len(warned) != 1 {
+		t.Fatalf("result %+v warnings %v", r, warned)
+	}
+	if _, err := os.Stat(tomb); err != nil {
+		t.Fatal("tombstone was removed or replaced")
+	}
+}
+
+func TestRenameNoReplace(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	os.Mkdir(a, 0o700)
+	os.Mkdir(b, 0o700) // empty target: a plain rename would replace it
+	if err := renameNoReplace(a, b); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("err = %v, want exists", err)
+	}
+	os.Remove(b)
+	if err := renameNoReplace(a, b); err != nil {
+		t.Fatal(err)
+	}
+	os.Mkdir(a, 0o700)
+	if err := renameCheckFirst(a, b); !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("fallback err = %v", err)
 	}
 }

@@ -3,8 +3,10 @@ package session
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -97,6 +99,7 @@ type PruneOptions struct {
 	DryRun    bool
 	Now       time.Time    // zero means time.Now()
 	Warn      func(string) // optional: unreadable sessions, leftover tombstones, ...
+	OnRun     func()       // optional: AutoPrune calls it once it has decided to prune
 }
 
 func (o PruneOptions) warn(s string) {
@@ -145,6 +148,8 @@ func Reap(v *View, handshake time.Duration, ok func(*View) bool, warn func(strin
 		}
 		return false, err
 	}
+	now := time.Now()
+	_ = os.Chtimes(tomb, now, now) // marks the tombstone as in use, for sweepTombstones
 	nv, lerr := LoadAt(Dir(tomb), name, handshake)
 	if lerr == nil {
 		nv.FindOrphans()
@@ -152,12 +157,12 @@ func Reap(v *View, handshake time.Duration, ok func(*View) bool, warn func(strin
 			return true, os.RemoveAll(tomb)
 		}
 	}
-	if _, serr := os.Lstat(orig); serr == nil {
-		warn(fmt.Sprintf("%s was replaced while being removed; the old copy is left at %s", name, tomb))
-		return false, nil
-	}
-	if err := os.Rename(tomb, orig); err != nil {
-		warn(fmt.Sprintf("could not restore %s; it is left at %s: %v", name, tomb, err))
+	if err := renameNoReplace(tomb, orig); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			warn(fmt.Sprintf("%s was replaced while being removed; the old copy is left at %s", name, tomb))
+		} else {
+			warn(fmt.Sprintf("could not restore %s; it is left at %s: %v", name, tomb, err))
+		}
 	}
 	return false, nil
 }
@@ -169,6 +174,9 @@ func Prune(o PruneOptions) PruneResult {
 	now := o.Now
 	if now.IsZero() {
 		now = time.Now()
+	}
+	if !o.DryRun {
+		sweepTombstones(now, o.warn)
 	}
 	names, err := Names()
 	if err != nil {
@@ -211,6 +219,42 @@ func Prune(o PruneOptions) PruneResult {
 		}
 	}
 	return res
+}
+
+// tombstoneGrace is how long a tombstone must sit untouched before
+// sweepTombstones treats it as abandoned; Reap stamps it when it claims it.
+const tombstoneGrace = 5 * time.Minute
+
+// sweepTombstones restores tombstones left by a prune or rm that died between
+// the rename and the delete, so the normal rules judge them again. A
+// tombstone whose name has been taken is left alone with a warning.
+func sweepTombstones(now time.Time, warn func(string)) {
+	ents, err := os.ReadDir(SessionsDir())
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		n := e.Name()
+		if !e.IsDir() || !strings.HasPrefix(n, ".prune-") {
+			continue
+		}
+		i := strings.LastIndexByte(n, '-')
+		name := strings.TrimPrefix(n[:i], ".prune-")
+		if i <= len(".prune-") || !ValidName(name) {
+			continue
+		}
+		if fi, err := e.Info(); err != nil || now.Sub(fi.ModTime()) < tombstoneGrace {
+			continue
+		}
+		tomb := filepath.Join(SessionsDir(), n)
+		if err := renameNoReplace(tomb, string(DirFor(name))); err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				warn(fmt.Sprintf("leftover %s not restored: session %s exists again", tomb, name))
+			} else {
+				warn(fmt.Sprintf("leftover %s not restored: %v", tomb, err))
+			}
+		}
+	}
 }
 
 // StampPath is the prune throttle stamp.
@@ -257,6 +301,9 @@ func AutoPrune(o PruneOptions) {
 	}
 	o.DryRun = false
 	o.Warn = nil
+	if o.OnRun != nil {
+		o.OnRun()
+	}
 	Prune(o)
 	touchStamp(f)
 }
