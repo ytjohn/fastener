@@ -171,7 +171,7 @@ func launch(o launchOptions, stderr io.Writer) (*session.View, error) {
 		SchemaVersion: session.SchemaVersion, Generation: 1,
 		Argv: append([]string{p.argv0}, p.rendered.Args...), PromptMode: p.rendered.PromptMode,
 		Parser: p.rendered.Parser, ProfileSource: p.prof.Source, ProfileSHA256: p.prof.SHA256,
-		Marker: session.NewMarker(name, 1), FastenerVersion: version.Version, PlannedAt: now,
+		Marker: session.NewMarker(name, 1), FastenerVersion: version.String(), PlannedAt: now,
 	}
 	writes := []struct {
 		path string

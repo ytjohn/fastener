@@ -70,9 +70,9 @@ func cmdVersion(args []string, stdout, stderr io.Writer) int {
 		return parseFail(err)
 	}
 	if *asJSON {
-		writeJSON(stdout, map[string]any{"schema_version": JSONSchemaVersion, "version": version.Version})
+		writeJSON(stdout, map[string]any{"schema_version": JSONSchemaVersion, "version": version.String()})
 		return exitOK
 	}
-	fmt.Fprintln(stdout, "fastener", version.Version)
+	fmt.Fprintln(stdout, "fastener", version.String())
 	return exitOK
 }

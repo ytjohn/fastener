@@ -5,7 +5,7 @@ headless runs of Claude Code, Codex, Pi and other agent CLIs. Each session is
 supervised by its own small monitor process, so the UI, scheduler or shell that
 started it can restart freely.
 
-Status: v0.1. Design: `docs/superpowers/specs/`.
+Status: v0.1. Design: [`docs/design.md`](docs/design.md); `--json` contract: [`docs/json-schema.md`](docs/json-schema.md); planned work: [`docs/followups.md`](docs/followups.md).
 
 License: Apache-2.0.
 
