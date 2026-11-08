@@ -28,13 +28,16 @@ func feed(t *testing.T, p Parser, path string) Fields {
 	return out
 }
 
+// testdata/claude-pong.jsonl is a sanitized real capture (fixed session UUID,
+// cwd /tmp/x). The assistant message.model was added by hand: the trimmed
+// capture had dropped it, though real assistant events carry it.
 func TestClaudeStreamJSONFixture(t *testing.T) {
 	p, ok := Get("claude-stream-json")
 	if !ok {
 		t.Fatal("claude-stream-json not registered")
 	}
 	got := feed(t, p, "testdata/claude-pong.jsonl")
-	if got.ConversationID != "07a30733-a1d1-48ef-b822-91ae107e12a5" {
+	if got.ConversationID != "00000000-0000-4000-8000-000000000001" {
 		t.Errorf("ConversationID = %q", got.ConversationID)
 	}
 	if got.FinalMessage != "pong" {
@@ -148,9 +151,14 @@ func TestClaudeModelPrefersAssistant(t *testing.T) {
 	if f.Model != "B" {
 		t.Errorf("synthetic model taken: %+v", f)
 	}
-	p.Line([]byte(`{"type":"assistant","message":{"role":"assistant","model":"C","content":[]},"session_id":"s"}`), &f)
+	p.Line([]byte(`{"type":"assistant","message":{"role":"assistant","model":"C","content":[]},"session_id":"s","parent_tool_use_id":null}`), &f)
 	if f.Model != "C" {
 		t.Errorf("last assistant model not taken: %+v", f)
+	}
+	// A subagent turn (parent_tool_use_id set) may run on another model.
+	p.Line([]byte(`{"type":"assistant","message":{"role":"assistant","model":"claude-haiku-4-5","content":[]},"session_id":"s","parent_tool_use_id":"toolu_01"}`), &f)
+	if f.Model != "C" {
+		t.Errorf("subagent model taken: %+v", f)
 	}
 	// An error result clears it: the model is not proven to have answered.
 	p.Line([]byte(`{"type":"result","is_error":true,"result":"API Error","session_id":"s"}`), &f)

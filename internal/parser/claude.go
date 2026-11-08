@@ -10,7 +10,8 @@ import (
 // Every event carries session_id; the final "result" event carries the reply,
 // is_error, total_cost_usd and usage.
 //
-// The served model is the last assistant event's message.model, which the
+// The served model is the last top-level assistant event's message.model
+// (subagent turns, with a parent_tool_use_id, are skipped), which the
 // Anthropic API reports. Until one arrives, the system/init event's model (the
 // CLI's own setting) stands in as client-reported. An error result clears it.
 type claudeStreamJSON struct{}
@@ -22,11 +23,13 @@ type claudeEvent struct {
 	Message *struct {
 		Model string `json:"model"`
 	} `json:"message"`
-	SessionID    string   `json:"session_id"`
-	Result       *string  `json:"result"`
-	IsError      *bool    `json:"is_error"`
-	TotalCostUSD *float64 `json:"total_cost_usd"`
-	Usage        *struct {
+	// ParentToolUseID is set on a subagent's turns, which may run on another model.
+	ParentToolUseID *string  `json:"parent_tool_use_id"`
+	SessionID       string   `json:"session_id"`
+	Result          *string  `json:"result"`
+	IsError         *bool    `json:"is_error"`
+	TotalCostUSD    *float64 `json:"total_cost_usd"`
+	Usage           *struct {
 		InputTokens              int64 `json:"input_tokens"`
 		CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 		CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
@@ -56,7 +59,7 @@ func (claudeStreamJSON) Line(line []byte, f *Fields) bool {
 	switch {
 	case e.Type == "system" && e.Subtype == "init" && e.Model != "" && f.ModelSource != "server":
 		changed = setModel(f, e.Model, "client") || changed
-	case e.Type == "assistant" && e.Message != nil && e.Message.Model != "" && e.Message.Model != "<synthetic>":
+	case e.Type == "assistant" && e.ParentToolUseID == nil && e.Message != nil && e.Message.Model != "" && e.Message.Model != "<synthetic>":
 		changed = setModel(f, e.Message.Model, "server") || changed
 	}
 	if e.Type != "result" {
