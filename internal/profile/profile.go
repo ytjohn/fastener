@@ -39,6 +39,16 @@ var ErrUnknownBackend = errors.New("unknown backend")
 // define the requested permission level.
 var ErrNoPermissionLevel = errors.New("permission level not defined")
 
+// noLevelError carries the message alone and matches ErrNoPermissionLevel via Is,
+// so the sentinel's text is not repeated in the output.
+type noLevelError struct{ msg string }
+
+func (e noLevelError) Error() string        { return e.msg }
+func (e noLevelError) Is(target error) bool { return target == ErrNoPermissionLevel }
+
+// KnownLevels are the permission levels a profile may define.
+func KnownLevels() []string { return []string{"auto", "skip"} }
+
 var levels = map[string]bool{"auto": true, "skip": true}
 var options = map[string]bool{"model": true}
 var commandRE = regexp.MustCompile(`^[A-Za-z0-9._+][A-Za-z0-9._+-]*$`)

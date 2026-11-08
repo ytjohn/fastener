@@ -214,6 +214,8 @@ func TestBuiltinDiagnosePatterns(t *testing.T) {
 	benign := []string{
 		`"cached_input_tokens":4012`, `"input_tokens":14012`, `took 1.404s`,
 		`/tmp/fastener-check-1401404`, `pong`,
+		"the model then explained at length why the config file does not exist",
+		"a report about the unauthorized access of customer data was discussed",
 	}
 	positive := map[string][]string{
 		"codex":  {"HTTP 401 Unauthorized", "status: 401", "Not logged in"},
@@ -242,5 +244,19 @@ func TestBuiltinDiagnosePatterns(t *testing.T) {
 				t.Errorf("%s: no pattern matches %q", name, s)
 			}
 		}
+	}
+}
+
+func TestNoLevelErrorMessageOnce(t *testing.T) {
+	p, err := Load("pi", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = p.RenderHeadless(Request{Permissions: "auto", Prompt: "x"})
+	if !errors.Is(err, ErrNoPermissionLevel) {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.Contains(err.Error(), ErrNoPermissionLevel.Error()) {
+		t.Errorf("sentinel text leaks into the message: %v", err)
 	}
 }

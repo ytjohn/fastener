@@ -74,6 +74,9 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	if err := validateEnv(o.Env); err != nil {
 		return fail(stderr, err)
 	}
+	if err := validatePermissions(o.Permissions); err != nil {
+		return fail(stderr, err)
+	}
 	var backends []string
 	switch {
 	case all && len(pos) == 0:
@@ -89,6 +92,7 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 
 	reports := []checkReport{}
 	code := exitOK
+	checked := 0
 	for _, b := range backends {
 		bo := o
 		bo.Backend = b
@@ -99,6 +103,9 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 				code = exitNotFound
 			}
 		}
+		if !r.Skipped {
+			checked++
+		}
 		reports = append(reports, r)
 		if !asJSON {
 			printCheck(stdout, r)
@@ -106,6 +113,10 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	}
 	if asJSON {
 		writeJSON(stdout, reports)
+	}
+	if all && checked == 0 {
+		fmt.Fprintln(stderr, "fastener: check --all: no backend was checked (all skipped or none found); pass --permissions or define a backend")
+		return exitFail
 	}
 	return code
 }
@@ -119,7 +130,9 @@ func printCheck(w io.Writer, r checkReport) {
 		}
 	}
 	verdict := "PASS"
-	if !r.Passed {
+	if r.Skipped {
+		verdict = "SKIP"
+	} else if !r.Passed {
 		verdict = "FAIL"
 	}
 	fmt.Fprintf(w, "%s %s\n\n", verdict, r.Backend)
@@ -159,6 +172,13 @@ func runCheck(o launchOptions, opts checkOpts, stderr io.Writer) (r checkReport)
 		}
 		r.add(step, stepFail, err.Error(), "")
 		return r
+	}
+	if opts.static {
+		// --static never reaches launch, so validate the launcher name here.
+		if _, err := p.selectLauncher(o); err != nil {
+			r.add("profile", stepFail, err.Error(), "")
+			return r
+		}
 	}
 	r.add("profile", stepPass, fmt.Sprintf("%s, permissions=%s", p.prof.Source, p.perms), "")
 

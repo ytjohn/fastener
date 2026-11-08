@@ -24,8 +24,8 @@ type Rendered struct {
 func (p *Profile) RenderHeadless(r Request) (Rendered, error) {
 	perm, ok := p.Permissions[r.Permissions]
 	if !ok {
-		return Rendered{}, fmt.Errorf("%w: backend %s does not define permission level %q (defined: %s)",
-			ErrNoPermissionLevel, p.Name, r.Permissions, strings.Join(p.Levels(), ", "))
+		return Rendered{}, noLevelError{fmt.Sprintf("backend %s does not define permission level %q (defined: %s)",
+			p.Name, r.Permissions, strings.Join(p.Levels(), ", "))}
 	}
 	args := append([]string{}, p.Headless.Args...)
 	args = append(args, perm...)

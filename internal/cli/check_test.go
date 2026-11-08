@@ -292,3 +292,40 @@ func TestCheckKeepLeavesSession(t *testing.T) {
 		t.Error("kept session not inspectable")
 	}
 }
+
+func TestCheckAllNeverPassesVacuously(t *testing.T) {
+	h := newHarness(t)
+	// Only skip-only backends exist besides fake; remove fake's auto level by
+	// shadowing everything with skip-only profiles.
+	for _, n := range []string{"fake", "claude", "codex", "pi"} {
+		h.writeProfile(n, fmt.Sprintf("schema_version = 1\nname = %q\ncommand = %q\n[headless]\nargs = []\nprompt = \"stdin\"\nparser = \"none\"\n[permissions]\nskip = []\n", n, fakeBin))
+	}
+	out, errOut, code := h.cmd("check", "--all", "--static")
+	if code != 1 || !strings.Contains(errOut, "no backend was checked") {
+		t.Fatalf("code %d\n%s\n%s", code, out, errOut)
+	}
+	if !strings.Contains(out, "SKIP pi") {
+		t.Errorf("skipped report not labelled SKIP:\n%s", out)
+	}
+}
+
+func TestPermissionsValueValidated(t *testing.T) {
+	h := newHarness(t)
+	for _, args := range [][]string{
+		{"check", "--all", "--static", "--permissions", "bogus"},
+		{"check", "fake", "--static", "--permissions", "bogus"},
+		{"run", "fake", "--cwd", h.work, "--prompt", "x", "--permissions", "bogus"},
+	} {
+		if _, _, code := h.cmd(args...); code != 2 {
+			t.Errorf("%v: exit %d, want 2", args, code)
+		}
+	}
+}
+
+func TestCheckStaticValidatesLauncher(t *testing.T) {
+	h := newHarness(t)
+	r, code := h.check("fake", "--static", "--launcher", "bogus")
+	if code != 1 || r[0].Passed {
+		t.Fatalf("code %d: %+v", code, r)
+	}
+}

@@ -307,7 +307,7 @@ url_pattern = 'https://claude\.ai/\S+'
 - **Options:** the same as `run` (`--model`, `--permissions`, `--env-file`, `--env`, `--cwd`, `--launcher`, `--max-runtime`). So `fastener check pi --model X` tests that exact combination.
 - **Other flags:**
   - `--keep` keeps the session for inspection; by default it is removed after the check.
-  - `--all` checks every resolvable backend. A backend whose profile does not define the resolved permission level is reported as one `profile` step with status `skip` (and `skipped: true` in JSON), not a failure; `--all` exits 0 when every non-skipped backend passed. An explicit `check <backend>` for it still fails.
+  - `--all` checks every resolvable backend. A backend whose profile does not define the resolved permission level is reported as one `profile` step with status `skip` (and `skipped: true` in JSON), not a failure; `--all` exits 0 when every non-skipped backend passed. `--all` requires at least one checked backend: if every backend is skipped it exits 1. An explicit `--permissions` outside `auto|skip` is a usage error (exit 2) for `run` and `check`. An explicit `check <backend>` for it still fails.
   - `--static` skips the model call.
   - `--json` gives the step-by-step result.
 

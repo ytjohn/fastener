@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/ytjohn/fastener/internal/profile"
 )
 
 type multiFlag []string
@@ -78,6 +80,19 @@ func validateEnv(items []string) error {
 		}
 	}
 	return nil
+}
+
+// validatePermissions rejects an explicit --permissions outside the known levels.
+func validatePermissions(level string) error {
+	if level == "" {
+		return nil
+	}
+	for _, k := range profile.KnownLevels() {
+		if level == k {
+			return nil
+		}
+	}
+	return usagef("--permissions %q: want one of %s", level, strings.Join(profile.KnownLevels(), ", "))
 }
 
 // validateDurations rejects negative --grace / --max-runtime values.

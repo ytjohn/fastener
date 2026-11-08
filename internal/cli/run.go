@@ -34,6 +34,9 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	o.Backend, o.Env = pos[0], env
+	if err := validatePermissions(o.Permissions); err != nil {
+		return fail(stderr, err)
+	}
 	if o.Labels, err = parseLabels(labels); err != nil {
 		return fail(stderr, err)
 	}
