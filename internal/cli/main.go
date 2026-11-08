@@ -37,6 +37,7 @@ commands:
   version            print the version
 
 Run "fastener <command> -h" for a command's flags.
+Docs and issues: https://github.com/ytjohn/fastener
 `
 
 // Main runs one CLI invocation and returns the process exit code.

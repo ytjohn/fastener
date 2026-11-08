@@ -354,6 +354,10 @@ func TestHelpExitsZero(t *testing.T) {
 			t.Fatalf("%s -h exit %d, want 0", c, code)
 		}
 	}
+	out, _, code := h.cmd("help")
+	if code != 0 || !strings.Contains(out, "https://github.com/ytjohn/fastener") {
+		t.Fatalf("help: exit %d, missing repo link:\n%s", code, out)
+	}
 }
 
 func TestRmForceCleansLostWithOrphans(t *testing.T) {
