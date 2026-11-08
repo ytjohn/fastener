@@ -119,7 +119,7 @@ This is the record that lets the CLI judge whether a monitor is alive before the
   - `boot_id`
 - `started_at`, `ended_at`
 - **Exit facts:** `ended_by`, `exit_code` (absent when a signal killed the agent), `signal` (the signal name that terminated the agent, if any), `error`
-- **Parser fields** (each optional; omitted when unknown): `conversation_id`, `final_message` (capped at 64 KiB), `agent_error`, `usage` {`input_tokens`, `output_tokens`, `cost_usd`} (present only when the backend reported usage), `parse_errors`; `remote_url` arrives with phase B
+- **Parser fields** (each optional; omitted when unknown): `conversation_id`, `final_message` (capped at 64 KiB), `model` (the model the backend says it served), `agent_error`, `usage` {`input_tokens`, `output_tokens`, `cost_usd`} (present only when the backend reported usage), `parse_errors`; `remote_url` arrives with phase B
 
 **The monitor writes its own identity first.** Right after it loads its plan, before it checks for a stop request, spawns anything or can fail in any other way, the monitor writes `status.json` once (state `starting`, with its `monitor` identity and `boot_id`). Each generation's status is built fresh; nothing is carried over from a previous generation. This shrinks the window in which no record identifies a live monitor.
 
@@ -382,6 +382,7 @@ Named Go functions selected by profile. v0.1 ships `claude-stream-json` and `non
 - **Extracted fields** (all optional, omitted when unknown):
   - `conversation_id`
   - `final_message`
+  - `model`: the model the backend reports it actually served, `provider/model` when the backend names the provider, else the bare model id. It can differ from the requested `--model` (an alias or pattern resolved to a full id, or a substitution); `check` compares the two (§6.1).
   - `agent_error`: the agent's own report of failure, independent of the exit code
   - `usage` {`input_tokens`, `output_tokens`, `cost_usd`}: emitted only when the backend reported usage. `input_tokens` is all input tokens for the run, including cache reads and writes (Anthropic's own `usage.input_tokens` excludes cache tokens).
 - Unknown event types are ignored. A malformed line increments `parse_errors`. Parser failure never affects the session: a parser panic is recovered, logged to `monitor.log` and counted in `parse_errors`. A line longer than 16 MB is written to `output.log` but not parsed (counted in `parse_errors`); the cap limits parsing, not memory. `final_message` is capped at 64 KiB.

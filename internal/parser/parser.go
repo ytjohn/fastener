@@ -9,9 +9,12 @@ import "sort"
 type Fields struct {
 	ConversationID string `json:"conversation_id,omitempty"`
 	FinalMessage   string `json:"final_message,omitempty"`
-	AgentError     *bool  `json:"agent_error,omitempty"`
-	Usage          *Usage `json:"usage,omitempty"`
-	ParseErrors    int    `json:"parse_errors,omitempty"`
+	// Model is the model the backend reports it actually served: "provider/model"
+	// when the backend names the provider, else the bare model id.
+	Model       string `json:"model,omitempty"`
+	AgentError  *bool  `json:"agent_error,omitempty"`
+	Usage       *Usage `json:"usage,omitempty"`
+	ParseErrors int    `json:"parse_errors,omitempty"`
 }
 
 // Usage counts all tokens the backend reported for the run.

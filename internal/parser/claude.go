@@ -8,11 +8,13 @@ import (
 
 // claudeStreamJSON parses `claude -p --output-format stream-json --verbose`.
 // Every event carries session_id; the final "result" event carries the reply,
-// is_error, total_cost_usd and usage.
+// is_error, total_cost_usd and usage. The system/init event names the model.
 type claudeStreamJSON struct{}
 
 type claudeEvent struct {
 	Type         string   `json:"type"`
+	Subtype      string   `json:"subtype"`
+	Model        string   `json:"model"`
 	SessionID    string   `json:"session_id"`
 	Result       *string  `json:"result"`
 	IsError      *bool    `json:"is_error"`
@@ -42,6 +44,10 @@ func (claudeStreamJSON) Line(line []byte, f *Fields) bool {
 	}
 	if e.SessionID != "" && e.SessionID != f.ConversationID {
 		f.ConversationID = e.SessionID
+		changed = true
+	}
+	if e.Type == "system" && e.Subtype == "init" && e.Model != "" && e.Model != f.Model {
+		f.Model = e.Model
 		changed = true
 	}
 	if e.Type != "result" {

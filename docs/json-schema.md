@@ -48,6 +48,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 - parser fields, each present only when known:
   - `conversation_id`
   - `final_message`, capped at 64 KiB (cut on a UTF-8 boundary)
+  - `model`: the model the backend reports it actually served, as `provider/model` when the backend names the provider (Pi), else the bare model id (Claude's `system/init` event). It can differ from the requested `--model`: a short alias or pattern resolves to a full id, and a policy can substitute a different model.
   - `agent_error`
   - `usage`: `{input_tokens, output_tokens, cost_usd}`, present only when the backend reported usage
   - `parse_errors`

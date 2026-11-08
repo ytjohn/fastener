@@ -40,6 +40,9 @@ func TestClaudeStreamJSONFixture(t *testing.T) {
 	if got.FinalMessage != "pong" {
 		t.Errorf("FinalMessage = %q", got.FinalMessage)
 	}
+	if got.Model != "claude-opus-5-5" {
+		t.Errorf("Model = %q", got.Model)
+	}
 	if got.AgentError == nil || *got.AgentError {
 		t.Errorf("AgentError = %v, want false", got.AgentError)
 	}
@@ -121,5 +124,19 @@ func TestClaudeCostOnlyNoFakeTokens(t *testing.T) {
 	p.Line([]byte(`{"type":"result","total_cost_usd":0.5}`), &f)
 	if f.Usage == nil || f.Usage.InputTokens != 3 || f.Usage.OutputTokens != 4 || f.Usage.CostUSD != 0.5 {
 		t.Fatalf("Usage = %+v", f.Usage)
+	}
+}
+
+func TestClaudeModelOnlyFromInit(t *testing.T) {
+	p, _ := Get("claude-stream-json")
+	var f Fields
+	if p.Line([]byte(`{"type":"assistant","model":"not-this","session_id":"s"}`), &f); f.Model != "" {
+		t.Errorf("non-init event set Model = %q", f.Model)
+	}
+	if !p.Line([]byte(`{"type":"system","subtype":"init","model":"m1","session_id":"s"}`), &f) || f.Model != "m1" {
+		t.Errorf("init model not captured: %+v", f)
+	}
+	if p.Line([]byte(`{"type":"system","subtype":"init","model":"m1","session_id":"s"}`), &f) {
+		t.Error("repeated init model reported a change")
 	}
 }

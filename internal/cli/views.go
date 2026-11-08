@@ -117,6 +117,7 @@ func cmdInspect(args []string, stdout, stderr io.Writer) int {
 	row("error", s.Error)
 	row("conversation_id", s.ConversationID)
 	row("final_message", truncate(s.FinalMessage, 200))
+	row("served_model", s.Model)
 	if s.AgentError != nil {
 		row("agent_error", fmt.Sprint(*s.AgentError))
 	}
