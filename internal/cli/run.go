@@ -37,7 +37,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	if o.Labels, err = parseLabels(labels); err != nil {
 		return fail(stderr, err)
 	}
-	v, err := launch(o)
+	v, err := launch(o, stderr)
 	if err != nil {
 		if v != nil && asJSON {
 			writeJSON(stdout, inspectOf(v))

@@ -7,6 +7,7 @@ package monitor
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -165,7 +166,7 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	defer errLog.Close()
 
 	if fi, err := os.Stat(m.sess.Cwd); err != nil {
-		return m.launchFailed(fmt.Errorf("cwd %s: %w", m.sess.Cwd, err))
+		return m.launchFailed(fmt.Errorf("cwd %s: %w", m.sess.Cwd, unwrapPath(err)))
 	} else if !fi.IsDir() {
 		return m.launchFailed(fmt.Errorf("cwd %s: not a directory", m.sess.Cwd))
 	}
@@ -418,4 +419,14 @@ func (m *monitor) flushLoop(stop <-chan struct{}) {
 			m.mu.Unlock()
 		}
 	}
+}
+
+// unwrapPath drops the path an *os.PathError carries, for messages that
+// already name the path.
+func unwrapPath(err error) error {
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	return err
 }

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,7 +109,7 @@ func prepare(o launchOptions, prompt string) (*prepared, error) {
 
 // launch creates a session and starts its monitor. On a handshake failure it
 // returns the view (if one exists) together with the error.
-func launch(o launchOptions) (*session.View, error) {
+func launch(o launchOptions, stderr io.Writer) (*session.View, error) {
 	if err := validateDurations(o.Grace, o.MaxRuntime); err != nil {
 		return nil, err
 	}
@@ -192,11 +193,16 @@ func launch(o launchOptions) (*session.View, error) {
 			t := time.Now().UTC()
 			s.State, s.EndedBy, s.EndedAt, s.Error = session.StateExited, session.EndedByLaunchFailed, &t, "monitor: "+err.Error()
 		})
-		return nil, inStep("launch", fmt.Errorf("session %s: start monitor: %w", name, err))
+		// Return the (finalized) view too, so `run --json` can print it.
+		var v *session.View
+		if nv, lerr := session.Load(name, p.cfg.Handshake()); lerr == nil {
+			v = nv
+		}
+		return v, inStep("launch", fmt.Errorf("session %s: start monitor: %w", name, err))
 	}
 	if err := session.WriteJSON(d.LauncherPath(1), rec); err != nil {
 		// Not fatal: status.json carries the monitor identity once it starts.
-		fmt.Fprintf(os.Stderr, "fastener: warning: session %s: cannot write launcher record: %v\n", name, err)
+		fmt.Fprintf(stderr, "fastener: warning: session %s: cannot write launcher record: %v\n", name, err)
 	}
 	return handshake(name, p.cfg.Handshake())
 }
@@ -218,6 +224,11 @@ func handshake(name string, timeout time.Duration) (*session.View, error) {
 			return v, nil // a fast agent may already have finished
 		case session.StateLost:
 			msg := fmt.Sprintf("monitor died during launch; see %s", v.Dir.MonitorLog())
+			if v.Status.Agent != nil && v.Status.State != session.StateStarting {
+				// An agent was spawned: leave the session lost so stop/rm see it
+				// (and its orphans) instead of hiding them behind launch-failed.
+				return v, inStep("launch", fmt.Errorf("session %s: %s", name, msg))
+			}
 			_, _ = session.Finalize(v.Dir, func(s *session.Status) {
 				t := time.Now().UTC()
 				s.State, s.EndedBy, s.EndedAt, s.Error = session.StateExited, session.EndedByLaunchFailed, &t, msg

@@ -186,7 +186,9 @@ func cleanCorrupt(name string, stderr io.Writer) error {
 			gen = 1
 		}
 		var p session.Plan
-		if err := session.ReadJSON(d.PlanPath(gen), &p); err == nil && p.Marker != "" {
+		if perr := session.ReadJSON(d.PlanPath(gen), &p); perr != nil {
+			fmt.Fprintf(stderr, "fastener: warning: %s: cannot read plan for orphan cleanup: %v\n", name, perr)
+		} else if p.Marker != "" {
 			if ids, _ := proc.FindMarked(st.PGID, p.Marker, st.BootID); len(ids) > 0 {
 				if left := killOrphans(ids, st.BootID, 10*time.Second); len(left) > 0 {
 					return fmt.Errorf("session %s: %d orphaned process(es) survived SIGKILL (%s); not removing", name, len(left), pidList(left))
