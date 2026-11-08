@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ytjohn/fastener/internal/proc"
 )
 
 var fastenerBin, fakeBin string
@@ -217,12 +219,8 @@ func (h *harness) cleanup() {
 	}
 }
 
+// pidAlive reports whether pid exists and is not a zombie (Linux /proc, macOS sysctl).
 func pidAlive(pid int) bool {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return false
-	}
-	s := string(b)
-	i := strings.LastIndexByte(s, ')')
-	return i > 0 && i+2 < len(s) && s[i+2] != 'Z'
+	_, err := proc.StartTime(pid)
+	return err == nil
 }

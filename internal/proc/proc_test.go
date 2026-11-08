@@ -179,3 +179,37 @@ func TestOpenRejectsMismatch(t *testing.T) {
 		}
 	}
 }
+
+func TestIsZombie(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	id, err := Of(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if z, err := IsZombie(pid); z || err != nil {
+		t.Fatalf("running child: IsZombie = %v, %v", z, err)
+	}
+	_ = cmd.Process.Kill()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if z, err := IsZombie(pid); z && err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("killed child never showed as a zombie")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if Alive(id, mustBoot(t)) {
+		t.Fatal("zombie reported alive")
+	}
+	_ = cmd.Wait()
+	if _, err := IsZombie(pid); !errors.Is(err, ErrNoProcess) {
+		t.Fatalf("reaped child: IsZombie err = %v, want ErrNoProcess", err)
+	}
+}
