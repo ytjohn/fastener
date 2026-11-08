@@ -47,9 +47,10 @@ One binary, two roles:
 - **systemd** (when a user systemd instance is available):
   `systemd-run --user --unit=fastener-<name> --collect -p KillMode=control-group -p RuntimeMaxSec=<backstop> fastener _monitor <dir>`.
   The cgroup contains the whole process tree. `loginctl enable-linger` keeps it alive after logout.
-- **setsid** (otherwise, including macOS): a double fork and `setsid` detaches the monitor from the CLI's session and terminal.
+  The binary is invoked by its absolute path (`os.Executable()`), because the user manager's PATH differs from the shell's.
+- **setsid** (otherwise, including macOS): Go cannot fork without exec. The CLI therefore re-executes itself as `_monitor` with `SysProcAttr{Setsid: true}`, stdin from `/dev/null` and stdout/stderr to `monitor.log`, then releases the child without waiting for it. The CLI knows the monitor's pid immediately.
 
-The launcher used is recorded in `session.json`. Behavior is otherwise identical in both modes.
+systemd mode is the more robust of the two. It guarantees the whole process tree is cleaned up (§4) and is preferred when available. The launcher used is recorded per generation (§3). Behavior is otherwise identical in both modes.
 
 ## 3. Session state
 
@@ -58,39 +59,58 @@ All state lives in plain files. There is no database.
 ```text
 ${XDG_STATE_HOME:-~/.local/state}/fastener/
   sessions/<name>/
-    session.json     # written once by the CLI at creation
-    status.json      # written by the monitor (see "single writer")
-    output.log       # raw agent output for the current generation
-    output.<n>.log   # previous generations (restored sessions)
-    monitor.log      # monitor diagnostics
-    attach.sock      # phase B
-  .last-prune        # prune throttle stamp
+    session.json         # intent; written once by the CLI at creation
+    prompt.txt           # the prompt (from --prompt, or copied from --prompt-file at run time)
+    generations/<n>.json # launch facts per generation; written by the CLI
+    status.json          # runtime facts; written by the monitor (see "single writer")
+    stop-request.json    # written by the CLI before signalling a stop
+    output.log           # raw agent output for the current generation
+    output.<n>.log       # previous generations (restored sessions)
+    monitor.log          # monitor diagnostics
+    lock                 # flock target for CLI-side finalization
+    attach.sock          # phase B
+  .last-prune            # prune throttle stamp
 ```
 
 - **Unique names:** `mkdir` of the session directory is the atomic name reservation; a duplicate name fails. `--name` is optional; when omitted, Fastener generates `<backend>-<6 random base32 chars>`. Names only need to be unique among sessions that still exist. Names match `^[a-z0-9][a-z0-9._-]{0,62}$`.
-- **Single writer:** only the monitor writes `status.json` while it is alive, by writing a temporary file and renaming it. After the CLI has confirmed the monitor is dead, it may finalize `status.json` (stop/rm of a `lost` session). The two never write concurrently.
+- **Writers:** all writes are atomic (a temporary file, then rename).
+  - **`status.json`:** only the monitor writes it while it is alive. The CLI may finalize it only after confirming the monitor is dead (stop/rm of a `lost` or dead-`starting` session).
+  - **Finalizing:** the CLI takes `flock(lock)`, re-reads `status.json`, and leaves it unchanged if it already says `exited`. This way an exit record the monitor wrote just before dying is never overwritten, and two CLIs never finalize at once.
+  - **`session.json`, `generations/*.json` and `stop-request.json`:** written only by the CLI.
 - **Versioning:** every JSON file carries `schema_version`. Newer CLIs read all older versions. Rule: fields are added, never repurposed.
 
-### `session.json` (immutable after creation)
+### `session.json` (intent; immutable after creation)
 
-- `schema_version`, `name`, `created_at`, `kind` (`headless` | `interactive`), `backend`
-- **Profile provenance:** `source` (`builtin` | the file path), `sha256`
-- `argv`: the fully resolved argument list, `cwd`
-- `prompt`: for `--prompt`, the text is stored in `prompt.txt`; for `--prompt-file`, the path only
-- `permissions`, `model`
-- `max_runtime`, `grace`
-- **Environment:** `env` (the base list plus `--env` values), `env_file` (the path only)
+- `schema_version`, `name`, `created_at`, `kind` (`headless` | `interactive`), `backend`, `cwd`
+- `prompt_source`: `inline`, or the `--prompt-file` path. The text is always in `prompt.txt`, copied by the CLI at `run` time, so later edits to the file don't change what a session ran.
+- `permissions`, `model`, `max_runtime` (absent = no limit), `grace`
+- **Environment:** `env` (resolved base plus `--env` values), `env_file` (the path only)
 - `labels`, `restart` (`no` | `on-reboot`), `remote` (bool)
-- `launcher` (`systemd` | `setsid`), `fastener_version`
 
-### `status.json` (written by the monitor)
+### `generations/<n>.json` (launch facts; one per launch, written by the CLI)
 
-- `schema_version`, `state`, `generation`, `restarts`
-- **Monitor process:** `pid`, `start_time`
-- **Agent process:** `pid`, `pgid`, `start_time`
+- `schema_version`, `generation` (the first launch is 1)
+- `argv`: the fully resolved argument list
+- **Profile provenance:** `source` (`builtin` | the file path), `sha256`
+- `launcher`: `systemd` with `unit`, or `setsid` with the monitor's `pid` and `start_time`
+- `boot_id`, `fastener_version`, `launched_at`
+
+Written immediately after the monitor process is started. This is the record that lets the CLI judge whether a monitor is alive before the monitor has written anything (§4).
+
+### `status.json` (runtime facts; written by the monitor)
+
+- `schema_version`, `state`, `generation`
+- **Processes:**
+  - monitor: `pid`, `start_time`
+  - agent: `pid`, `pgid`, `start_time`
+  - `boot_id`
 - `started_at`, `ended_at`
-- **Exit facts:** `ended_by`, `exit_code`, `signal`, `error`
+- **Exit facts:** `ended_by`, `exit_code`, `signal` (the signal that terminated the agent, if any), `error`
 - **Parser fields** (each optional; omitted when unknown): `conversation_id`, `final_message`, `agent_error`, `usage` {`input_tokens`, `output_tokens`, `cost_usd`}, `parse_errors`, `remote_url`
+
+### `stop-request.json` (written by the CLI)
+
+- `requested_at`, `grace`, `by` (`stop` | `rm`)
 
 ## 4. Session lifecycle
 
@@ -100,11 +120,26 @@ ${XDG_STATE_HOME:-~/.local/state}/fastener/
 |---|---|---|
 | `starting` | Session directory created, agent not yet spawned | CLI, then the monitor |
 | `running` | Agent spawned and alive | Monitor |
-| `exited` | Ended; `ended_by` ∈ `exit`, `limit`, `stop`, `signal`, `launch-failed` | Monitor (or the CLI finalizing a dead monitor) |
-| `lost` | Monitor not alive and no `exited` recorded | **Inferred** by the CLI on read; never written by the monitor |
+| `exited` | Ended; see `ended_by` below | Monitor (or the CLI finalizing a dead monitor) |
+| `lost` | Not `exited`, and the monitor is not alive | **Inferred** by the CLI on read; never written by the monitor |
 | `restore-failed` | `restore` could not resume (phase B) | CLI |
 
-`inspect` adds `agent_alive: true` to a `lost` session whose agent still runs (an orphan, possible on macOS).
+**What `ended_by` means:**
+
+| Value | Meaning |
+|---|---|
+| `exit` | The agent ended on its own: exited, or was killed by a signal the monitor did not send. `exit_code` or `signal` says which. |
+| `limit` | The monitor's `max_runtime` timer fired. |
+| `stop` | The monitor received SIGTERM with a `stop-request.json` present (`fastener stop` or `rm`). |
+| `signal` | The monitor received SIGTERM, SIGINT or SIGHUP with no stop request. Something outside Fastener stopped it: logout without linger, `kill`, or systemd's `RuntimeMaxSec` backstop. |
+| `launch-failed` | The agent could not be spawned. |
+
+**Group liveness for `lost` sessions.** `inspect` reports `orphans: N`: the number of live processes still in the agent's process group. `stop` and `rm` act on that group. A process counts as a member only if all three hold:
+- its pgid equals the recorded `pgid`;
+- the current `boot_id` matches the recorded one;
+- its start time is not earlier than the agent's recorded `start_time`.
+
+Together these rule out a reused pgid being mistaken for the session.
 
 ### Launch handshake
 
@@ -114,27 +149,52 @@ ${XDG_STATE_HOME:-~/.local/state}/fastener/
 
 If the spawn fails (missing binary, bad working directory), the monitor records `exited` with `ended_by=launch-failed` and an error, and `run` exits non-zero with that error. If the handshake times out, `run` exits non-zero and reports the session name for inspection. `run` never reports success for a session that did not start.
 
+**Before the monitor has written anything,** a `starting` session is judged using `generations/<n>.json`:
+- **systemd:** the unit is active.
+- **setsid:** the monitor's pid and start time are alive.
+
+If that record is missing (the CLI died between launching the monitor and writing it), the session is treated as `lost` once it is older than twice the handshake timeout.
+
+`wait` on a `starting` session waits. `stop` and `rm` on a `starting` session act through the launcher record: they stop the unit or signal the monitor's pid.
+
 ### Liveness
 
-A process counts as alive only if its pid exists **and** its start time matches the recorded `start_time`. Start time comes from `/proc/<pid>/stat` on Linux and `sysctl kern.proc` on macOS. This rules out a reused pid being mistaken for the session. In systemd mode the unit's active state is also checked.
+A process counts as alive only if all three hold:
+- its pid exists;
+- its start time matches the recorded `start_time`;
+- the current `boot_id` matches the recorded one.
+
+Sources:
+- **Linux:** start time from `/proc/<pid>/stat` field 22 (clock ticks since boot, stored as-is); boot ID from `/proc/sys/kernel/random/boot_id`.
+- **macOS:** start time from `sysctl kern.proc.pid` (`p_starttime`); boot identity from `kern.boottime`.
+
+This rules out a reused pid, including one reused after a reboot, being mistaken for the session. In systemd mode the unit's active state is also checked.
 
 ### Stop and time limits
 
-- `fastener stop <name> [--grace D]` sends SIGTERM to the monitor (default grace 10 s). The monitor:
+- `fastener stop <name> [--grace D]` (default grace from `session.json`, 10 s if unset):
+  1. writes `stop-request.json`;
+  2. sends SIGTERM to the monitor (or, in systemd mode, `systemctl --user kill --signal=SIGTERM --kill-whom=main` on the unit).
+- When it receives SIGTERM, the monitor reads `stop-request.json`, if present, for the grace period. It then:
   1. sends SIGTERM to the agent's process group;
   2. waits for the grace period;
   3. sends SIGKILL to the group;
-  4. records `ended_by=stop`.
-- `--max-runtime` follows the same path and records `ended_by=limit`. In systemd mode, `RuntimeMaxSec` = max_runtime + grace + 30 s acts as a backstop if the monitor hangs.
-- `stop` on a `lost` session with a live agent kills the agent's process group directly (after the pid and start-time check) and finalizes `ended_by=stop`.
+  4. records `ended_by=stop` (with a request) or `signal` (without one).
+- **`--max-runtime`** follows the same path and records `ended_by=limit`. With no `--max-runtime` there is no limit, and `RuntimeMaxSec` is omitted.
+- **systemd settings:**
+  - `RuntimeMaxSec` = max_runtime + grace + 30 s, a backstop if the monitor hangs;
+  - `TimeoutStopSec` = grace + 30 s, so systemd never cuts the grace period short.
+- **`stop` on a `lost` session** with orphans signals the process group directly, using the same TERM / grace / KILL sequence and the group-membership checks above. It then finalizes `ended_by=stop`.
 
 ### Monitor death
 
-| Mode | Agent outcome |
+| Mode | Outcome if the monitor is SIGKILLed |
 |---|---|
-| systemd | The cgroup is killed with the unit, so no orphan is left |
-| setsid, Linux | The agent is spawned with `PR_SET_PDEATHSIG=SIGKILL`, so no orphan is left |
-| setsid, macOS | The agent may survive; it becomes `lost` with `agent_alive`, and `stop` cleans it up |
+| systemd | The cgroup is killed with the unit; no orphans |
+| setsid, Linux | The agent itself is killed by `PR_SET_PDEATHSIG=SIGKILL`. Grandchildren in its process group can survive. They show as `lost` with `orphans: N`, and `stop` or `rm` cleans them up. |
+| setsid, macOS | The agent and grandchildren may survive. Same handling: `lost` with `orphans`, cleaned up by `stop` or `rm`. |
+
+**Go implementation constraint:** Linux delivers `PR_SET_PDEATHSIG` when the *thread* that spawned the child exits, not when the process exits (golang/go#27505). The monitor must spawn the agent from a goroutine locked to its OS thread (`runtime.LockOSThread`) that stays alive for the whole session.
 
 ### Reboot
 
@@ -151,7 +211,14 @@ A process counts as alive only if its pid exists **and** its start time matches 
 
 The agent's environment is explicit. It is never inherited wholesale: `systemd-run` does not pass the caller's environment through, and both modes must behave the same.
 
-- **Base:** `HOME`, `USER`, `LOGNAME`, `LANG`/`LC_*` if set, and the caller's `PATH` captured at launch.
+- **Base:** variables copied from the caller at launch, if set, according to the `env_passthrough` config list. The default list:
+  - `HOME`, `USER`, `LOGNAME`, `PATH`
+  - `LANG`, `LC_*`
+  - `SSH_AUTH_SOCK` (so agents can `git push`)
+  - `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`
+  - `TERM`, for interactive sessions only
+
+  The resolved values are recorded in `session.json`.
 - **`--env-file F`:** read by the monitor at spawn. Only the path is recorded, so this is where secrets go. `KEY=VALUE` lines; `#` comments.
 - **`--env K=V`** (repeatable): recorded in `session.json`. The documentation says it is not for secrets.
 - **Precedence:** base, then env-file, then `--env`.
@@ -197,7 +264,7 @@ url_pattern = 'https://claude\.ai/\S+'
 - **No shell.** Arguments are passed to `exec` directly, never through a shell. Placeholders (`{value}`, `{conversation_id}`) are replaced by plain string substitution within a single argument. Prompts and values can never add or split arguments, and tests cover this against injection attempts.
 - **No silent fallback.**
   - A requested permission level, option, mode or `--remote` that the profile does not define is a hard error before anything is created.
-  - `--permissions` defaults to `auto`.
+  - The permission level comes from the `--permissions` flag if given, else the `default_permissions` config, else `auto`.
   - Fastener never substitutes the backend's default permissions or `skip`.
 - **Resolution:** `~/.config/fastener/backends/<name>.toml` (`$XDG_CONFIG_HOME`) **replaces** the embedded built-in of the same name entirely. There is no merging.
 - **Validation:** an unknown key, a missing required section or an unknown parser or finder name is an error, both at load time and in `fastener backends --check`.
@@ -232,9 +299,11 @@ Designed now so that v1's state layout and monitor need no rework; built after v
   - A session with a restart policy is pinned and never pruned.
   - `fastener restore` relaunches every `lost` session with `on-reboot`:
     - same name;
-    - the next `generation` number; the previous `output.log` is rotated to `output.<n>.log`;
+    - the next `generation` number, with a new `generations/<n>.json`; the previous `output.log` is rotated to `output.<n>.log`;
     - `[resume]` args with the recorded `conversation_id`;
     - remote control re-enabled.
+
+    The argument list is **re-rendered from the profile current at restore time** (so a fixed flag takes effect) using the intent in `session.json`. The new generation file records the new argv, profile hash, launcher and Fastener version. `session.json` stays unchanged.
   - If there is no `conversation_id`, the session becomes `restore-failed` with a reason. **Never a fresh conversation.**
   - `fastener install-restore` installs the trigger: a one-shot `fastener-restore.service` user unit on systemd, a launchd agent on macOS, or prints a cron `@reboot` line otherwise. Without it nothing restarts.
 
@@ -253,7 +322,7 @@ Designed now so that v1's state layout and monitor need no rework; built after v
 ```text
 fastener run <backend> [--name N] --cwd DIR (--prompt TEXT | --prompt-file F)
              [--permissions auto|skip] [--model M] [--max-runtime D] [--grace D]
-             [--env-file F] [--env K=V]... [--label K=V]... [--attach] [--json]
+             [--env-file F] [--env K=V]... [--label K=V]... [--follow] [--json]
 fastener ps [--all] [--filter label=K=V | state=S | backend=B]... [--json]
 fastener inspect <name> [--json]
 fastener logs <name> [-f] [--generation N]
@@ -272,7 +341,7 @@ fastener install-restore
 
 - **`run`:**
   - Detached by default; prints the session name, or the full status with `--json`.
-  - `--attach` follows the logs after launch.
+  - `--follow` follows the logs after launch. (This is not `attach`, which is the phase B pty command.)
   - `--prompt` and `--prompt-file` are mutually exclusive. One is required for headless runs.
 - **`ps`:**
   - Shows `running`, `starting` and `lost` sessions plus anything that ended in the last 24 h.
@@ -280,15 +349,26 @@ fastener install-restore
   - Filters are ANDed together.
 - **`wait`:**
   - Exits with the agent's exit code.
-  - Exits 125 for `launch-failed`, `lost` or a `wait` timeout.
   - Exits 128+N when the agent was killed by signal N.
-- **`rm`:** refuses a session that is alive unless `--force` (which stops it first).
+  - Exits 124 if `--timeout` elapses while the session is still running.
+  - Exits 125 if the session did not complete normally (`launch-failed`, `lost`, `restore-failed`).
+  - Exits 127 for an unknown session name.
+
+  A caller can therefore tell "timed out" from "lost" without a follow-up `inspect`.
+- **`rm`:** refuses a session that is alive, or has orphans, unless `--force` (which stops it first).
 - **Retention:**
   - Ended, unpinned sessions older than the retention period (default 7 days; config `retention`) are pruned.
+  - `lost` sessions with orphans are never pruned, because pruning would destroy the record needed to clean them up.
   - `run` and `ps` prune opportunistically, at most once per hour (the `.last-prune` stamp).
   - `prune` runs on demand.
   - There is no `--rm`-on-exit flag, because it would race callers reading results.
-- **Config:** `~/.config/fastener/config.toml` holds `retention`, `default_permissions` (must be a level defined by each profile used), `handshake_timeout`, `launcher` (`auto` | `systemd` | `setsid`) and `detach_key`.
+- **Config:** `~/.config/fastener/config.toml` holds:
+  - `retention`
+  - `default_permissions` (must be a level defined by each profile used)
+  - `handshake_timeout`
+  - `launcher` (`auto` | `systemd` | `setsid`)
+  - `env_passthrough`
+  - `detach_key`
 - **`--json` output** of `run`, `ps`, `inspect`, `backends` and `version` is a versioned, documented contract (`docs/json-schema.md`). Human-readable output is not a contract.
 
 ## 11. Code layout
@@ -321,9 +401,16 @@ docs/                  json-schema.md, profiles.md, design specs
   - launch failure;
   - handshake timeout;
   - `stop` with an agent that ignores SIGTERM, including the grandchild being cleaned up;
+  - `stop` versus an external SIGTERM (`ended_by=stop` vs `signal`), and the per-call `--grace`;
   - `--max-runtime`;
-  - SIGKILL of the monitor (becomes `lost`, and the agent is cleaned up on Linux);
-  - a reused pid;
+  - SIGKILL of the monitor:
+    - the session becomes `lost`;
+    - on Linux the agent dies;
+    - a grandchild shows in `orphans`;
+    - `stop` cleans the grandchild up;
+  - a monitor that dies before writing `status.json` (becomes `lost` via the generation record);
+  - a reused pid, and a mismatched `boot_id`;
+  - concurrent `stop` and `rm` finalizing a dead monitor;
   - an old state fixture read by the new CLI;
   - prune and retention;
   - `wait` exit codes;
@@ -360,4 +447,4 @@ No Fastener daemon is involved at any point.
 - The exact flag names for headless runs, permissions and remote control for each backend are unverified (they are gated by smoke tests).
 - Finding conversation IDs for interactive Codex and Pi sessions is uninvestigated.
 - How Claude auto-permission mode and Codex's equivalent behave in a headless run when an action is denied: whether the denial is reported to the model or the run blocks.
-- macOS lacks a parent-death signal, so the orphaned-agent case is handled by `stop` and not prevented.
+- In setsid mode an agent's descendants can outlive a killed monitor (on Linux: grandchildren only; on macOS: the agent too). This is handled by group-level orphan cleanup, not prevented. systemd mode prevents it.
