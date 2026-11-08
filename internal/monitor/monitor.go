@@ -67,7 +67,13 @@ type monitor struct {
 	wmu     sync.Mutex
 	written uint64
 	closed  bool
+
+	// writeStatus and retryDelay are overridable for tests.
+	writeStatus func(path string, v any) error
+	retryDelay  time.Duration
 }
+
+const finalWriteAttempts = 5
 
 // Run executes one generation. It returns a process exit code for the
 // monitor itself (0 whenever an outcome was recorded).
@@ -133,8 +139,28 @@ func (m *monitor) persist(st session.Status, seq uint64) {
 	if m.closed || seq <= m.written {
 		return
 	}
-	if err := session.WriteJSON(m.d.StatusPath(), &st); err != nil {
-		m.log.Printf("write status: %v", err)
+	write, delay := m.writeStatus, m.retryDelay
+	if write == nil {
+		write = session.WriteJSON
+	}
+	if delay == 0 {
+		delay = 250 * time.Millisecond
+	}
+	// The exited snapshot is the only record of how the agent ended, so a
+	// failed write is retried (about 1s in all) before giving up.
+	attempts := 1
+	if st.State == session.StateExited {
+		attempts = finalWriteAttempts
+	}
+	for i := 1; i <= attempts; i++ {
+		err := write(m.d.StatusPath(), &st)
+		if err == nil {
+			break
+		}
+		m.log.Printf("write status (attempt %d/%d): %v", i, attempts, err)
+		if i < attempts {
+			time.Sleep(delay)
+		}
 	}
 	m.written = seq
 	if st.State == session.StateExited {
