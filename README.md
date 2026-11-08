@@ -75,5 +75,14 @@ backend must actually be checked.
 State lives under `~/.local/state/fastener` and config under `~/.config/fastener`;
 `FASTENER_STATE_DIR` and `FASTENER_CONFIG_DIR` override them.
 
+Sessions run under a transient user systemd unit when one is available
+(`--launcher auto`, the default: `systemctl --user is-system-running` says
+`running` or `degraded`), so the whole process tree is cleaned up with the unit;
+otherwise, and on macOS, the monitor is started with `setsid`. Pick one with
+`--launcher systemd|setsid` or `launcher = "..."` in `config.toml`. In systemd
+mode `stop --grace` cannot exceed the session's own `--grace` (it is clamped with
+a warning), because the unit's timers were sized from it. CI has no user
+systemd, so the systemd launcher is tested only on machines that have one.
+
 Linux is the tested platform. macOS builds, but its lifecycle tests have not run
 yet (see `docs/followups.md`).

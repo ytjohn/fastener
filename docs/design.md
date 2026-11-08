@@ -1,6 +1,6 @@
 # Fastener — Design
 
-**Status:** v0.1 implemented; this document describes what was built, with later milestones marked
+**Status:** v0.1 implemented, plus the v0.2 systemd launcher; this document describes what was built, with later milestones marked
 **Date:** 2026-11-07
 **Repository:** `github.com/ytjohn/fastener` · **License:** Apache-2.0 · **Language:** Go
 **Platforms:** Linux and macOS (Windows out of scope)
@@ -44,13 +44,19 @@ One binary, two roles:
 
 **Launchers:** how a monitor is started.
 
-- **systemd** (v0.2; in v0.1 `--launcher systemd` is a clear error and `auto` means setsid):
-  `systemd-run --user --unit=fastener-<name> --collect -p KillMode=control-group -p RuntimeMaxSec=<backstop> fastener _monitor <dir>`.
-  The cgroup contains the whole process tree. `loginctl enable-linger` keeps it alive after logout.
-  The binary is invoked by its absolute path (`os.Executable()`), because the user manager's PATH differs from the shell's.
+- **systemd** (v0.2):
+  `systemd-run --user --unit=fastener-<name>-g<gen>-<rand>.service --collect --quiet -p Type=exec -p KillMode=control-group -p TimeoutStopSec=<grace+30s> [-p RuntimeMaxSec=<max_runtime+grace+30s>] -p WorkingDirectory=/ -p StandardInput=null -p StandardOutput=append:<monitor.log> -p StandardError=append:<monitor.log> -- <abs fastener> _monitor <abs dir> <gen>`.
+  - The cgroup contains the whole process tree. `loginctl enable-linger` keeps it alive after logout.
+  - The binary is invoked by its absolute path (`os.Executable()`), because the user manager's PATH differs from the shell's. `$` in the command is written as `$$`, because the manager expands `${VAR}` in it.
+  - **Unit name.** Session names already match `[a-z0-9._-]`, all valid in unit names, so no escaping is needed. The generation keeps a future `restore` distinct, and a random suffix keeps two state directories (or a name reused while its old unit is still stopping) from colliding.
+  - `Type=exec` makes `systemd-run` return only once the monitor has been executed. The CLI then reads the unit's `MainPID`, takes its identity (`proc.Of`) and reads `MainPID` again to rule out a reused pid; the launcher record holds both the unit and that monitor identity, so everything that works by monitor identity works the same in both modes. If the identity cannot be had, the record holds only the unit, which is judged by the unit's state (§4).
 - **setsid** (otherwise, including macOS): Go cannot fork without exec. The CLI therefore re-executes itself as `_monitor` with `SysProcAttr{Setsid: true}`, stdin from `/dev/null` and stdout/stderr to `monitor.log`, then releases the child without waiting for it. The CLI knows the monitor's pid immediately.
 
-systemd mode is the more robust of the two. It guarantees the whole process tree is cleaned up (§4) and is preferred when available. The launcher used is recorded per generation (§3). Behavior is otherwise identical in both modes.
+**Selection** (`--launcher`, else config `launcher`, default `auto`):
+- `auto` uses systemd when `systemctl --user is-system-running` prints `running` or `degraded` (one call, 1 s timeout) and `systemd-run` is on PATH; otherwise setsid. So macOS, containers, and a shell with no user bus (no `XDG_RUNTIME_DIR`) get setsid.
+- `systemd` is an error, naming the probe's failure, when no user manager is usable.
+- `setsid` always uses setsid.
+systemd mode is the more robust of the two. It guarantees the whole process tree is cleaned up (§4) and is preferred when available. The launcher used is recorded per generation (§3). Behavior is otherwise identical in both modes, except that in systemd mode whatever is left in the cgroup when the monitor exits (descendants of a normally exited agent, or everything after the monitor is killed) is killed by systemd rather than left for `stop` or `rm`.
 
 ## 3. Session state
 
@@ -105,7 +111,7 @@ ${FASTENER_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/fastener}/
 
 ### `generations/<n>.launcher.json` (written by the CLI right after starting the monitor, before the handshake)
 
-- `schema_version`, `launcher`: `setsid` with the monitor's `monitor` identity (`pid`, `start_time`), or (v0.2) `systemd` with `unit`
+- `schema_version`, `launcher`: `setsid` with the monitor's `monitor` identity (`pid`, `start_time`), or `systemd` with `unit` and, when it could be read from the unit's `MainPID`, `monitor`
 - `boot_id`, `launched_at`
 
 This is the record that lets the CLI judge whether a monitor is alive before the monitor has written anything (§4).
@@ -175,8 +181,8 @@ On start, if a `stop-request.json` for its generation already exists, the monito
 Before spawning, the monitor checks that the session's `cwd` exists and is a directory. If the spawn fails (missing binary, missing or non-directory `cwd`, unreadable env-file), the monitor records `exited` with `ended_by=launch-failed` and an error, and `run` exits non-zero with that error. If the handshake times out, `run` exits non-zero and reports the session name for inspection. `run` never reports success for a session that did not start.
 
 **Before the monitor has written anything,** a `starting` session is judged using `generations/<n>.launcher.json`:
-- **systemd** (v0.2): the unit is active. In v0.1 a launcher record with only a unit cannot be judged; this is a known gap (see `docs/followups.md`).
-- **setsid:** the monitor's pid and start time are alive.
+- **A monitor identity** (setsid, and systemd when `MainPID` was read): the monitor's pid and start time are alive.
+- **Only a unit** (systemd): `systemctl --user show <unit> -p ActiveState -p LoadState`. `active`, `activating`, `deactivating`, `reloading` and `refreshing` are alive; `inactive`, `failed`, `maintenance`, and a unit that is no longer loaded (collected) are dead. Any error running `systemctl` means unknown, which counts as maybe-alive (and fills `liveness_error`), exactly as for a process. `Finalize`'s re-check under the lock judges such a record the same way.
 
 If that record is missing and the monitor has not yet written `status.json` (the CLI died between launching the monitor and writing it), the session is treated as `lost` once it is older than twice the handshake timeout. Before declaring any session `lost`, the CLI re-reads `status.json` and the launcher record once, because the monitor always writes before it exits.
 
@@ -199,13 +205,13 @@ Sources:
 - **Linux:** start time from `/proc/<pid>/stat` field 22 (clock ticks since boot, stored as-is); boot ID from `/proc/sys/kernel/random/boot_id`.
 - **macOS:** start time from `sysctl kern.proc.pid` (`p_starttime`); boot ID from `kern.bootsessionuuid` (`kern.boottime` can shift when the clock is adjusted).
 
-This rules out a reused pid, including one reused after a reboot, being mistaken for the session. In systemd mode the unit's active state is also checked.
+This rules out a reused pid, including one reused after a reboot, being mistaken for the session. In systemd mode the unit's active state is checked when no monitor identity is recorded.
 
 ### Stop and time limits
 
 - `fastener stop <name> [--grace D]` (default grace from `session.json`, 10 s if unset). In systemd mode, a `--grace` longer than the session's grace is clamped to it with a warning, because the unit's timers were sized from the session's grace.
   1. writes `stop-request.json`;
-  2. sends SIGTERM to the monitor (or, in systemd mode, `systemctl --user kill --signal=SIGTERM --kill-whom=main` on the unit).
+  2. sends SIGTERM to the monitor by its identity; in systemd mode with only a unit recorded, `systemctl --user kill --kill-who=main --signal=SIGTERM <unit>` (`--kill-who` is the spelling every systemd accepts; newer ones also call it `--kill-whom`). Never `systemctl stop`.
 - When it receives SIGTERM, the monitor reads `stop-request.json`, if present, for the grace period. It then:
   1. sends SIGTERM to the agent's process group;
   2. waits for the grace period;
@@ -223,14 +229,14 @@ This rules out a reused pid, including one reused after a reboot, being mistaken
   - `RuntimeMaxSec` = max_runtime + grace + 30 s, a backstop if the monitor hangs;
   - `TimeoutStopSec` = grace + 30 s, so systemd never cuts the grace period short.
 - **`stop` on a `lost` session** with orphans signals each identified orphan pid (per the process-identity check above), using the same TERM / grace / KILL sequence. It then finalizes `ended_by=stop`, unless `Finalize` refuses with `ErrMonitorAlive` (the monitor came back), in which case it takes the normal stop path once.
-- **`stop` on an `exited` session** that still has orphans (marker, pgid and boot verified, as above) cleans them up with TERM / grace / KILL and does not re-finalize, since `status.json` is already final. Descendants of a normally exited agent are tracked, not killed automatically.
+- **`stop` on an `exited` session** that still has orphans (marker, pgid and boot verified, as above) cleans them up with TERM / grace / KILL and does not re-finalize, since `status.json` is already final. Descendants of a normally exited agent are tracked, not killed automatically (in systemd mode the unit's cgroup kill ends them once the monitor exits; see §2).
 - **`rm --force`** stops first, as above. For a session whose files are corrupt and cannot be loaded, `rm --force` reads whatever parses (`status.json` and the plan) to find and kill marked processes, then deletes the directory; a warning says when the status or plan could not be read, because orphans cannot then be found.
 
 ### Monitor death
 
 | Mode | Outcome if the monitor is SIGKILLed |
 |---|---|
-| systemd | The cgroup is killed with the unit; no orphans |
+| systemd | The monitor is the unit's main process, so its death stops the unit and systemd kills the cgroup: SIGTERM to every remaining process, then SIGKILL after `TimeoutStopSec` (grace + 30 s). The agent dies at once (`PR_SET_PDEATHSIG`, as in setsid mode); a grandchild that ignores SIGTERM lives until the SIGKILL. The session reads `lost` (with `orphans: N` until the cgroup is empty) and ends with no orphans. |
 | setsid, Linux | The agent itself is killed by `PR_SET_PDEATHSIG=SIGKILL`. Grandchildren in its process group can survive. They show as `lost` with `orphans: N`, and `stop` or `rm` cleans them up. |
 | setsid, macOS | The agent and grandchildren may survive. Same handling: `lost` with `orphans`, cleaned up by `stop` or `rm`. |
 
@@ -457,7 +463,7 @@ fastener ps [--all] [--filter label=K[=V] | state=S | backend=B | name=GLOB]... 
 fastener inspect <name> [--json]
 fastener logs <name> [-f] [--stderr] [--generation N]   # --generation: phase B
 fastener wait <name> [--timeout D]
-fastener stop <name> [--grace D]
+fastener stop <name> [--grace D]      # clamped to the session's grace in systemd mode
 fastener rm <name> [--force]
 fastener prune [--older-than D] [--dry-run] [--json]
 fastener backends [--json]
@@ -477,7 +483,7 @@ fastener install-restore
   - `--prompt` and `--prompt-file` are mutually exclusive. One is required for headless runs, and `--cwd` is required.
   - `--prompt-file -` reads the prompt from stdin. A prompt (from a file or stdin) larger than 4 MiB is a usage error (exit 2) naming the limit, and `--prompt-file` accepts regular files and pipes (a FIFO, or process substitution such as `<(cmd)`; reading blocks until a writer appears) but rejects devices such as `/dev/zero`, directories and sockets before opening them.
   - Labels are stored (`check` uses `fastener.check=true`) and can be filtered on with `ps --filter label=K=V`.
-  - `--launcher systemd` is a clear error in v0.1.
+  - `--launcher auto|systemd|setsid` (default: config `launcher`, else `auto`; see §2).
 - **`ps`:**
   - Shows `running`, `starting` and `lost` sessions plus anything that ended in the last 24 h.
   - `--all` shows everything retained.
@@ -539,7 +545,8 @@ cmd/fastener/          entry point; calls internal/cli (stdlib flag, no CLI fram
 internal/cli/          commands, flag parsing, views, check
 internal/session/      state dir, schema types, read/write, liveness, prune, labels
 internal/monitor/      _monitor: spawn, log, parser feed, limits, signals; (B) pty, attach
-internal/launcher/     setsid launcher (systemd in v0.2), selection
+internal/launcher/     setsid and systemd launchers, selection
+internal/systemd/      systemctl queries: availability, unit state, MainPID, kill --kill-who=main
 internal/config/       config.toml and config/state locations
 internal/runenv/       base environment, env-file parsing, PATH lookup
 internal/profile/      TOML load, validate, render; embedded profiles/*.toml
@@ -560,7 +567,7 @@ docs/                  json-schema.md, design specs
   - schema readers against every older fixture version;
   - the liveness check with a mismatched start time.
 - **Fake agent:** `internal/testbin/fakeagent`, built by the tests. It emits scripted stream-json or JSONL, sleeps, ignores SIGTERM, crashes, exits with a chosen code, forks a grandchild and reads stdin. A backend profile pointing at it (built by the tests; `internal/testbin/fakeagent`) lets the whole CLI-to-monitor path run in CI with no model calls.
-- **Lifecycle** (v0.1 tests setsid mode only on Linux; the systemd-mode runs are deferred to v0.2 with the systemd launcher):
+- **Lifecycle** (setsid mode on Linux; the shared harness pins `launcher = "setsid"` so the suite behaves the same with or without a user systemd. `internal/cli/systemd_test.go` repeats run/wait, stop of a TERM-ignoring agent, `--max-runtime`, an external SIGTERM, a SIGKILLed monitor (no orphans once the cgroup is killed), the `--grace` clamp, unit collection and `auto` selection under the systemd launcher. Those tests skip when `systemctl --user is-system-running` fails, so **CI, whose runners have no user systemd session, does not exercise the systemd launcher**; run them locally before a release):
   - the session survives the CLI exiting;
   - duplicate names;
   - launch failure;
@@ -586,7 +593,7 @@ docs/                  json-schema.md, design specs
 - **Live smoke** (opt-in, `FASTENER_SMOKE=1`; costs model calls): runs `fastener check --all --json` and requires every built-in backend to pass. This is the release check that built-in flags are correct. There is no separate smoke-test logic.
 - **`check` itself** is tested against the fake agent: a passing reply, a wrong reply, `agent_error`, a timeout (built-in hint), a `diagnose` pattern match in `stderr.log`, and a missing binary.
 - **CI:** Linux and macOS runners; `go vet`, `go test -race`. The macOS job is `continue-on-error` in v0.1 because its lifecycle tests have never run there. `staticcheck` is not wired in yet.
-- **Deferred to v0.2:** concurrent `stop`/`rm` through the CLI (`Finalize` has a unit test), `--grace` clamping in systemd mode and schema fixtures per release.
+- **Deferred to v0.2:** concurrent `stop`/`rm` through the CLI (`Finalize` has a unit test) and schema fixtures per release.
 
 ## 13. Milestones
 
@@ -599,7 +606,7 @@ docs/                  json-schema.md, design specs
    - `FASTENER_STATE_DIR` and `FASTENER_CONFIG_DIR`;
    - fake agent and lifecycle tests.
 2. **v0.2:**
-   - systemd launcher;
+   - (done: systemd launcher);
    - (done: `codex-jsonl` and `pi-json` parsers, from captured real output);
    - prune and retention;
    - more `diagnose` patterns;
@@ -623,7 +630,7 @@ No Fastener daemon is involved at any point.
 - How Claude auto-permission mode and Codex's equivalent behave in a headless run when an action is denied: whether the denial is reported to the model or the run blocks.
 - On macOS the exited agent is reaped immediately, so its pgid is not pinned while the group is signalled, and the TERM/KILL sequence has small race windows. Linux pins the zombie with `waitid(WNOWAIT)`.
 - Unknown liveness (an unreadable `/proc` or failed sysctl) is treated as maybe-alive, so a session can stay `running` or block finalization until liveness can be read.
-- A normally exited agent can leave descendants running. They are tracked (`inspect` shows `orphans: N` for the `exited` session; `rm` refuses without `--force`), never killed implicitly; `stop` or `rm --force` cleans them up.
+- A normally exited agent can leave descendants running. In setsid mode they are tracked (`inspect` shows `orphans: N` for the `exited` session; `rm` refuses without `--force`), never killed implicitly; `stop` or `rm --force` cleans them up. In systemd mode they are killed with the unit's cgroup once the monitor exits (after up to `TimeoutStopSec` for any that ignore SIGTERM), and are tracked the same way until then.
 - In setsid mode an agent's descendants can outlive a killed monitor (on Linux: grandchildren only; on macOS: the agent too). This is handled by group-level orphan cleanup, not prevented. systemd mode prevents it.
 - Orphan identity fails safe, so some orphans can be missed:
   - a descendant that moves to its own process group, or clears its environment, is never counted or signalled;
