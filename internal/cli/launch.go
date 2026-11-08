@@ -265,7 +265,13 @@ func handshake(name string, timeout time.Duration) (*session.View, error) {
 			return full(v), inStep("launch", fmt.Errorf("session %s: %s", name, msg))
 		}
 		if time.Now().After(deadline) {
-			return full(v), inStep("launch", fmt.Errorf("session %s did not start within %s; see %s", name, timeout, v.Dir.MonitorLog()))
+			// Never leave a late-starting monitor to run the prompt unattended:
+			// the stop request is honoured at monitor start and before the spawn.
+			outcome := "the session was stopped"
+			if serr := stopSession(v, 0, "stop"); serr != nil {
+				outcome = fmt.Sprintf("stopping it failed: %v", serr)
+			}
+			return full(v), inStep("launch", fmt.Errorf("session %s did not start within %s (%s); see %s", name, timeout, outcome, v.Dir.MonitorLog()))
 		}
 		time.Sleep(25 * time.Millisecond)
 	}

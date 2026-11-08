@@ -385,3 +385,32 @@ func TestRunJSONWithFollowIsUsageError(t *testing.T) {
 		t.Fatalf("exit %d, want 2", code)
 	}
 }
+
+func TestHandshakeTimeoutStopsTheSession(t *testing.T) {
+	h := newHarness(t)
+	if err := os.WriteFile(filepath.Join(h.config, "config.toml"), []byte("handshake_timeout = \"1ns\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"run", "fake", "--name", "slowstart", "--cwd", h.work, "--prompt", "x", "--env", "FAKE_SLEEP=60s"}
+	_, errOut, code := h.cmd(args...)
+	if code == 0 {
+		t.Skip("monitor reached running before the 1ns handshake deadline; nothing to assert")
+	}
+	if !strings.Contains(errOut, "slowstart") {
+		t.Errorf("error should name the session: %s", errOut)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		v := h.inspect("slowstart")
+		if v.State == "exited" {
+			if v.Status.EndedBy == "launch-failed" || v.Status.EndedBy == "stop" {
+				return
+			}
+			t.Fatalf("ended_by = %q", v.Status.EndedBy)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session still %s after handshake timeout; prompt left running", v.State)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
