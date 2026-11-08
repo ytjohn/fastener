@@ -61,16 +61,23 @@ func Load(name string, handshake time.Duration) (*View, error) {
 		v.Plan = &p
 	}
 	v.Launcher = readLauncher(d, gen)
-	v.resolve(handshake, time.Now(), func() (Status, *LauncherRecord, error) {
+	v.resolve(handshake, time.Now(), func() (Status, *LauncherRecord, *Plan, error) {
 		var st Status
 		if err := ReadJSON(d.StatusPath(), &st); err != nil {
-			return Status{}, nil, err
+			return Status{}, nil, nil, err
 		}
 		g := 1
 		if st.Generation > 0 {
 			g = st.Generation
 		}
-		return st, readLauncher(d, g), nil
+		var np *Plan
+		if v.Plan == nil || v.Plan.Generation != g {
+			var p Plan
+			if ReadJSON(d.PlanPath(g), &p) == nil {
+				np = &p
+			}
+		}
+		return st, readLauncher(d, g), np, nil
 	})
 	return v, nil
 }
@@ -127,7 +134,7 @@ func (v *View) Alive() bool { return v.State == StateRunning || v.State == State
 // resolve computes the effective state. reload re-reads status.json and the
 // current launcher record; it is consulted once before declaring a session
 // lost, because the monitor always writes before it exits.
-func (v *View) resolve(handshake time.Duration, now time.Time, reload func() (Status, *LauncherRecord, error)) {
+func (v *View) resolve(handshake time.Duration, now time.Time, reload func() (Status, *LauncherRecord, *Plan, error)) {
 	v.State = v.Status.State
 	if v.State != StateRunning && v.State != StateStarting {
 		return
@@ -141,11 +148,13 @@ func (v *View) resolve(handshake time.Duration, now time.Time, reload func() (St
 		return // launcher record not written yet; give it time
 	}
 	if reload != nil {
-		if st, l, err := reload(); err == nil {
+		if st, l, p, err := reload(); err == nil {
 			v.Status, v.Launcher = st, l
-			switch st.State {
-			case StateExited, StateRestoreFailed:
-				v.State = st.State
+			if p != nil {
+				v.Plan = p // the generation changed under us
+			}
+			if st.State != StateRunning && st.State != StateStarting {
+				v.State = st.State // terminal or unknown future state: use as is
 				return
 			}
 			if id2, boot2, ok2 := v.MonitorIdentity(); ok2 && (!ok || id2 != id) && proc.MaybeAlive(id2, boot2) {

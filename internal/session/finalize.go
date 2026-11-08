@@ -2,6 +2,8 @@ package session
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"syscall"
 	"time"
@@ -32,24 +34,44 @@ func Finalize(d Dir, mutate func(*Status)) (bool, error) {
 
 	var st Status
 	if err := ReadJSON(d.StatusPath(), &st); err != nil {
-		return false, err
+		if !errors.Is(err, fs.ErrNotExist) {
+			return false, err
+		}
+		st = Status{State: StateStarting} // half-created session
 	}
 	if st.State == StateExited {
 		return false, nil
 	}
-	if st.Monitor != nil && proc.MaybeAlive(*st.Monitor, st.BootID) {
-		return false, ErrMonitorAlive
+	if st.Monitor != nil {
+		if err := monitorLive(*st.Monitor, st.BootID); err != nil {
+			return false, err
+		}
 	}
 	gen := st.Generation
 	if gen <= 0 {
 		gen = 1
 	}
-	if l := readLauncher(d, gen); l != nil && l.Monitor != nil && proc.MaybeAlive(*l.Monitor, l.BootID) {
-		return false, ErrMonitorAlive
+	if l := readLauncher(d, gen); l != nil && l.Monitor != nil {
+		if err := monitorLive(*l.Monitor, l.BootID); err != nil {
+			return false, err
+		}
 	}
 	read := st.SchemaVersion
 	mutate(&st)
 	st.SchemaVersion = max(read, SchemaVersion)
 	st.UpdatedAt = time.Now().UTC()
 	return true, WriteJSON(d.StatusPath(), &st)
+}
+
+// monitorLive returns ErrMonitorAlive if the monitor is alive or its liveness
+// cannot be determined (the latter wraps the cause).
+func monitorLive(id proc.Identity, boot string) error {
+	ok, err := proc.Check(id, boot)
+	if err != nil {
+		return fmt.Errorf("%w (liveness unknown: %v)", ErrMonitorAlive, err)
+	}
+	if ok {
+		return ErrMonitorAlive
+	}
+	return nil
 }

@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
-	"syscall"
 )
 
 var (
@@ -178,12 +177,10 @@ func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
-	// Make the rename durable. Some filesystems reject fsync on directories.
+	// Best effort: make the rename durable. Errors are ignored because the
+	// rename has already succeeded and some filesystems reject directory fsync.
 	if dir, err := os.Open(filepath.Dir(path)); err == nil {
-		if err := dir.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) {
-			dir.Close()
-			return err
-		}
+		_ = dir.Sync()
 		dir.Close()
 	}
 	return nil

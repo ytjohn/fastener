@@ -194,14 +194,14 @@ func TestResolveRereadBeforeLost(t *testing.T) {
 	dead := deadIdentity(t)
 	exited := Status{State: StateExited, EndedBy: EndedByExit, Monitor: &dead, BootID: boot}
 	v := &View{Status: Status{State: StateRunning, Monitor: &dead, BootID: boot}}
-	v.resolve(time.Second, time.Now(), func() (Status, *LauncherRecord, error) { return exited, nil, nil })
+	v.resolve(time.Second, time.Now(), func() (Status, *LauncherRecord, *Plan, error) { return exited, nil, nil, nil })
 	if v.State != StateExited || v.Status.EndedBy != EndedByExit {
 		t.Fatalf("state %s, status %+v", v.State, v.Status)
 	}
 	// unchanged on re-read: lost, with the fresh copy installed
 	fresh := Status{State: StateRunning, Monitor: &dead, BootID: boot, Generation: 1}
 	v = &View{Status: Status{State: StateRunning, Monitor: &dead, BootID: boot}}
-	v.resolve(time.Second, time.Now(), func() (Status, *LauncherRecord, error) { return fresh, nil, nil })
+	v.resolve(time.Second, time.Now(), func() (Status, *LauncherRecord, *Plan, error) { return fresh, nil, nil, nil })
 	if v.State != StateLost || v.Status.Generation != 1 {
 		t.Fatalf("state %s, status %+v", v.State, v.Status)
 	}
@@ -209,7 +209,7 @@ func TestResolveRereadBeforeLost(t *testing.T) {
 	self, _ := proc.Self()
 	live := Status{State: StateRunning, Monitor: &self, BootID: boot}
 	v = &View{Status: Status{State: StateRunning, Monitor: &dead, BootID: boot}}
-	v.resolve(time.Second, time.Now(), func() (Status, *LauncherRecord, error) { return live, nil, nil })
+	v.resolve(time.Second, time.Now(), func() (Status, *LauncherRecord, *Plan, error) { return live, nil, nil, nil })
 	if v.State != StateRunning {
 		t.Fatalf("state %s", v.State)
 	}
@@ -251,7 +251,9 @@ func TestFinalizeKeepsNewerSchema(t *testing.T) {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
 	var st Status
-	ReadJSON(d.StatusPath(), &st)
+	if err := ReadJSON(d.StatusPath(), &st); err != nil {
+		t.Fatal(err)
+	}
 	if st.SchemaVersion != 99 {
 		t.Fatalf("schema_version = %d", st.SchemaVersion)
 	}
@@ -263,7 +265,7 @@ func TestLoadFullFindsOrphans(t *testing.T) {
 	dead := deadIdentity(t)
 	cmd := exec.Command("sleep", "30")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(), "FASTENER_SESSION=orph:1:x")
+	cmd.Env = append(os.Environ(), proc.MarkerEnv+"=orph:1:x")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -305,5 +307,51 @@ func TestDurationNullAndNumber(t *testing.T) {
 	}
 	if s.Grace != 0 || time.Duration(s.MaxRuntime) != 1500*time.Millisecond {
 		t.Fatalf("%+v", s)
+	}
+}
+
+func TestFinalizeMissingStatus(t *testing.T) {
+	setup(t)
+	d, _ := Create("nostat")
+	ok, err := Finalize(d, func(s *Status) { s.State = StateExited; s.EndedBy = EndedByLaunchFailed })
+	if !ok || err != nil {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	var st Status
+	if err := ReadJSON(d.StatusPath(), &st); err != nil || st.State != StateExited {
+		t.Fatalf("%+v %v", st, err)
+	}
+}
+
+func TestResolveUnknownStateNotLost(t *testing.T) {
+	setup(t)
+	boot, _ := proc.BootID()
+	dead := deadIdentity(t)
+	v := &View{Status: Status{State: StateRunning, Monitor: &dead, BootID: boot}}
+	v.resolve(time.Second, time.Now(), func() (Status, *LauncherRecord, *Plan, error) {
+		return Status{State: "future-state"}, nil, nil, nil
+	})
+	if v.State != "future-state" {
+		t.Fatalf("state %s", v.State)
+	}
+}
+
+func TestResolveReloadsPlanOnGenerationChange(t *testing.T) {
+	setup(t)
+	boot, _ := proc.BootID()
+	dead := deadIdentity(t)
+	d := writeSession(t, "gen", time.Now(), Status{State: StateRunning, Monitor: &dead, BootID: boot}, nil)
+	if err := WriteJSON(d.PlanPath(2), Plan{Generation: 2, Marker: "gen:2:y"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteJSON(d.StatusPath(), Status{State: StateRunning, Generation: 2, Monitor: &dead, BootID: boot}); err != nil {
+		t.Fatal(err)
+	}
+	v, err := Load("gen", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Plan == nil || v.Plan.Generation != 2 {
+		t.Fatalf("plan %+v", v.Plan)
 	}
 }
