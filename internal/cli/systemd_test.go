@@ -9,19 +9,20 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/ytjohn/fastener/internal/systemd"
 )
 
 // These tests run the systemd launcher against the real user manager. They
-// skip when `systemctl --user is-system-running` fails (GitHub's runners have
-// no user systemd session), so CI never exercises them. They run in parallel
-// with each other because two of them wait out systemd's stop timeout.
+// skip when no user manager is usable (systemd.Available: `systemctl --user
+// is-system-running` is not running or degraded; GitHub's runners have no user
+// systemd session), so CI never exercises them. They run in parallel with
+// each other.
 
 // userSystemd reports whether a user manager is usable here.
 func userSystemd() bool {
-	if _, err := exec.LookPath("systemd-run"); err != nil {
-		return false
-	}
-	return exec.Command("systemctl", "--user", "is-system-running").Run() == nil
+	ok, _ := systemd.Available()
+	return ok
 }
 
 // newSystemdHarness is a harness whose sessions use launcher (systemd or auto),
@@ -145,6 +146,9 @@ func TestSystemdRunToExit(t *testing.T) {
 }
 
 func TestSystemdAutoPicksSystemd(t *testing.T) {
+	if lingers, err := systemd.Linger(); !lingers {
+		t.Skipf("auto picks systemd only with linger on (linger: %v, %v)", lingers, err)
+	}
 	h := newSystemdHarness(t, "auto")
 	h.start("s1", nil)
 	if rec := h.launcherRecord("s1"); rec.Launcher.Launcher != "systemd" || rec.Launcher.Unit == "" {
@@ -193,9 +197,9 @@ func TestSystemdExternalSigtermIsSignal(t *testing.T) {
 	}
 }
 
-// A SIGKILLed monitor is the unit's main process: systemd stops the unit and
-// kills its cgroup, so even a grandchild that ignores SIGTERM dies (after
-// TimeoutStopSec = grace + 30s), with no orphans left for stop or rm.
+// A SIGKILLed monitor is the unit's main process: systemd stops the unit and,
+// with KillMode=mixed, SIGKILLs what is left of its cgroup at once, so even a
+// grandchild that ignores SIGTERM dies promptly and no orphans remain.
 func TestSystemdMonitorKilledLeavesNoOrphans(t *testing.T) {
 	h := newSystemdHarness(t, "systemd")
 	pidfile := filepath.Join(t.TempDir(), "gc.pid")
@@ -205,18 +209,35 @@ func TestSystemdMonitorKilledLeavesNoOrphans(t *testing.T) {
 	unit := h.launcherRecord("s1").Launcher.Unit
 	syscall.Kill(v.Status.Monitor.PID, syscall.SIGKILL)
 	h.waitState("s1", "lost", 5*time.Second)
-	waitPidGone(t, gc, 45*time.Second)
-	waitUnitGone(t, unit, 10*time.Second)
+	waitPidGone(t, gc, 5*time.Second) // TimeoutStopSec is 31s: this must not wait it out
+	waitUnitGone(t, unit, 5*time.Second)
 	if v = h.inspect("s1"); v.State != "lost" || v.Orphans != 0 {
 		t.Fatalf("after the cgroup kill: state %s, orphans %d", v.State, v.Orphans)
 	}
 	h.ok("rm", "s1") // nothing left to refuse over
 }
 
-// stop --grace longer than the session's grace is clamped in systemd mode (#5).
+// An agent that exits normally but leaves a grandchild: in systemd mode the
+// grandchild (which ignores SIGTERM) is SIGKILLed with the cgroup as soon as
+// the monitor exits. (setsid keeps it running and tracked as an orphan.)
+func TestSystemdNormalExitKillsLeftovers(t *testing.T) {
+	h := newSystemdHarness(t, "systemd")
+	pidfile := filepath.Join(t.TempDir(), "gc.pid")
+	h.start("s1", []string{"FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile})
+	gc := waitPid(t, pidfile)
+	h.ok("wait", "s1", "--timeout", "10s")
+	waitPidGone(t, gc, 5*time.Second)
+	if v := h.inspect("s1"); v.State != "exited" || v.Status.EndedBy != "exit" || v.Orphans != 0 {
+		t.Fatalf("got state %s ended_by %s orphans %d", v.State, v.Status.EndedBy, v.Orphans)
+	}
+	h.ok("rm", "s1")
+}
+
+// stop --grace longer than the session's grace is clamped in systemd mode when
+// the session has a max runtime (#5): only RuntimeMaxSec can cut a stop short.
 func TestSystemdStopGraceIsClamped(t *testing.T) {
 	h := newSystemdHarness(t, "systemd")
-	h.start("s1", []string{"FAKE_SLEEP=60s", "FAKE_IGNORE_TERM=1"}, "--grace", "1s")
+	h.start("s1", []string{"FAKE_SLEEP=60s", "FAKE_IGNORE_TERM=1"}, "--grace", "1s", "--max-runtime", "10m")
 	h.waitState("s1", "running", 5*time.Second)
 	start := time.Now()
 	_, errOut, code := h.cmd("stop", "s1", "--grace", "30s")
@@ -234,10 +255,43 @@ func TestSystemdStopGraceIsClamped(t *testing.T) {
 		t.Fatalf("got %+v", v.Status)
 	}
 	// A shorter --grace is not touched.
-	h.start("s2", []string{"FAKE_SLEEP=60s"}, "--grace", "5s")
+	h.start("s2", []string{"FAKE_SLEEP=60s"}, "--grace", "5s", "--max-runtime", "10m")
 	h.waitState("s2", "running", 5*time.Second)
 	if _, errOut, code := h.cmd("stop", "s2", "--grace", "1s"); code != 0 || strings.Contains(errOut, "clamped") {
 		t.Fatalf("shorter grace: exit %d: %q", code, errOut)
+	}
+	// Without a max runtime there is no RuntimeMaxSec, so no clamp: the
+	// longer grace is honoured (the agent ignores TERM, so stop waits it out).
+	h.start("s3", []string{"FAKE_SLEEP=60s", "FAKE_IGNORE_TERM=1"}, "--grace", "1s")
+	h.waitState("s3", "running", 5*time.Second)
+	start = time.Now()
+	_, errOut, code = h.cmd("stop", "s3", "--grace", "3s")
+	if took := time.Since(start); code != 0 || strings.Contains(errOut, "clamped") || took < 3*time.Second {
+		t.Fatalf("no max runtime: exit %d after %s: %q", code, took, errOut)
+	}
+}
+
+// The agent gets the caller's open-file limit in both modes, not the user
+// manager's default soft limit of 1024.
+func TestSystemdAgentNofileMatchesSetsid(t *testing.T) {
+	sd := newSystemdHarness(t, "systemd")
+	ss := newHarness(t)
+	reply := func(h *harness, name string) string {
+		h.start(name, []string{"FAKE_REPLY_RLIMIT=1"})
+		h.ok("wait", name, "--timeout", "10s")
+		return h.inspect(name).Status.FinalMessage
+	}
+	for _, soft := range []string{"", "4096"} {
+		sd.softNofile, ss.softNofile = soft, soft
+		name := "n" + soft
+		got, want := reply(sd, name), reply(ss, name)
+		t.Logf("caller soft NOFILE %q: agent sees %s under systemd, %s under setsid", soft, got, want)
+		if got != want || want == "" || strings.HasPrefix(want, "error") {
+			t.Fatalf("caller soft %q: systemd agent NOFILE %q, setsid %q", soft, got, want)
+		}
+		if soft != "" && got != soft {
+			t.Fatalf("agent NOFILE %q, want the caller's %s", got, soft)
+		}
 	}
 }
 

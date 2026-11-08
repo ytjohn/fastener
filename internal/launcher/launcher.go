@@ -3,6 +3,7 @@ package launcher
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,19 +21,27 @@ type Launcher interface {
 	Start(d session.Dir, gen int) (session.LauncherRecord, error)
 }
 
-// available probes for a usable user systemd manager (systemd.Available in
-// production; replaced in tests).
-var available = systemd.Available
+// available and linger probe the user systemd manager (systemd.Available and
+// systemd.Linger in production; replaced in tests).
+var (
+	available = systemd.Available
+	linger    = systemd.Linger
+)
 
 // Select resolves the launcher preference ("", "auto", "setsid", "systemd").
-// auto prefers systemd when a user manager is running (one systemctl call with
-// a 1 s timeout), and otherwise falls back to setsid. An explicit systemd is
-// an error when no user manager is available.
-func Select(pref string) (Launcher, error) {
+//
+// auto uses systemd only when a user manager is running and the user has
+// lingering enabled (a session must not stop at logout just because systemd
+// happened to be there); otherwise setsid. Each probe is one exec with a 1 s
+// timeout. An explicit systemd is an error without a user manager, and works
+// without linger but warns on warn that sessions will stop at logout.
+func Select(pref string, warn io.Writer) (Launcher, error) {
 	switch pref {
 	case "", "auto":
 		if ok, _ := available(); ok {
-			return Systemd{}, nil
+			if lingers, _ := linger(); lingers {
+				return Systemd{}, nil
+			}
 		}
 		return Setsid{}, nil
 	case "setsid":
@@ -40,6 +49,13 @@ func Select(pref string) (Launcher, error) {
 	case "systemd":
 		if ok, err := available(); !ok {
 			return nil, fmt.Errorf("launcher systemd: no usable user systemd manager (%v); use auto or setsid", err)
+		}
+		if lingers, err := linger(); !lingers {
+			why := "lingering is off"
+			if err != nil {
+				why = "lingering could not be checked: " + err.Error()
+			}
+			fmt.Fprintf(warn, "fastener: warning: launcher systemd: %s, so sessions stop when you log out (loginctl enable-linger keeps them running)\n", why)
 		}
 		return Systemd{}, nil
 	}

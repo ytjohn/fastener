@@ -73,6 +73,8 @@ type harness struct {
 	// (auto would pick systemd on a developer box and setsid in CI);
 	// systemd_test.go covers the systemd launcher explicitly.
 	launcher string
+	// softNofile, when set, is the soft RLIMIT_NOFILE the CLI is started with.
+	softNofile string
 }
 
 func newHarness(t *testing.T) *harness {
@@ -108,6 +110,9 @@ func (h *harness) writeProfile(name, body string) {
 func (h *harness) cmd(args ...string) (string, string, int) {
 	h.t.Helper()
 	c := exec.Command(fastenerBin, args...)
+	if h.softNofile != "" {
+		c = exec.Command("/bin/sh", append([]string{"-c", `ulimit -Sn "$0" && exec "$@"`, h.softNofile, fastenerBin}, args...)...)
+	}
 	// extraEnv first: with duplicate keys the last entry wins, so the
 	// harness's own values must come after it.
 	c.Env = append(append([]string{}, h.extraEnv...),

@@ -14,6 +14,7 @@
 //	FAKE_GRANDCHILD_WRITES=d,… the child inherits stdout (holding the pipe open)
 //	                           and prints "grandchild-<i>" at each delay d after it starts
 //	FAKE_CRASH=1               kill itself with SIGKILL after init
+//	FAKE_REPLY_RLIMIT=1        reply with the soft RLIMIT_NOFILE the agent was started with
 //	FAKE_MODEL=id              report id as the init event's model and in an assistant
 //	                           event's message.model (both absent when unset)
 package main
@@ -96,6 +97,15 @@ func main() {
 	reply := "pong"
 	if v, ok := os.LookupEnv("FAKE_REPLY"); ok {
 		reply = v
+	}
+	if os.Getenv("FAKE_REPLY_RLIMIT") == "1" {
+		// Go raised this process's own soft limit at startup and restores the
+		// original in its children, so a child shows what the agent was given.
+		out, err := exec.Command("/bin/sh", "-c", "ulimit -Sn").Output()
+		reply = strings.TrimSpace(string(out))
+		if err != nil {
+			reply = "error: " + err.Error()
+		}
 	}
 	if name := os.Getenv("FAKE_REPLY_ENV"); name != "" {
 		reply = os.Getenv(name)

@@ -89,16 +89,17 @@ func cmdRm(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-// clampGrace limits a per-call --grace to the session's own grace when the
-// session runs under systemd: the unit's TimeoutStopSec and RuntimeMaxSec were
-// sized from the session's grace, so a longer stop could have the backstop fire
-// mid-grace (recorded as signal, not stop). It warns when it clamps.
+// clampGrace limits a per-call --grace to the session's own grace when a live
+// session runs under systemd with a max runtime: the unit's RuntimeMaxSec was
+// sized from the session's grace, so a longer stop could have that backstop
+// fire mid-grace (recorded as signal, not stop). TimeoutStopSec does not bound
+// a stop, which the monitor runs itself. It warns when it clamps.
 func clampGrace(v *session.View, grace time.Duration, stderr io.Writer) time.Duration {
-	if v.Launcher == nil || v.Launcher.Launcher != "systemd" {
+	if v.Launcher == nil || v.Launcher.Launcher != "systemd" || !v.Alive() || v.Session.MaxRuntime <= 0 {
 		return grace
 	}
 	if limit := v.Session.EffectiveGrace(); grace > limit {
-		fmt.Fprintf(stderr, "fastener: warning: session %s runs under systemd; --grace %s is longer than the session's grace and is clamped to %s (the unit's stop timeout was sized from it)\n",
+		fmt.Fprintf(stderr, "fastener: warning: session %s runs under systemd with a max runtime; --grace %s is longer than the session's grace and is clamped to %s (the unit's RuntimeMaxSec backstop was sized from it)\n",
 			v.Session.Name, grace, limit)
 		return limit
 	}
