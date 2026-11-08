@@ -220,7 +220,7 @@ This rules out a reused pid, including one reused after a reboot, being mistaken
 ### Upgrades
 
 - A running monitor is unaffected by replacing the binary on disk.
-- The monitor reads its profile and settings once, at start.
+- The monitor reads its generation plan once, at start, and never reads the profile.
 - New CLIs read old state through `schema_version`. A `testdata` fixture directory from each released schema version is kept and tested.
 
 ## 5. Environment
@@ -469,3 +469,6 @@ No Fastener daemon is involved at any point.
 - Finding conversation IDs for interactive Codex and Pi sessions is uninvestigated.
 - How Claude auto-permission mode and Codex's equivalent behave in a headless run when an action is denied: whether the denial is reported to the model or the run blocks.
 - In setsid mode an agent's descendants can outlive a killed monitor (on Linux: grandchildren only; on macOS: the agent too). This is handled by group-level orphan cleanup, not prevented. systemd mode prevents it.
+- Orphan identity fails safe, so some orphans can be missed:
+  - a descendant that moves to its own process group, or clears its environment, is never counted or signalled;
+  - the check-then-signal sequence leaves a small pid-reuse window. On Linux, `pidfd_open` plus `pidfd_send_signal` can close it.
