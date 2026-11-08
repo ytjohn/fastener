@@ -324,7 +324,7 @@ url_pattern = 'https://claude\.ai/\S+'
 - **Validation:** an unknown key, a missing required section or an unknown parser or finder name is an error, both at load time and in `fastener check --static`.
 - **Built-ins** (`profiles/*.toml`, embedded with `go:embed`): `claude`, `codex`, `pi`. Every flag in a built-in profile is verified against the real CLI by `fastener check` (the opt-in smoke tests, §12) before release; all three passed on the development machine.
   - **`claude`:** `-p --output-format stream-json --verbose`, prompt on stdin, parser `claude-stream-json`; `auto` is `--permission-mode auto`, `skip` is `--dangerously-skip-permissions`.
-  - **`codex`:** `exec --json --skip-git-repo-check`, prompt on stdin, parser `none` until v0.2; `auto` is `--approve-for-me`, `skip` is `--dangerously-bypass-approvals-and-sandbox`. `--skip-git-repo-check` is there because Fastener sessions name their working directory explicitly and `check` runs in a temporary non-git directory.
+  - **`codex`:** `exec --json --skip-git-repo-check`, prompt on stdin, parser `codex-jsonl`; `auto` is `--approve-for-me`, `skip` is `--dangerously-bypass-approvals-and-sandbox`. `--skip-git-repo-check` is there because Fastener sessions name their working directory explicitly and `check` runs in a temporary non-git directory.
   - **`pi`:** `-p --mode json`, prompt as an argument, parser `pi-json`. Pi has no permission system, so the profile defines only `skip` and sets `default_permissions = "skip"`: Pi sessions get `skip` without a flag (unless the config's `default_permissions` names another level). An explicit `--permissions auto` is still a hard error rather than a silent fallback. Pi exits 0 and only warns on stderr when a provider does not offer the requested model; a diagnose entry turns that warning into a hint.
 - **Adding a backend** means writing a TOML file. Adding a *built-in* backend is a PR containing the profile plus a recorded-output test fixture. If the backend needs a new output format, the PR also adds a parser.
 
@@ -386,7 +386,7 @@ Phase B adds `check --interactive [--remote]`. It launches with a pty, confirms 
 
 ## 7. Parsers
 
-Named Go functions selected by profile. v0.1 ships `claude-stream-json`, `pi-json` and `none`; `codex-jsonl` arrives in v0.2 (Codex uses `none` until then, so its `parse` step is `skip` and `reply` searches `output.log`).
+Named Go functions selected by profile. v0.1 ships `claude-stream-json`, `pi-json`, `codex-jsonl` and `none`.
 
 - **`claude-stream-json`** (`claude -p --output-format stream-json --verbose`): `conversation_id` from any event's `session_id`; `model` from the last top-level assistant event's `message.model` (events with a `parent_tool_use_id` are subagent turns, possibly on another model, and are skipped) (a bare model id the Anthropic API reports; `model_source` `server`; Claude Code's `<synthetic>` placeholder is ignored), falling back to the `system/init` event's `model` (the CLI's own setting; `model_source` `client`) until an assistant event arrives; an error `result` clears `model`; `final_message`, `agent_error` (`is_error`) and `usage` from the `result` event.
 - **`pi-json`** (`pi -p --mode json`): `conversation_id` from the `session` event's `id`. `model`, `model_source`, `final_message` and `agent_error` come from the last assistant `message_end`:
@@ -395,6 +395,11 @@ Named Go functions selected by profile. v0.1 ships `claude-stream-json`, `pi-jso
   - `model` is `provider/` plus `responseModel` when present, else `model`. Pi's adapters differ (pi 0.84.4): `anthropic-messages` overwrites `model` with the server's id; `openai-completions` keeps the requested id in `model` and sets `responseModel` only when the server reported a different one; every other adapter (`openai-responses`, `azure-openai-responses`, `openai-codex-responses`, `bedrock-converse-stream`, `google-generative-ai`, `google-vertex`, `mistral-conversations`, `pi-messages`, `cloudflare`) only echoes the requested id. So `model_source` is `server` when `responseModel` is set or `api` is `anthropic-messages` or `openai-completions`, and `client` otherwise, including for an unknown adapter. After an agent error `model` and `model_source` are cleared, since the attempted model never answered, and a last message without a model clears them too.
 
   `usage` is summed over every assistant `message_end` in the run (each reports one API call): `input + cacheRead + cacheWrite` input tokens, `output` output tokens and `cost.total`. Pi exits 0 even when the model call failed, so `agent_error` is what catches it.
+
+- **`codex-jsonl`** (`codex exec --json`, codex-cli 0.167.0): `conversation_id` from `thread.started`'s `thread_id`; `final_message` is the text of the last `item.completed` whose item is an `agent_message`.
+  - `agent_error` is set by a `turn.failed` or a top-level `error` event; `final_message` is then `turn.failed`'s `error.message`, else the last top-level error's `message`. An `item.completed` `error` item alone records nothing: it is a warning (for example "Model metadata not found") that precedes the real failure.
+  - `usage` is summed over every `turn.completed`: `input_tokens` is Codex's own reported total and `output_tokens` its reported output. `cached_input_tokens` and `reasoning_output_tokens` are subsets in OpenAI semantics and are not added; `cache_write_input_tokens` is not added either because the captures cannot confirm it is excluded from `input_tokens`. Codex reports no cost, so `cost_usd` is omitted (not 0).
+  - Codex does not report the served model in these events, so `model` and `model_source` are absent and `check`'s model step reports `skip` ("backend does not report its model"), the honest result.
 
 - Run inside the monitor, streaming, one line at a time, while raw output is written to `output.log` unchanged.
 - **Extracted fields** (all optional, omitted when unknown):
@@ -595,7 +600,7 @@ docs/                  json-schema.md, design specs
    - fake agent and lifecycle tests.
 2. **v0.2:**
    - systemd launcher;
-   - `codex-jsonl` parser and a Pi JSON parser (after capturing real output);
+   - (done: `codex-jsonl` and `pi-json` parsers, from captured real output);
    - prune and retention;
    - more `diagnose` patterns;
    - macOS hardening (see `docs/followups.md`).

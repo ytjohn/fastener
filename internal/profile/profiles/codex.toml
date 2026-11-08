@@ -7,7 +7,7 @@ command = "codex"
 [headless]
 args   = ["exec", "--json", "--skip-git-repo-check"]
 prompt = "stdin"
-parser = "none"   # codex-jsonl arrives in v0.2
+parser = "codex-jsonl"
 
 [options]
 model = ["--model", "{value}"]
@@ -20,5 +20,6 @@ skip = ["--dangerously-bypass-approvals-and-sandbox"]
 version_args = ["--version"]
 diagnose = [
   { match = '(?i)not logged in|please (run )?`?codex login|\b401 unauthorized\b|\bunauthorized\b[^\n]{0,20}\b(token|api key|login)\b|(\b(status|http)\b[^\n]{0,20}\b401\b)', hint = "auth: run `codex login`" },
+  { match = '(?i)\bmodel\b[^\n]{0,40}\bis not supported\b', hint = "model not offered for this Codex account" },
   { match = '(?i)model[^\n]{0,40}\b(not found|does not exist|not supported)\b', hint = "model unavailable: pass a valid --model" },
 ]

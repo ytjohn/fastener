@@ -19,6 +19,10 @@ type Fields struct {
 	AgentError  *bool  `json:"agent_error,omitempty"`
 	Usage       *Usage `json:"usage,omitempty"`
 	ParseErrors int    `json:"parse_errors,omitempty"`
+
+	// codexTurnFailed records that final_message came from a turn.failed
+	// event, which later top-level errors must not replace. Not serialized.
+	codexTurnFailed bool
 }
 
 // Usage counts all tokens the backend reported for the run. The token fields
@@ -69,6 +73,7 @@ var registry = map[string]Parser{
 	"none":               none{},
 	"claude-stream-json": claudeStreamJSON{},
 	"pi-json":            piJSON{},
+	"codex-jsonl":        codexJSONL{},
 }
 
 // Get returns the named parser.
