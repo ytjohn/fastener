@@ -171,6 +171,10 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 		return m.launchFailed(fmt.Errorf("cwd %s: not a directory", m.sess.Cwd))
 	}
 
+	p, ok := parser.Get(m.plan.Parser)
+	if !ok {
+		return m.launchFailed(fmt.Errorf("unknown parser %q", m.plan.Parser))
+	}
 	cmd := exec.Command(m.plan.Argv[0], m.plan.Argv[1:]...)
 	cmd.Dir = m.sess.Cwd
 	cmd.Env = env
@@ -252,11 +256,6 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	m.write()
 	m.mu.Unlock()
 
-	p, ok := parser.Get(m.plan.Parser)
-	if !ok {
-		m.log.Printf("unknown parser %q; falling back to none", m.plan.Parser)
-		p, _ = parser.Get("none")
-	}
 	drained := make(chan struct{})
 	go m.pump(pr, out, p, drained)
 	stopFlush := make(chan struct{})

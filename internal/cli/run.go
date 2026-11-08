@@ -40,6 +40,10 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	if o.Labels, err = parseLabels(labels); err != nil {
 		return fail(stderr, err)
 	}
+	if follow && asJSON {
+		fmt.Fprintln(stderr, "fastener: --json and --follow cannot be combined")
+		return exitUsage
+	}
 	v, err := launch(o, stderr)
 	if err != nil {
 		if v != nil && asJSON {

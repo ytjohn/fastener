@@ -367,3 +367,21 @@ func TestRmForceCleansLostWithOrphans(t *testing.T) {
 		t.Fatalf("grandchild %d survived rm --force", pid)
 	}
 }
+
+func TestWaitOnLostSessionExits125(t *testing.T) {
+	h := newHarness(t)
+	h.start("s1", []string{"FAKE_SLEEP=60s"})
+	v := h.waitState("s1", "running", 5*time.Second)
+	syscall.Kill(v.Status.Monitor.PID, syscall.SIGKILL)
+	h.waitState("s1", "lost", 5*time.Second)
+	if _, _, code := h.cmd("wait", "s1", "--timeout", "5s"); code != 125 {
+		t.Fatalf("wait on lost session: exit %d, want 125", code)
+	}
+}
+
+func TestRunJSONWithFollowIsUsageError(t *testing.T) {
+	h := newHarness(t)
+	if _, _, code := h.cmd("run", "fake", "--cwd", h.work, "--prompt", "x", "--json", "--follow"); code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+}

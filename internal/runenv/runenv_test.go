@@ -138,3 +138,9 @@ func TestLookPathEdgeCases(t *testing.T) {
 		t.Fatal("empty PATH found something")
 	}
 }
+
+func TestMergeEmptyIsNonNil(t *testing.T) {
+	if got := Merge(nil, nil); got == nil || len(got) != 0 {
+		t.Fatalf("Merge(nil, nil) = %#v, want non-nil empty", got)
+	}
+}

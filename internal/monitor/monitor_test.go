@@ -275,3 +275,20 @@ func TestStopBeforeSpawn(t *testing.T) {
 		t.Fatalf("ended_by=%s agent=%v", st.EndedBy, st.Agent)
 	}
 }
+
+func TestRunUnknownParserIsLaunchFailed(t *testing.T) {
+	bin := buildFake(t)
+	d := setupRun(t, []string{bin}, t.TempDir(), nil, 0)
+	var p session.Plan
+	if err := session.ReadJSON(d.PlanPath(1), &p); err != nil {
+		t.Fatal(err)
+	}
+	p.Parser = "nope"
+	if err := session.WriteJSON(d.PlanPath(1), p); err != nil {
+		t.Fatal(err)
+	}
+	st := runInProcess(t, d)
+	if st.EndedBy != session.EndedByLaunchFailed || !strings.Contains(st.Error, `unknown parser "nope"`) || st.Agent != nil {
+		t.Fatalf("ended_by=%s err=%q agent=%v", st.EndedBy, st.Error, st.Agent)
+	}
+}

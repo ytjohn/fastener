@@ -86,7 +86,7 @@ func ReadFile(path string) ([]string, error) {
 // Merge combines layers; a later layer's value wins, order of first appearance is kept.
 func Merge(layers ...[]string) []string {
 	idx := map[string]int{}
-	var out []string
+	out := []string{}
 	for _, layer := range layers {
 		for _, kv := range layer {
 			k, _, _ := strings.Cut(kv, "=")

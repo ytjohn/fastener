@@ -26,7 +26,11 @@ type Config struct {
 // Dir is $FASTENER_CONFIG_DIR, else $XDG_CONFIG_HOME/fastener, else ~/.config/fastener.
 func Dir() string {
 	if v := os.Getenv("FASTENER_CONFIG_DIR"); v != "" {
-		return v
+		abs, err := filepath.Abs(v)
+		if err != nil {
+			return ""
+		}
+		return abs
 	}
 	if v := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(v) {
 		return filepath.Join(v, "fastener")

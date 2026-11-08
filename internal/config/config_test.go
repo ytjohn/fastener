@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -110,5 +111,12 @@ func TestBackendsDirEmptyWithoutConfigDir(t *testing.T) {
 	t.Setenv("HOME", "")
 	if d := BackendsDir(); d != "" {
 		t.Fatalf("BackendsDir = %q, want empty", d)
+	}
+}
+
+func TestRelativeConfigDirIsAbsolutized(t *testing.T) {
+	t.Setenv("FASTENER_CONFIG_DIR", "rel/cfg")
+	if d := Dir(); !filepath.IsAbs(d) || !strings.HasSuffix(d, "/rel/cfg") {
+		t.Fatalf("Dir() = %q", d)
 	}
 }
