@@ -64,7 +64,8 @@ An array (never null) of `{name, backend, state, created_at, ended_at?, ended_by
 ## `check --json`
 
 An array, one entry per backend checked: `{backend, passed, session?, skipped?, steps: [{name, status, detail?, hint?}]}`.
-- `name` is one of `profile`, `binary`, `launch`, `exit`, `parse`, `reply`, `cleanup`. Checking stops at the first failed step, so later steps are absent.
+- `name` is one of `profile`, `binary`, `launch`, `exit`, `parse`, `model`, `reply`, `cleanup`, in that order. Checking stops at the first failed step, so later steps are absent.
+- `model` compares the served model (status `model`) with `--expect-model`, else `--model`, using the prefix rule in the design spec (§6.1). It is `skip` when the backend does not report its model, `pass` when the served model matches (or nothing was requested), and `fail` on a mismatch.
 - `status` is `pass`, `fail` or `skip`. With the `none` parser the `parse` step is `skip`.
 - `session` is the check session's name (absent for `--static`).
 - `skipped: true` appears only under `--all`, for a backend whose profile does not define the resolved permission level (`--permissions`, else the config's `default_permissions`, else the profile's `default_permissions`, else `auto`). Such an entry has `passed: false` and a single `profile` step with status `skip`. A skip is not a failure.

@@ -12,6 +12,7 @@
 //	FAKE_GRANDCHILD=1          start a long-lived child in the same process group
 //	FAKE_GRANDCHILD_PIDFILE=p  write that child's pid to p
 //	FAKE_CRASH=1               kill itself with SIGKILL after init
+//	FAKE_MODEL=id              report id as the init event's model (absent when unset)
 package main
 
 import (
@@ -61,7 +62,11 @@ func main() {
 		}
 	}
 	const sid = "fake-session-0001"
-	emit(map[string]any{"type": "system", "subtype": "init", "session_id": sid})
+	initEv := map[string]any{"type": "system", "subtype": "init", "session_id": sid}
+	if m := os.Getenv("FAKE_MODEL"); m != "" {
+		initEv["model"] = m
+	}
+	emit(initEv)
 	if os.Getenv("FAKE_CRASH") == "1" {
 		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
 	}

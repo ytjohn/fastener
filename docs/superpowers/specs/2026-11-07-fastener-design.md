@@ -340,6 +340,7 @@ url_pattern = 'https://claude\.ai/\S+'
   - `--keep` keeps the session for inspection; by default it is removed after the check.
   - `--all` checks every resolvable backend. Under `--all`, a backend whose profile does not define the resolved permission level (the flag, else config, else the profile's `default_permissions`, else `auto`) is a skip, not a failure: one `profile` step with status `skip`, and `skipped: true` in JSON. `--all` exits 0 when every non-skipped backend passed. `--all` requires at least one checked backend: if every backend is skipped, or none exists, it exits 1. An explicit `check <backend>` for an undefined level still fails at the `profile` step, and an explicit `--permissions` outside `auto|skip` is a usage error (exit 2) for `run` and `check`.
   - `--static` skips the model call.
+  - `--expect-model M` (check only) names the model the backend must report serving, when it differs from what `--model` passes (for example `--model haiku --expect-model claude-haiku`). Without it, the expectation is `--model`.
   - `--json` gives the step-by-step result.
 
 **Steps** (stop at the first failure; each reports `pass` / `fail` / `skip` with detail):
@@ -351,8 +352,11 @@ url_pattern = 'https://claude\.ai/\S+'
 | `launch` | The handshake reaches `running`; `session.json`, `prompt.txt`, the plan, the launcher record, `status.json` and `output.log` all exist |
 | `exit` | The session ends `ended_by=exit` with exit code 0 within the limit |
 | `parse` | `conversation_id` and `final_message` were extracted; `agent_error` is not true; `parse_errors` is 0. With the `none` parser this step is `skip`. |
+| `model` | The served `model` matches the expectation (`--expect-model`, else `--model`) under the prefix rule below. `skip` when the backend does not report its model (the detail says when an expectation could therefore not be verified); `pass` with `served <model>` when no model was requested. |
 | `reply` | `final_message` contains `pong` (case-insensitive). With the `none` parser the text searched is `output.log` with every line containing the prompt removed, so an agent that merely echoes its input cannot pass. |
 | `cleanup` | The session is stopped if still alive, and removed unless `--keep` |
+
+**The model rule.** The `model` step catches a backend that served a different model than the one asked for: an org policy silently dropping a model, or Pi's pattern-based `--model` resolving to something else. Both names are lowercased; a provider prefix (the text before the last `/`) is split off; `.` becomes `-` in the model names. If both sides name a provider, the providers must be equal. The served model name must then equal the expected name, or start with it followed by `-`, `_`, `:` or `/`. So `claude-haiku-4.5` matches `claude-haiku-4-5-20251001` and `gpt-5` matches `gpt-5.6-luna`, but `gpt-5` does not match `gpt-50`, and a short alias such as `sonnet` does not match `claude-sonnet-5-5`. On a mismatch whose served name contains the expected name after its start (the alias case), the hint suggests naming the model from its start (`--model claude-sonnet`) or keeping `--model` and passing `--expect-model`; otherwise the hint is "the backend substituted a different model".
 
 `--static` runs only `profile` and `binary`, with no model call and no cost. It suits CI and install checks, and replaces a separate `backends --check`.
 
@@ -441,7 +445,7 @@ fastener stop <name> [--grace D]
 fastener rm <name> [--force]
 fastener prune [--older-than D]   # v0.2
 fastener backends [--json]
-fastener check <backend> | --all [--static] [--keep] [run options] [--json]
+fastener check <backend> | --all [--static] [--keep] [--expect-model M] [run options] [--json]
 fastener version [--json]
 # phase B
 fastener run <backend> --interactive [--remote] [--restart no|on-reboot] ...

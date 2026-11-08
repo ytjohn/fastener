@@ -79,6 +79,13 @@ func TestCheckPasses(t *testing.T) {
 			t.Errorf("step %s = %q", step, st)
 		}
 	}
+	// The fake reports no model unless FAKE_MODEL is set.
+	if st, _ := stepStatus(r[0], "model"); st != "skip" || stepDetail(r[0], "model") != "backend does not report its model" {
+		t.Errorf("model step = %q %q", st, stepDetail(r[0], "model"))
+	}
+	if n := stepNames(r[0]); strings.Join(n, ",") != "profile,binary,launch,exit,parse,model,reply,cleanup" {
+		t.Errorf("step order: %v", n)
+	}
 	if _, _, c := h.cmd("inspect", r[0].Session); c != 127 {
 		t.Error("check session not removed")
 	}
@@ -388,4 +395,47 @@ func TestCheckAllChecksBackendWithDefaultLevel(t *testing.T) {
 		}
 	}
 	t.Fatal("pi missing from --all")
+}
+
+func TestCheckModelStep(t *testing.T) {
+	h := newHarness(t)
+	r, code := h.check("fake", "--model", "claude-haiku", "--env", "FAKE_MODEL=claude-haiku-4-5-20251001")
+	if code != 0 || !r[0].Passed {
+		t.Fatalf("code %d: %+v", code, r)
+	}
+	if st, _ := stepStatus(r[0], "model"); st != "pass" || stepDetail(r[0], "model") != "requested claude-haiku, served claude-haiku-4-5-20251001" {
+		t.Errorf("model step %q %q", st, stepDetail(r[0], "model"))
+	}
+
+	r, code = h.check("fake", "--model", "flash-next", "--env", "FAKE_MODEL=glm-5.3-flash-next")
+	st, hint := stepStatus(r[0], "model")
+	if code != 1 || r[0].Passed || st != "fail" || !strings.Contains(stepDetail(r[0], "model"), "but the backend served glm-5.3-flash-next") {
+		t.Fatalf("mismatch: code %d, model %q: %+v", code, st, r[0].Steps)
+	}
+	if !strings.Contains(hint, "--model glm-5.3-flash-next") || !strings.Contains(hint, "--expect-model") {
+		t.Errorf("hint %q", hint)
+	}
+	for _, n := range stepNames(r[0]) {
+		if n == "reply" {
+			t.Errorf("reply ran after a model failure: %v", stepNames(r[0]))
+		}
+	}
+
+	r, code = h.check("fake", "--model", "flash-next", "--expect-model", "glm", "--env", "FAKE_MODEL=glm-5.3-flash-next")
+	if code != 0 || !r[0].Passed {
+		t.Fatalf("--expect-model: code %d: %+v", code, r[0].Steps)
+	}
+	if d := stepDetail(r[0], "model"); d != "expected glm, served glm-5.3-flash-next" {
+		t.Errorf("--expect-model detail %q", d)
+	}
+
+	r, code = h.check("fake", "--model", "claude-haiku")
+	if st, _ := stepStatus(r[0], "model"); code != 0 || st != "skip" || !strings.Contains(stepDetail(r[0], "model"), "could not be verified") {
+		t.Errorf("unreported model: code %d, %q %q", code, st, stepDetail(r[0], "model"))
+	}
+
+	r, code = h.check("fake", "--env", "FAKE_MODEL=claude-opus-5-5")
+	if st, _ := stepStatus(r[0], "model"); code != 0 || st != "pass" || stepDetail(r[0], "model") != "served claude-opus-5-5" {
+		t.Errorf("no expectation: code %d, %q %q", code, st, stepDetail(r[0], "model"))
+	}
 }

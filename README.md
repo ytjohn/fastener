@@ -13,7 +13,7 @@ License: Apache-2.0.
 
 ```bash
 go install github.com/ytjohn/fastener/cmd/fastener@latest
-fastener check claude --model haiku          # prove the backend works
+fastener check pi --model github-copilot/claude-haiku-4.5   # prove the backend works and served that model
 fastener run claude --cwd ~/proj --prompt "Summarize README.md" --max-runtime 10m
 fastener ps
 fastener wait <name>; fastener inspect <name>
@@ -37,6 +37,12 @@ launch, 127 for an unknown session).
 Backends are TOML profiles: `fastener backends` lists them. Add your own in
 `~/.config/fastener/backends/<name>.toml`; a file there replaces the built-in of
 the same name.
+
+`check` also compares the model the backend reports serving with `--model`. The served
+name must start with the requested one (`claude-haiku-4.5` matches
+`claude-haiku-4-5-20251001`), so a short alias such as `--model haiku` fails; pass
+`--expect-model claude-haiku` alongside it. A backend that does not report its model
+gets a `skip`.
 
 The permission level is `--permissions`, else the config's `default_permissions`, else
 the profile's own `default_permissions`, else `auto`. Pi has no permission system, so its

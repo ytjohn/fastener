@@ -31,7 +31,10 @@ type checkStep struct {
 	Hint   string `json:"hint,omitempty"`
 }
 
-type checkOpts struct{ static, keep, all bool }
+type checkOpts struct {
+	static, keep, all bool
+	expectModel       string // --expect-model; "" means use --model
+}
 
 type checkReport struct {
 	Backend string      `json:"backend"`
@@ -58,6 +61,8 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&o.Cwd, "cwd", "", "working directory (default: a fresh temporary directory)")
 	fs.StringVar(&o.Permissions, "permissions", "", "permission level (default: config, else the profile's default, else auto)")
 	fs.StringVar(&o.Model, "model", "", "model passed to the backend")
+	var expectModel string
+	fs.StringVar(&expectModel, "expect-model", "", "model the backend must report serving (default: --model)")
 	fs.StringVar(&o.EnvFile, "env-file", "", "KEY=VALUE file for the agent")
 	fs.StringVar(&o.Launcher, "launcher", "", "auto|setsid|systemd")
 	fs.DurationVar(&o.MaxRuntime, "max-runtime", 2*time.Minute, "limit for the check run")
@@ -96,7 +101,7 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	for _, b := range backends {
 		bo := o
 		bo.Backend = b
-		r := runCheck(bo, checkOpts{static: static, keep: keep, all: all}, stderr)
+		r := runCheck(bo, checkOpts{static: static, keep: keep, all: all, expectModel: expectModel}, stderr)
 		if !r.Passed && !r.Skipped {
 			code = exitFail
 			if r.unknown && !all {
@@ -273,6 +278,19 @@ func runCheck(o launchOptions, opts checkOpts, stderr io.Writer) (r checkReport)
 			return r
 		}
 		r.add("parse", stepPass, "conversation "+s.ConversationID, "")
+	}
+
+	expected, from := o.Model, "--model"
+	if opts.expectModel != "" {
+		expected, from = opts.expectModel, "--expect-model"
+	}
+	if expected == "" {
+		from = ""
+	}
+	ms := modelStep(expected, from, s.Model)
+	r.Steps = append(r.Steps, ms)
+	if ms.Status == stepFail {
+		return r
 	}
 
 	text := s.FinalMessage
