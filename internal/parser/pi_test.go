@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -26,7 +27,7 @@ func TestPiJSONFixture(t *testing.T) {
 	if got.AgentError == nil || *got.AgentError {
 		t.Errorf("AgentError = %v, want false", got.AgentError)
 	}
-	if got.Usage == nil || got.Usage.InputTokens == nil || *got.Usage.InputTokens != 10+0+7880 || got.Usage.OutputTokens == nil || *got.Usage.OutputTokens != 47 || got.Usage.CostUSD != 0.010095 {
+	if got.Usage == nil || got.Usage.InputTokens == nil || *got.Usage.InputTokens != 10+0+7880 || got.Usage.OutputTokens == nil || *got.Usage.OutputTokens != 47 || got.Usage.CostUSD == nil || *got.Usage.CostUSD != 0.010095 {
 		t.Errorf("Usage = %+v", got.Usage)
 	}
 	if got.ParseErrors != 0 {
@@ -105,7 +106,7 @@ func TestPiJSONUsageSummedAcrossRun(t *testing.T) {
 	p.Line([]byte(`{"type":"message_end","message":{"role":"assistant","provider":"p","model":"m1","content":[{"type":"text","text":"calling a tool"}],"stopReason":"toolUse","usage":{"input":10,"output":5,"cacheRead":100,"cacheWrite":1000,"cost":{"total":0.25}}}}`), &f)
 	p.Line([]byte(`{"type":"message_end","message":{"role":"toolResult","content":[{"type":"text","text":"ok"}],"usage":{"input":999,"output":999}}}`), &f)
 	p.Line([]byte(`{"type":"message_end","message":{"role":"assistant","provider":"p","model":"m2","content":[{"type":"text","text":"done"}],"stopReason":"stop","usage":{"input":20,"output":7,"cacheRead":1110,"cacheWrite":0,"cost":{"total":0.5}}}}`), &f)
-	if f.Usage == nil || f.Usage.InputTokens == nil || *f.Usage.InputTokens != 10+100+1000+20+1110 || f.Usage.OutputTokens == nil || *f.Usage.OutputTokens != 12 || f.Usage.CostUSD != 0.75 {
+	if f.Usage == nil || f.Usage.InputTokens == nil || *f.Usage.InputTokens != 10+100+1000+20+1110 || f.Usage.OutputTokens == nil || *f.Usage.OutputTokens != 12 || f.Usage.CostUSD == nil || *f.Usage.CostUSD != 0.75 {
 		t.Fatalf("Usage = %+v", f.Usage)
 	}
 	if f.Model != "p/m2" || f.FinalMessage != "done" || f.AgentError == nil || *f.AgentError {
@@ -147,5 +148,17 @@ func TestPiJSONAborted(t *testing.T) {
 	p.Line([]byte(`{"type":"message_end","message":{"role":"assistant","provider":"p","model":"m","content":[],"stopReason":"aborted","errorMessage":"cancelled by user"}}`), &f)
 	if f.AgentError == nil || !*f.AgentError || f.FinalMessage != "cancelled by user" {
 		t.Fatalf("aborted with errorMessage: %+v", f)
+	}
+}
+
+func TestPiJSONNoCostOmitsCostUSD(t *testing.T) {
+	p, _ := Get("pi-json")
+	var f Fields
+	p.Line([]byte(`{"type":"message_end","message":{"role":"assistant","provider":"p","model":"m","content":[{"type":"text","text":"hi"}],"stopReason":"stop","usage":{"input":3,"output":4}}}`), &f)
+	if f.Usage == nil || f.Usage.CostUSD != nil {
+		t.Fatalf("no reported cost must stay nil: %+v", f.Usage)
+	}
+	if b, _ := json.Marshal(f.Usage); string(b) != `{"input_tokens":3,"output_tokens":4}` {
+		t.Fatalf("usage JSON = %s", b)
 	}
 }
