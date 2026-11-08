@@ -36,7 +36,7 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 		if len(rest) == 0 {
 			return pos, nil
 		}
-		if consumed := len(args) - len(rest); consumed > 0 && args[consumed-1] == "--" && !isFlagValue(fs, args, consumed-1) {
+		if consumed := len(args) - len(rest); consumed > 0 && endsAtTerminator(fs, args[:consumed]) {
 			return append(pos, rest...), nil
 		}
 		pos = append(pos, rest[0])
@@ -44,24 +44,30 @@ func parseArgs(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-// isFlagValue reports whether args[i] was consumed as the value of the value
-// flag at args[i-1] (as in "--cwd --") rather than as the "--" terminator.
-func isFlagValue(fs *flag.FlagSet, args []string, i int) bool {
-	if i == 0 {
-		return false
+// endsAtTerminator reports whether the consumed args end exactly on a "--"
+// terminator. It walks them forward: a value flag without "=" takes the next
+// token as its value (advance 2), anything else advances 1. A "--" that was a
+// flag's value (as in "--cwd --") is skipped over by the walk, not matched.
+func endsAtTerminator(fs *flag.FlagSet, consumed []string) bool {
+	for i := 0; i < len(consumed); {
+		tok := consumed[i]
+		if tok == "--" {
+			return i == len(consumed)-1
+		}
+		i++
+		if !strings.HasPrefix(tok, "-") || strings.Contains(tok, "=") {
+			continue
+		}
+		f := fs.Lookup(strings.TrimLeft(tok, "-"))
+		if f == nil {
+			continue
+		}
+		if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
+			continue
+		}
+		i++ // the flag's value
 	}
-	prev := args[i-1]
-	if !strings.HasPrefix(prev, "-") || strings.Contains(prev, "=") {
-		return false
-	}
-	f := fs.Lookup(strings.TrimLeft(prev, "-"))
-	if f == nil {
-		return false
-	}
-	if b, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && b.IsBoolFlag() {
-		return false
-	}
-	return true
+	return false
 }
 
 func parseLabels(items []string) (map[string]string, error) {

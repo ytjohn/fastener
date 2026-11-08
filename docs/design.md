@@ -463,6 +463,7 @@ fastener install-restore
 ```
 
 - **`run`:**
+  - Flags and positionals may interleave. A bare `--` ends flag parsing: every later argument is positional, even one starting with `-`. (A `--` that is itself a value flag's value, as in `--cwd --`, is just that value.)
   - Detached by default; prints the session name, or the full status with `--json`.
   - `--follow` follows the logs after launch, then exits with the code `wait` would report for the session (the agent's exit code, 128+N for a signal, 125 for an abnormal end, including a session removed while following). (This is not `attach`, which is the phase B pty command.)
   - `--prompt` and `--prompt-file` are mutually exclusive. One is required for headless runs, and `--cwd` is required.
