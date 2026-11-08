@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "state": "exited",
+  "generation": 1,
+  "monitor": {
+    "pid": 4001,
+    "start_time": 5001
+  },
+  "agent": {
+    "pid": 4002,
+    "start_time": 5002
+  },
+  "pgid": 4002,
+  "boot_id": "00000000-0000-4000-8000-000000000001",
+  "started_at": "2026-01-02T03:04:07Z",
+  "ended_at": "2026-01-02T03:04:08Z",
+  "ended_by": "exit",
+  "exit_code": 0,
+  "conversation_id": "fake-session-0001",
+  "final_message": "pong",
+  "model": "fake-model-1",
+  "model_source": "server",
+  "agent_error": false,
+  "usage": {
+    "input_tokens": 3,
+    "output_tokens": 1,
+    "cost_usd": 0.001
+  },
+  "updated_at": "2026-01-02T03:04:09Z"
+}
