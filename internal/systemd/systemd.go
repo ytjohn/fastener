@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -100,11 +101,44 @@ func MainPID(unit string) (int, error) {
 
 // KillMain sends SIGTERM to the unit's main process only. It never stops the
 // unit: `systemctl stop` would signal the whole cgroup at once and bypass the
-// monitor's TERM / grace / KILL sequence. (--kill-who is the spelling every
-// systemd version accepts; newer ones also call it --kill-whom.)
+// monitor's TERM / grace / KILL sequence. Newer systemd names the option
+// --kill-whom (and still accepts --kill-who as an unambiguous prefix of it);
+// older systemd only knows --kill-who, so that is the fallback.
 func KillMain(unit string) error {
-	_, err := systemctl(queryTimeout, "kill", "--kill-who=main", "--signal=SIGTERM", unit)
+	_, err := systemctl(queryTimeout, "kill", "--kill-whom=main", "--signal=SIGTERM", unit)
+	if err != nil && strings.Contains(err.Error(), "unrecognized option") {
+		_, err = systemctl(queryTimeout, "kill", "--kill-who=main", "--signal=SIGTERM", unit)
+	}
 	return err
+}
+
+// KillAll sends SIGKILL to every process in the unit's cgroup. Only for a unit
+// that should not be running anything yet (a failed launch).
+func KillAll(unit string) error {
+	_, err := systemctl(queryTimeout, "kill", "--signal=SIGKILL", unit)
+	return err
+}
+
+// ResetFailed clears a unit's failed state, so it can be collected.
+func ResetFailed(unit string) error {
+	_, err := systemctl(queryTimeout, "reset-failed", unit)
+	return err
+}
+
+// Linger reports whether the calling user has lingering enabled (`loginctl
+// show-user <uid> -p Linger --value` is yes). Without it the user manager, and
+// every unit in it, stops when the user's last session ends.
+func Linger() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), ProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "loginctl", "show-user", strconv.Itoa(os.Getuid()), "-p", "Linger", "--value").Output()
+	if ctx.Err() != nil {
+		return false, fmt.Errorf("loginctl show-user: timed out after %s", ProbeTimeout)
+	}
+	if err != nil {
+		return false, fmt.Errorf("loginctl show-user: %w", err)
+	}
+	return strings.TrimSpace(string(out)) == "yes", nil
 }
 
 func parseProps(out string) map[string]string {
