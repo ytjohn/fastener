@@ -31,10 +31,13 @@ type checkStep struct {
 	Hint   string `json:"hint,omitempty"`
 }
 
+type checkOpts struct{ static, keep, all bool }
+
 type checkReport struct {
 	Backend string      `json:"backend"`
 	Passed  bool        `json:"passed"`
 	Session string      `json:"session,omitempty"`
+	Skipped bool        `json:"skipped,omitempty"`
 	Steps   []checkStep `json:"steps"`
 	unknown bool
 }
@@ -89,8 +92,8 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 	for _, b := range backends {
 		bo := o
 		bo.Backend = b
-		r := runCheck(bo, static, keep, stderr)
-		if !r.Passed {
+		r := runCheck(bo, checkOpts{static: static, keep: keep, all: all}, stderr)
+		if !r.Passed && !r.Skipped {
 			code = exitFail
 			if r.unknown && !all {
 				code = exitNotFound
@@ -124,7 +127,7 @@ func printCheck(w io.Writer, r checkReport) {
 
 // runCheck uses a named result so the deferred cleanup step lands in the
 // returned report (a deferred call runs after `return r` copies a plain result).
-func runCheck(o launchOptions, static, keep bool, stderr io.Writer) (r checkReport) {
+func runCheck(o launchOptions, opts checkOpts, stderr io.Writer) (r checkReport) {
 	r = checkReport{Backend: o.Backend}
 
 	p, err := prepare(o, checkPrompt)
@@ -135,6 +138,19 @@ func runCheck(o launchOptions, static, keep bool, stderr io.Writer) (r checkRepo
 			step = se.step
 		}
 		r.unknown = errors.Is(err, profile.ErrUnknownBackend)
+		if opts.all && errors.Is(err, profile.ErrNoPermissionLevel) {
+			// Not a failure under --all: the level was never requested for this backend.
+			level := o.Permissions
+			if cfg, cerr := config.Load(); level == "" && cerr == nil {
+				level = cfg.DefaultPermissions
+			}
+			if level == "" {
+				level = "auto"
+			}
+			r.Skipped = true
+			r.add("profile", stepSkip, fmt.Sprintf("does not define permission level %s; pass --permissions to check it", level), "")
+			return r
+		}
 		for _, s := range []string{"profile", "binary"} {
 			if s == step {
 				break
@@ -150,6 +166,7 @@ func runCheck(o launchOptions, static, keep bool, stderr io.Writer) (r checkRepo
 	if va := p.prof.Check.VersionArgs; len(va) > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		cmd := exec.CommandContext(ctx, p.argv0, va...)
+		cmd.WaitDelay = 2 * time.Second
 		cmd.Env = p.mergedEnv(o.Env)
 		out, err := cmd.CombinedOutput()
 		cancel()
@@ -160,32 +177,37 @@ func runCheck(o launchOptions, static, keep bool, stderr io.Writer) (r checkRepo
 		detail += " (" + firstLine(string(out)) + ")"
 	}
 	r.add("binary", stepPass, detail, "")
-	if static {
+	if opts.static {
 		r.Passed = true
 		return r
 	}
 
+	// The session and its temporary cwd are cleaned up by one deferred call,
+	// which is also the last step of the report.
+	var tmp string
+	var created *session.View
+	defer func() { r.cleanup(created, opts.keep, tmp) }()
 	if o.Cwd == "" {
-		tmp, err := os.MkdirTemp("", "fastener-check-")
-		if err != nil {
+		var err error
+		if tmp, err = os.MkdirTemp("", "fastener-check-"); err != nil {
 			r.add("launch", stepFail, err.Error(), "")
 			return r
 		}
-		defer os.RemoveAll(tmp)
 		o.Cwd = tmp
 	}
 	o.Prompt = checkPrompt
 	o.Labels = map[string]string{"fastener.check": "true"}
+	parserNone := p.rendered.Parser == "none"
 
 	v, err := launch(o, stderr)
 	if v != nil {
 		r.Session = v.Session.Name
-		defer r.cleanup(v, keep)
+		created = v
 	}
 	if err != nil {
 		hint, more := "", ""
 		if v != nil {
-			hint, more = diagnose(p.prof, v)
+			hint, more = diagnose(p.prof, v, parserNone)
 		}
 		r.add("launch", stepFail, joinDetail(err.Error(), more), hint)
 		return r
@@ -203,13 +225,13 @@ func runCheck(o launchOptions, static, keep bool, stderr io.Writer) (r checkRepo
 	}
 	s := v.Status
 	if s.EndedBy != session.EndedByExit || s.ExitCode == nil || *s.ExitCode != 0 {
-		hint, more := diagnose(p.prof, v)
+		hint, more := diagnose(p.prof, v, parserNone)
 		r.add("exit", stepFail, joinDetail(describeEnd(v), more), hint)
 		return r
 	}
 	r.add("exit", stepPass, "exit 0", "")
 
-	if p.rendered.Parser == "none" {
+	if parserNone {
 		r.add("parse", stepSkip, "backend has no parser", "")
 	} else {
 		var problems []string
@@ -226,21 +248,21 @@ func runCheck(o launchOptions, static, keep bool, stderr io.Writer) (r checkRepo
 			problems = append(problems, fmt.Sprintf("%d unparseable lines", s.ParseErrors))
 		}
 		if len(problems) > 0 {
-			hint, _ := diagnose(p.prof, v)
-			r.add("parse", stepFail, strings.Join(problems, "; "), hint)
+			hint, more := diagnose(p.prof, v, parserNone)
+			r.add("parse", stepFail, joinDetail(strings.Join(problems, "; "), more), hint)
 			return r
 		}
 		r.add("parse", stepPass, "conversation "+s.ConversationID, "")
 	}
 
 	text := s.FinalMessage
-	if p.rendered.Parser == "none" {
+	if parserNone {
 		b, _ := os.ReadFile(v.Dir.OutputLog())
-		text = string(b)
+		text = withoutPromptEcho(string(b), checkPrompt)
 	}
 	if !strings.Contains(strings.ToLower(text), "pong") {
-		hint, _ := diagnose(p.prof, v)
-		r.add("reply", stepFail, fmt.Sprintf("reply did not contain \"pong\": %q", truncate(strings.TrimSpace(text), 120)), hint)
+		hint, more := diagnose(p.prof, v, parserNone)
+		r.add("reply", stepFail, joinDetail(fmt.Sprintf("reply did not contain \"pong\": %q", truncate(strings.TrimSpace(text), 120)), more), hint)
 		return r
 	}
 	r.add("reply", stepPass, "pong", "")
@@ -248,23 +270,61 @@ func runCheck(o launchOptions, static, keep bool, stderr io.Writer) (r checkRepo
 	return r
 }
 
-// cleanup is deferred, so it always runs and is always the last step.
-func (r *checkReport) cleanup(v *session.View, keep bool) {
+// withoutPromptEcho drops every line containing the prompt text, so an agent
+// that merely echoes its input (cat, a verbose wrapper) cannot pass the reply step.
+func withoutPromptEcho(out, prompt string) string {
+	p := strings.ToLower(prompt)
+	var keep []string
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(strings.ToLower(line), p) {
+			keep = append(keep, line)
+		}
+	}
+	return strings.Join(keep, "\n")
+}
+
+// cleanup is deferred, so it always runs and is always the last step. v is nil
+// when launch produced no session; tmp is the temporary cwd ("" if the caller
+// supplied one).
+func (r *checkReport) cleanup(v *session.View, keep bool, tmp string) {
+	if v == nil {
+		if tmp != "" {
+			os.RemoveAll(tmp)
+		}
+		return
+	}
+	fail := func(detail string) {
+		r.add("cleanup", stepFail, detail, "")
+		r.Passed = false
+	}
 	if cur, err := loadView(v.Session.Name); err == nil && (cur.Alive() || len(cur.Orphans) > 0) {
 		if err := stopSession(cur, 0, "rm"); err != nil {
-			r.add("cleanup", stepFail, err.Error(), "")
-			r.Passed = false
+			detail := "session " + v.Session.Name + " left in place: " + err.Error()
+			if tmp != "" {
+				detail += "; temporary cwd kept at " + tmp
+			}
+			fail(detail)
 			return
 		}
 	}
 	if keep {
-		r.add("cleanup", stepPass, "kept "+v.Session.Name, "")
+		detail := "kept " + v.Session.Name
+		if tmp != "" {
+			detail += "; cwd " + tmp
+		}
+		r.add("cleanup", stepPass, detail, "")
 		return
 	}
 	if err := os.RemoveAll(string(v.Dir)); err != nil {
-		r.add("cleanup", stepFail, err.Error(), "")
-		r.Passed = false
+		detail := err.Error()
+		if tmp != "" {
+			detail += "; temporary cwd kept at " + tmp
+		}
+		fail(detail)
 		return
+	}
+	if tmp != "" {
+		os.RemoveAll(tmp)
 	}
 	r.add("cleanup", stepPass, "removed", "")
 }
@@ -312,27 +372,39 @@ func describeEnd(v *session.View) string {
 	return "ended_by=" + s.EndedBy
 }
 
-// diagnose matches the profile's patterns against everything the agent said.
-// It returns a hint, or, when nothing matches, the stderr tail as extra detail.
-func diagnose(p *profile.Profile, v *session.View) (hint, detail string) {
+// diagnose picks a hint for a failed run. The corpus depends on the source, so
+// a model's ordinary reply can never trigger one:
+//   - stderr.log and status.error: always;
+//   - final_message: only when the agent reported an error, or the parser is none;
+//   - output.log: only when the parser is none.
+//
+// A limit ending gets the timeout hint before any profile pattern. The stderr
+// tail (last 20 lines) is returned as detail whenever there is one.
+func diagnose(p *profile.Profile, v *session.View, parserNone bool) (hint, detail string) {
 	errText, _ := os.ReadFile(v.Dir.StderrLog())
-	outText, _ := os.ReadFile(v.Dir.OutputLog())
-	corpus := []string{string(errText), string(outText), v.Status.FinalMessage, v.Status.Error}
+	if tail := lastLines(string(errText), 20); tail != "" {
+		detail = "stderr:\n" + tail
+	}
+	if v.Status.EndedBy == session.EndedByLimit {
+		return timeoutHint, detail
+	}
+	corpus := []string{string(errText), v.Status.Error}
+	if parserNone || (v.Status.AgentError != nil && *v.Status.AgentError) {
+		corpus = append(corpus, v.Status.FinalMessage)
+	}
+	if parserNone {
+		outText, _ := os.ReadFile(v.Dir.OutputLog())
+		corpus = append(corpus, string(outText))
+	}
 	for _, d := range p.Check.Diagnose {
 		re := regexp.MustCompile(d.Match) // validated at load
 		for _, c := range corpus {
 			if c != "" && re.MatchString(c) {
-				return d.Hint, ""
+				return d.Hint, detail
 			}
 		}
 	}
-	if v.Status.EndedBy == session.EndedByLimit {
-		return timeoutHint, ""
-	}
-	if tail := lastLines(string(errText), 20); tail != "" {
-		return "", "stderr:\n" + tail
-	}
-	return "", ""
+	return "", detail
 }
 
 func joinDetail(a, b string) string {

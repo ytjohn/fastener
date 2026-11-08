@@ -2,6 +2,10 @@ package cli_test
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -10,6 +14,7 @@ type checkJSON struct {
 	Backend string `json:"backend"`
 	Passed  bool   `json:"passed"`
 	Session string `json:"session"`
+	Skipped bool   `json:"skipped"`
 	Steps   []struct {
 		Name   string `json:"name"`
 		Status string `json:"status"`
@@ -26,6 +31,32 @@ func (h *harness) check(args ...string) ([]checkJSON, int) {
 		h.t.Fatalf("check output not JSON (exit %d): %s\n%s", code, out, errOut)
 	}
 	return r, code
+}
+
+func stepDetail(r checkJSON, name string) string {
+	for _, s := range r.Steps {
+		if s.Name == name {
+			return s.Detail
+		}
+	}
+	return ""
+}
+
+func stepNames(r checkJSON) []string {
+	var n []string
+	for _, s := range r.Steps {
+		n = append(n, s.Name)
+	}
+	return n
+}
+
+// writeBuiltinStandIns shadows claude/codex/pi with fake-backed profiles (pi
+// defines only "skip"), so --all tests do not depend on installed CLIs.
+func (h *harness) writeBuiltinStandIns() {
+	for _, n := range []string{"claude", "codex"} {
+		h.writeProfile(n, strings.Replace(fmt.Sprintf(fakeProfile, fakeBin), `name    = "fake"`, `name    = "`+n+`"`, 1))
+	}
+	h.writeProfile("pi", fmt.Sprintf("schema_version = 1\nname = \"pi\"\ncommand = %q\n[headless]\nargs = []\nprompt = \"stdin\"\nparser = \"none\"\n[permissions]\nskip = []\n", fakeBin))
 }
 
 func stepStatus(r checkJSON, name string) (string, string) {
@@ -51,6 +82,12 @@ func TestCheckPasses(t *testing.T) {
 	if _, _, c := h.cmd("inspect", r[0].Session); c != 127 {
 		t.Error("check session not removed")
 	}
+	if n := stepNames(r[0]); n[len(n)-1] != "cleanup" {
+		t.Errorf("cleanup is not the last step: %v", n)
+	}
+	if m, _ := filepath.Glob(filepath.Join(h.work, "fastener-check-*")); len(m) != 0 {
+		t.Errorf("temporary cwd left behind: %v", m)
+	}
 }
 
 func TestCheckWrongReply(t *testing.T) {
@@ -75,6 +112,14 @@ func TestCheckDiagnosesKnownFailure(t *testing.T) {
 	st, hint := stepStatus(r[0], "exit")
 	if code != 1 || st != "fail" || hint != "auth: log in to fake" {
 		t.Fatalf("code %d, exit=%q hint=%q", code, st, hint)
+	}
+	if d := stepDetail(r[0], "exit"); !strings.Contains(d, "FAKE-NOT-LOGGED-IN") {
+		t.Errorf("matched hint lost the stderr tail: %q", d)
+	}
+	for _, n := range stepNames(r[0]) {
+		if n == "parse" || n == "reply" {
+			t.Errorf("step %s ran after an exit failure: %v", n, stepNames(r[0]))
+		}
 	}
 }
 
@@ -109,13 +154,117 @@ func TestCheckUnknownBackend(t *testing.T) {
 
 func TestCheckAllStaticIncludesFake(t *testing.T) {
 	h := newHarness(t)
-	r, _ := h.check("--all", "--static") // built-ins may fail if their CLIs are absent
+	h.writeBuiltinStandIns()
+	r, code := h.check("--all", "--static")
+	if code != 0 {
+		t.Fatalf("exit %d: %+v", code, r)
+	}
 	for _, rep := range r {
 		if rep.Backend == "fake" && rep.Passed {
 			return
 		}
 	}
 	t.Fatalf("fake missing or failing in --all: %+v", r)
+}
+
+func TestCheckAllSkipsUndefinedPermissionLevel(t *testing.T) {
+	h := newHarness(t)
+	h.writeBuiltinStandIns()
+	r, code := h.check("--all", "--static")
+	if code != 0 {
+		t.Fatalf("--all exit %d: %+v", code, r)
+	}
+	var pi *checkJSON
+	for i := range r {
+		if r[i].Backend == "pi" {
+			pi = &r[i]
+		}
+	}
+	if pi == nil || !pi.Skipped || pi.Passed || len(pi.Steps) != 1 {
+		t.Fatalf("pi report: %+v", pi)
+	}
+	if st, _ := stepStatus(*pi, "profile"); st != "skip" || !strings.Contains(stepDetail(*pi, "profile"), "pass --permissions") {
+		t.Errorf("profile step: %+v", pi.Steps)
+	}
+	// A single explicit check of the same backend is a real failure.
+	r, code = h.check("pi", "--static")
+	if code != 1 || r[0].Skipped {
+		t.Fatalf("single pi check: code %d, %+v", code, r)
+	}
+	// And --permissions skip checks it properly under --all.
+	r, code = h.check("--all", "--static", "--permissions", "skip")
+	if code != 0 {
+		t.Fatalf("--all --permissions skip: %d %+v", code, r)
+	}
+}
+
+func TestCheckEchoedPromptDoesNotPass(t *testing.T) {
+	cat, err := exec.LookPath("cat")
+	if err != nil {
+		t.Skip("no cat")
+	}
+	h := newHarness(t)
+	h.writeProfile("echo", fmt.Sprintf("schema_version = 1\nname = \"echo\"\ncommand = %q\n[headless]\nargs = []\nprompt = \"stdin\"\nparser = \"none\"\n[permissions]\nauto = []\n", cat))
+	r, code := h.check("echo")
+	if st, _ := stepStatus(r[0], "reply"); code != 1 || st != "fail" {
+		t.Fatalf("code %d, reply %q: %+v", code, st, r[0].Steps)
+	}
+}
+
+func TestCheckNoneParser(t *testing.T) {
+	h := newHarness(t)
+	h.writeProfile("fakenone", strings.NewReplacer(`parser = "claude-stream-json"`, `parser = "none"`, `name    = "fake"`, `name    = "fakenone"`).Replace(fmt.Sprintf(fakeProfile, fakeBin)))
+	r, code := h.check("fakenone")
+	if code != 0 {
+		t.Fatalf("code %d: %+v", code, r[0].Steps)
+	}
+	if st, _ := stepStatus(r[0], "parse"); st != "skip" {
+		t.Errorf("parse = %q", st)
+	}
+	if st, _ := stepStatus(r[0], "reply"); st != "pass" {
+		t.Errorf("reply = %q", st)
+	}
+}
+
+func TestCheckTimeoutHintBeatsPatternsOnTokenCounts(t *testing.T) {
+	h := newHarness(t)
+	h.writeProfile("tok", `schema_version = 1
+name = "tok"
+command = "sh"
+[headless]
+args = ["-c", "echo '{\"input_tokens\":14012}'; exec sleep 30"]
+prompt = "stdin"
+parser = "none"
+[permissions]
+auto = []
+[check]
+diagnose = [ { match = '401', hint = "auth: wrongly matched" } ]
+`)
+	r, _ := h.check("tok", "--max-runtime", "1s", "--grace", "1s")
+	if _, hint := stepStatus(r[0], "exit"); !strings.Contains(hint, "interactive input") {
+		t.Fatalf("hint %q", hint)
+	}
+}
+
+func TestCheckModelReplyNeverTriggersHint(t *testing.T) {
+	h := newHarness(t)
+	r, _ := h.check("fake", "--env", "FAKE_REPLY=FAKE-NOT-LOGGED-IN")
+	if st, hint := stepStatus(r[0], "reply"); st != "fail" || hint != "" {
+		t.Fatalf("reply %q hint %q", st, hint)
+	}
+}
+
+func TestCheckKeepKeepsTempCwd(t *testing.T) {
+	h := newHarness(t)
+	r, code := h.check("fake", "--keep")
+	if code != 0 {
+		t.Fatalf("code %d", code)
+	}
+	m, _ := filepath.Glob(filepath.Join(h.work, "fastener-check-*"))
+	if len(m) != 1 || !strings.Contains(stepDetail(r[0], "cleanup"), m[0]) {
+		t.Fatalf("cwd %v, cleanup detail %q", m, stepDetail(r[0], "cleanup"))
+	}
+	_ = os.RemoveAll(m[0])
 }
 
 func TestCheckRejectsBadFlags(t *testing.T) {

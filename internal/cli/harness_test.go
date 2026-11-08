@@ -92,6 +92,7 @@ func (h *harness) cmd(args ...string) (string, string, int) {
 	c.Env = append([]string{
 		"FASTENER_STATE_DIR=" + h.state, "FASTENER_CONFIG_DIR=" + h.config,
 		"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"),
+		"TMPDIR=" + h.work,
 	}, h.extraEnv...)
 	var o, e bytes.Buffer
 	c.Stdout, c.Stderr = &o, &e

@@ -307,7 +307,7 @@ url_pattern = 'https://claude\.ai/\S+'
 - **Options:** the same as `run` (`--model`, `--permissions`, `--env-file`, `--env`, `--cwd`, `--launcher`, `--max-runtime`). So `fastener check pi --model X` tests that exact combination.
 - **Other flags:**
   - `--keep` keeps the session for inspection; by default it is removed after the check.
-  - `--all` checks every resolvable backend.
+  - `--all` checks every resolvable backend. A backend whose profile does not define the resolved permission level is reported as one `profile` step with status `skip` (and `skipped: true` in JSON), not a failure; `--all` exits 0 when every non-skipped backend passed. An explicit `check <backend>` for it still fails.
   - `--static` skips the model call.
   - `--json` gives the step-by-step result.
 
@@ -325,13 +325,13 @@ url_pattern = 'https://claude\.ai/\S+'
 
 `--static` runs only `profile` and `binary`, with no model call and no cost. It suits CI and install checks, and replaces a separate `backends --check`.
 
-**Diagnosis.** On failure, the profile's `[check].diagnose` patterns (regexes) are matched against `stderr.log`, `output.log` and the parser's `final_message`. The first match's `hint` is printed. This turns known failures into actionable messages. Examples:
+**Diagnosis.** On failure, the profile's `[check].diagnose` patterns (regexes) are matched against a corpus that depends on the source, so a model's ordinary reply never triggers a hint: `stderr.log` and the status `error` always; `final_message` only when the agent reported an error or the parser is `none`; `output.log` only when the parser is `none`. A `limit` ending gets the timeout hint before any profile pattern. Otherwise the first match's `hint` is printed, and the last 20 lines of `stderr.log` are always included as detail when present. This turns known failures into actionable messages. Examples:
 - Claude logged out: "auth: run `claude` interactively and log in".
 - A provider no longer serves Pi's default model: "model unavailable: pass --model, or update the backend's default model".
 
 Built-in fallbacks:
 - A `limit` ending: "timed out: the agent may be waiting for interactive input (for example a login prompt)".
-- Any other unmatched failure: the last 20 lines of `stderr.log`.
+- Any other unmatched failure: the last 20 lines of `stderr.log` (no hint).
 
 `diagnose` entries are data and ship in built-in profiles. Adding one for a newly seen failure is a profile PR.
 
