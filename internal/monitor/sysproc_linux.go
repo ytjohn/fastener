@@ -28,3 +28,17 @@ func waitExitNoReap(pid int) {
 		}
 	}
 }
+
+// exitedNoReap reports, without blocking or reaping, whether pid has already
+// exited (it is then a zombie). It sees an exit before the waiter goroutine
+// has published it on exitPending.
+func exitedNoReap(pid int) bool {
+	var info unix.Siginfo
+	for {
+		err := unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT|unix.WNOHANG, nil)
+		if err == unix.EINTR {
+			continue
+		}
+		return err == nil && info.Signo != 0
+	}
+}

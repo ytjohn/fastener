@@ -3,7 +3,6 @@
 package monitor
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -50,17 +49,9 @@ func TestExitBeatsSignal(t *testing.T) {
 			t.Fatal(err)
 		}
 		m.beforeWait = func(pid int) {
-			waitFor(t, "agent zombie", func() bool {
-				stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-				if err != nil {
-					return false
-				}
-				i := strings.LastIndex(string(stat), ") ")
-				return i >= 0 && strings.HasPrefix(string(stat)[i+2:], "Z")
-			})
-			// the zombie is visible slightly before the monitor's waiter goroutine
-			// has published the exit; let it, so the test is about select order only
-			time.Sleep(100 * time.Millisecond)
+			// /proc shows Z as soon as the thread-group leader dies, even while other
+			// threads of the agent still run; waitid readiness means fully exited.
+			waitFor(t, "agent exited", func() bool { return exitedNoReap(pid) })
 			sigs <- syscall.SIGTERM
 		}
 		done := make(chan int, 1)

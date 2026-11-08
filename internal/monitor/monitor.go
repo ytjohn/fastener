@@ -274,8 +274,12 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 		case <-exitPending:
 			return true
 		default:
-			return false
 		}
+		if exitedNoReap(pid) {
+			<-exitPending // the waiter is about to publish it; keep the reap ordering
+			return true
+		}
+		return false
 	}
 	if m.beforeWait != nil {
 		m.beforeWait(pid) // test hook: lets a test make exit and signal ready together

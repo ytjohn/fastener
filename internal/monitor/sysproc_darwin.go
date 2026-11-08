@@ -15,3 +15,5 @@ func agentSysProcAttr() *syscall.SysProcAttr {
 const pinsZombie = false
 
 func waitExitNoReap(pid int) {}
+
+func exitedNoReap(pid int) bool { return false }
