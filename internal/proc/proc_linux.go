@@ -69,6 +69,16 @@ func StartTime(pid int) (uint64, error) {
 	return start, nil
 }
 
+// IsZombie reports whether pid has exited but not been reaped yet. A pid with
+// no process at all is ErrNoProcess.
+func IsZombie(pid int) (bool, error) {
+	state, _, _, err := readStat(pid)
+	if err != nil {
+		return false, err
+	}
+	return deadState(state), nil
+}
+
 func PGID(pid int) (int, error) {
 	_, pgid, _, err := readStat(pid)
 	return pgid, err

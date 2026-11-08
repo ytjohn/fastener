@@ -51,6 +51,16 @@ func pgidStart(pid int) (int, uint64, error) {
 	return int(k.Eproc.Pgid), uint64(tv.Sec)*1_000_000 + uint64(tv.Usec), nil
 }
 
+// IsZombie reports whether pid has exited but not been reaped yet (p_stat is
+// SZOMB). A pid with no process at all is ErrNoProcess.
+func IsZombie(pid int) (bool, error) {
+	k, err := kinfo(pid)
+	if err != nil {
+		return false, err
+	}
+	return k.Proc.P_stat == sZomb, nil
+}
+
 func PGID(pid int) (int, error) {
 	k, err := kinfo(pid)
 	if err != nil {

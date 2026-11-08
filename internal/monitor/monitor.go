@@ -313,6 +313,8 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 
 	// Linux delivers Pdeathsig when the spawning *thread* exits (golang/go#27505),
 	// so spawn and wait on one locked thread that lives as long as the agent.
+	// macOS has no Pdeathsig but uses the same shape; on both, cmd.Wait is the
+	// only reaper.
 	// A stop or signal that arrived during setup is recorded without spawning.
 	if _, ok := m.stopRequest(); ok {
 		pw.Close()
@@ -334,7 +336,7 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	default:
 	}
 	started := make(chan error, 1)
-	exitPending := make(chan struct{}, 1) // agent is dead; on Linux still an unreaped zombie
+	exitPending := make(chan struct{}, 1) // agent is dead; still an unreaped zombie when pinsZombie
 	reapNow := make(chan struct{})        // closed once we are done signalling the group
 	exited := make(chan *os.ProcessState, 1)
 	go func() {
@@ -459,7 +461,8 @@ func (m *monitor) requestGrace(req session.StopRequest) time.Duration {
 
 // terminate sends SIGTERM to the agent's process group, waits up to grace for
 // the agent to die, then SIGKILLs the group. The agent is not reaped until the
-// caller closes reapNow, so (on Linux) its pgid cannot be reused meanwhile. It
+// caller closes reapNow, so (with pinsZombie) its pgid cannot be reused
+// meanwhile. It
 // returns once exitPending has been consumed.
 //
 // While it waits, a further signal with a stop request newer than last
