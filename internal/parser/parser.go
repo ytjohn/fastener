@@ -11,7 +11,11 @@ type Fields struct {
 	FinalMessage   string `json:"final_message,omitempty"`
 	// Model is the model the backend reports it actually served: "provider/model"
 	// when the backend names the provider, else the bare model id.
-	Model       string `json:"model,omitempty"`
+	Model string `json:"model,omitempty"`
+	// ModelSource says who reported Model: "server" (the API response named
+	// it) or "client" (the agent CLI recorded the id it requested, so a
+	// provider-side substitution would not show). Empty when Model is.
+	ModelSource string `json:"model_source,omitempty"`
 	AgentError  *bool  `json:"agent_error,omitempty"`
 	Usage       *Usage `json:"usage,omitempty"`
 	ParseErrors int    `json:"parse_errors,omitempty"`

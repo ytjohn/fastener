@@ -119,7 +119,7 @@ This is the record that lets the CLI judge whether a monitor is alive before the
   - `boot_id`
 - `started_at`, `ended_at`
 - **Exit facts:** `ended_by`, `exit_code` (absent when a signal killed the agent), `signal` (the signal name that terminated the agent, if any), `error`
-- **Parser fields** (each optional; omitted when unknown): `conversation_id`, `final_message` (capped at 64 KiB), `model` (the model the backend says it served), `agent_error`, `usage` {`input_tokens`, `output_tokens`, `cost_usd`} (present only when the backend reported usage), `parse_errors`; `remote_url` arrives with phase B
+- **Parser fields** (each optional; omitted when unknown): `conversation_id`, `final_message` (capped at 64 KiB), `model` (the model the backend says it served; absent after an agent error), `model_source` (`server` or `client`), `agent_error`, `usage` {`input_tokens`, `output_tokens`, `cost_usd`} (present only when the backend reported usage), `parse_errors`; `remote_url` arrives with phase B
 
 **The monitor writes its own identity first.** Right after it loads its plan, before it checks for a stop request, spawns anything or can fail in any other way, the monitor writes `status.json` once (state `starting`, with its `monitor` identity and `boot_id`). Each generation's status is built fresh; nothing is carried over from a previous generation. This shrinks the window in which no record identifies a live monitor.
 
@@ -384,13 +384,19 @@ Phase B adds `check --interactive [--remote]`. It launches with a pty, confirms 
 Named Go functions selected by profile. v0.1 ships `claude-stream-json`, `pi-json` and `none`; `codex-jsonl` arrives in v0.2 (Codex uses `none` until then, so its `parse` step is `skip` and `reply` searches `output.log`).
 
 - **`claude-stream-json`** (`claude -p --output-format stream-json --verbose`): `conversation_id` from any event's `session_id`; `model` from the `system/init` event (a bare model id); `final_message`, `agent_error` (`is_error`) and `usage` from the `result` event.
-- **`pi-json`** (`pi -p --mode json`): `conversation_id` from the `session` event's `id`. `model`, `final_message` and `agent_error` come from the last assistant `message_end`: `model` is `provider/model`; `final_message` is the concatenated `text` content blocks (`thinking` blocks are skipped), or `errorMessage` when `stopReason` is `error`; `agent_error` is `stopReason == "error"`. `usage` is summed over every assistant `message_end` in the run (each reports one API call): `input + cacheRead + cacheWrite` input tokens, `output` output tokens and `cost.total`. Pi exits 0 even when the model call failed, so `agent_error` is what catches it.
+- **`pi-json`** (`pi -p --mode json`): `conversation_id` from the `session` event's `id`. `model`, `model_source`, `final_message` and `agent_error` come from the last assistant `message_end`:
+  - `agent_error` is `stopReason` `error` or `aborted` (as pi's print mode treats them);
+  - `final_message` is the concatenated `text` content blocks (`thinking` blocks are skipped); on `error` it is `errorMessage`, and on `aborted` it is `errorMessage` or else `Request aborted`;
+  - `model` is `provider/` plus `responseModel` when present, else `model`. Pi's adapters differ (pi 0.84.4): `anthropic-messages` overwrites `model` with the server's id; `openai-completions` keeps the requested id in `model` and sets `responseModel` only when the server reported a different one; `openai-responses` records only the requested id. So `model_source` is `client` for `api == "openai-responses"` and `server` otherwise. After an agent error `model` and `model_source` are cleared, since the attempted model never answered, and a last message without a model clears them too.
+
+  `usage` is summed over every assistant `message_end` in the run (each reports one API call): `input + cacheRead + cacheWrite` input tokens, `output` output tokens and `cost.total`. Pi exits 0 even when the model call failed, so `agent_error` is what catches it.
 
 - Run inside the monitor, streaming, one line at a time, while raw output is written to `output.log` unchanged.
 - **Extracted fields** (all optional, omitted when unknown):
   - `conversation_id`
   - `final_message`
-  - `model`: the model the backend reports it actually served, `provider/model` when the backend names the provider, else the bare model id. It can differ from the requested `--model` (an alias or pattern resolved to a full id, or a substitution); `check` compares the two (§6.1).
+  - `model`: the model the backend reports it actually served, `provider/model` when the backend names the provider, else the bare model id. It can differ from the requested `--model` (an alias or pattern resolved to a full id, or a substitution); `check` compares the two (§6.1). Absent after an agent error.
+  - `model_source`: `server` when the API response named the model, `client` when the agent CLI only recorded the id it requested (a provider-side substitution would not show).
   - `agent_error`: the agent's own report of failure, independent of the exit code
   - `usage` {`input_tokens`, `output_tokens`, `cost_usd`}: emitted only when the backend reported usage. `input_tokens` is all input tokens for the run, including cache reads and writes (Anthropic's own `usage.input_tokens` excludes cache tokens).
 - Unknown event types are ignored. A malformed line increments `parse_errors`. Parser failure never affects the session: a parser panic is recovered, logged to `monitor.log` and counted in `parse_errors`. A line longer than 16 MB is written to `output.log` but not parsed (counted in `parse_errors`); the cap limits parsing, not memory. `final_message` is capped at 64 KiB.

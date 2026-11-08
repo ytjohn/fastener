@@ -8,11 +8,19 @@ import (
 )
 
 // piJSON parses `pi -p --mode json`. The "session" event carries the
-// conversation id. Each assistant "message_end" carries the served provider
-// and model, its content blocks, stopReason (and errorMessage on "error") and
-// its own usage. Model, final message and error come from the last one; usage
-// is summed over all of them. Streaming events (message_update and friends) are
-// ignored.
+// conversation id. Each assistant "message_end" carries the provider and
+// model, its content blocks, stopReason (and errorMessage on "error" or
+// "aborted") and its own usage. Model, final message and error come from the
+// last one; usage is summed over all of them. Streaming events (message_update
+// and friends) are ignored.
+//
+// Which model answered depends on pi's API adapter (pi 0.84.4):
+//   - anthropic-messages overwrites message.model with the server's id;
+//   - openai-completions keeps the requested id in model and sets
+//     responseModel only when the server reported a different one;
+//   - openai-responses records only the requested id (client-reported).
+//
+// After an agent error Model is cleared: the attempted model never answered.
 type piJSON struct{}
 
 type piEvent struct {
@@ -22,12 +30,14 @@ type piEvent struct {
 }
 
 type piMessage struct {
-	Role         string `json:"role"`
-	Provider     string `json:"provider"`
-	Model        string `json:"model"`
-	StopReason   string `json:"stopReason"`
-	ErrorMessage string `json:"errorMessage"`
-	Content      []struct {
+	Role          string `json:"role"`
+	API           string `json:"api"`
+	ResponseModel string `json:"responseModel"`
+	Provider      string `json:"provider"`
+	Model         string `json:"model"`
+	StopReason    string `json:"stopReason"`
+	ErrorMessage  string `json:"errorMessage"`
+	Content       []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"content"`
@@ -73,14 +83,22 @@ func (piJSON) Line(line []byte, f *Fields) bool {
 
 func piAssistant(m *piMessage, f *Fields) bool {
 	before := *f
-	if m.Model != "" {
-		f.Model = m.Model
+	isErr := m.StopReason == "error" || m.StopReason == "aborted"
+	f.AgentError = &isErr
+	f.Model, f.ModelSource = "", ""
+	served := m.Model
+	if m.ResponseModel != "" {
+		served = m.ResponseModel
+	}
+	if served != "" && !isErr {
+		f.Model, f.ModelSource = served, "server"
 		if m.Provider != "" {
-			f.Model = m.Provider + "/" + m.Model
+			f.Model = m.Provider + "/" + served
+		}
+		if m.API == "openai-responses" {
+			f.ModelSource = "client"
 		}
 	}
-	isErr := m.StopReason == "error"
-	f.AgentError = &isErr
 	var text strings.Builder
 	for _, c := range m.Content {
 		if c.Type == "text" {
@@ -88,8 +106,11 @@ func piAssistant(m *piMessage, f *Fields) bool {
 		}
 	}
 	f.FinalMessage = text.String()
-	if isErr && m.ErrorMessage != "" {
+	switch {
+	case isErr && m.ErrorMessage != "":
 		f.FinalMessage = m.ErrorMessage
+	case m.StopReason == "aborted":
+		f.FinalMessage = "Request aborted" // as pi's print mode reports it
 	}
 	if m.Usage != nil {
 		// Usage is per API call; sum it so multi-turn runs count every call.
@@ -104,7 +125,7 @@ func piAssistant(m *piMessage, f *Fields) bool {
 		}
 		f.Usage = &u
 	}
-	return f.Model != before.Model || f.FinalMessage != before.FinalMessage ||
+	return f.Model != before.Model || f.ModelSource != before.ModelSource || f.FinalMessage != before.FinalMessage ||
 		before.AgentError == nil || *before.AgentError != isErr ||
 		(f.Usage != nil && (before.Usage == nil || *f.Usage != *before.Usage))
 }
