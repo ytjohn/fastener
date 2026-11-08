@@ -33,11 +33,14 @@ import (
 const drainTimeout = 2 * time.Second
 
 // Lines longer than maxParseLine are logged but not parsed (counted as parse
-// errors), so a huge tool result is never unmarshalled while holding m.mu.
-// (ReadBytes still allocates the whole line; this caps parsing, not memory.)
+// errors). The pump accumulates at most maxParseLine bytes of a line, so this
+// caps memory as well as parsing; the rest of an overlong line is streamed to
+// output.log without being held. A line buffer that grew past keepLineCap is
+// released after its line instead of being kept for reuse.
 // final_message is capped so status.json stays small.
 const (
 	maxParseLine    = 16 << 20
+	keepLineCap     = 1 << 20
 	maxFinalMessage = 64 << 10
 )
 
@@ -491,7 +494,7 @@ func exitFacts(s *session.Status, ps *os.ProcessState) {
 	s.ExitCode = &code
 }
 
-// pump copies agent stdout to output.log unchanged and feeds the parser.
+// lineSafe feeds one line to the parser, recovering a panic; callers hold m.mu.
 func (m *monitor) lineSafe(p parser.Parser, line []byte) (changed bool) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -503,33 +506,84 @@ func (m *monitor) lineSafe(p parser.Parser, line []byte) (changed bool) {
 	return p.Line(line, &m.st.Fields)
 }
 
+// pump copies agent stdout to output.log unchanged and feeds the parser one
+// line at a time. Every byte is written through as it is read. A line is
+// accumulated for the parser only up to maxParseLine bytes; once it is longer
+// the pump stops accumulating, keeps writing the rest straight through,
+// counts one parse error, and resumes parsing after the next newline. So
+// memory stays bounded however long a line is.
 func (m *monitor) pump(r io.Reader, out io.Writer, p parser.Parser) {
 	br := bufio.NewReaderSize(r, 64*1024)
+	var line []byte
+	overlong := false
 	for {
-		line, err := br.ReadBytes('\n')
-		if len(line) > 0 {
-			_, _ = out.Write(line)
-			m.mu.Lock()
-			switch {
-			case len(line) > maxParseLine:
-				m.st.ParseErrors++
-				m.dirty = true
-			case m.lineSafe(p, bytes.TrimRight(line, "\r\n")):
-				if len(m.st.FinalMessage) > maxFinalMessage {
-					i := maxFinalMessage
-					for i > 0 && !utf8.RuneStart(m.st.FinalMessage[i]) {
-						i-- // never split a UTF-8 sequence
-					}
-					m.st.FinalMessage = m.st.FinalMessage[:i]
+		chunk, err := br.ReadSlice('\n') // valid only until the next read
+		if len(chunk) > 0 {
+			_, _ = out.Write(chunk)
+			if !overlong {
+				if len(line)+len(chunk) > maxParseLine {
+					overlong, line = true, nil
+				} else {
+					line = appendCapped(line, chunk)
 				}
-				m.dirty = true
 			}
-			m.mu.Unlock()
+		}
+		if err == bufio.ErrBufferFull {
+			continue // the line goes on
+		}
+		if err == nil || len(line) > 0 || overlong { // a newline, or a last unterminated line
+			m.endLine(p, line, overlong)
 		}
 		if err != nil {
 			return
 		}
+		overlong = false
+		if cap(line) > keepLineCap {
+			line = nil
+		} else {
+			line = line[:0]
+		}
 	}
+}
+
+// appendCapped appends chunk to line, growing it by doubling but never past
+// maxParseLine (the caller guarantees the result fits).
+func appendCapped(line, chunk []byte) []byte {
+	need := len(line) + len(chunk)
+	if need > cap(line) {
+		n := max(2*cap(line), need, 4096)
+		n = min(n, maxParseLine)
+		grown := make([]byte, len(line), n)
+		copy(grown, line)
+		line = grown
+	}
+	return append(line, chunk...)
+}
+
+// endLine records one complete line: a parse error if it was overlong, else
+// the parser's update.
+func (m *monitor) endLine(p parser.Parser, line []byte, overlong bool) {
+	if overlong {
+		m.log.Printf("stdout line longer than %d bytes: written to output.log, not parsed", maxParseLine)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if overlong {
+		m.st.ParseErrors++
+		m.dirty = true
+		return
+	}
+	if !m.lineSafe(p, bytes.TrimRight(line, "\r\n")) {
+		return
+	}
+	if len(m.st.FinalMessage) > maxFinalMessage {
+		i := maxFinalMessage
+		for i > 0 && !utf8.RuneStart(m.st.FinalMessage[i]) {
+			i-- // never split a UTF-8 sequence
+		}
+		m.st.FinalMessage = m.st.FinalMessage[:i]
+	}
+	m.dirty = true
 }
 
 // flushLoop writes parser updates at most once per second.
