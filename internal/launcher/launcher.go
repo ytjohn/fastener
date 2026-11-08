@@ -2,8 +2,8 @@
 package launcher
 
 import (
-	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +13,7 @@ import (
 
 	"github.com/ytjohn/fastener/internal/proc"
 	"github.com/ytjohn/fastener/internal/session"
+	"github.com/ytjohn/fastener/internal/systemd"
 )
 
 type Launcher interface {
@@ -20,13 +21,43 @@ type Launcher interface {
 	Start(d session.Dir, gen int) (session.LauncherRecord, error)
 }
 
+// available and linger probe the user systemd manager (systemd.Available and
+// systemd.Linger in production; replaced in tests).
+var (
+	available = systemd.Available
+	linger    = systemd.Linger
+)
+
 // Select resolves the launcher preference ("", "auto", "setsid", "systemd").
-func Select(pref string) (Launcher, error) {
+//
+// auto uses systemd only when a user manager is running and the user has
+// lingering enabled (a session must not stop at logout just because systemd
+// happened to be there); otherwise setsid. Each probe is one exec with a 1 s
+// timeout. An explicit systemd is an error without a user manager, and works
+// without linger but warns on warn that sessions will stop at logout.
+func Select(pref string, warn io.Writer) (Launcher, error) {
 	switch pref {
-	case "", "auto", "setsid":
+	case "", "auto":
+		if ok, _ := available(); ok {
+			if lingers, _ := linger(); lingers {
+				return Systemd{}, nil
+			}
+		}
+		return Setsid{}, nil
+	case "setsid":
 		return Setsid{}, nil
 	case "systemd":
-		return nil, errors.New("launcher systemd is not available until v0.2; use auto or setsid")
+		if ok, err := available(); !ok {
+			return nil, fmt.Errorf("launcher systemd: no usable user systemd manager (%v); use auto or setsid", err)
+		}
+		if lingers, err := linger(); !lingers {
+			why := "lingering is off"
+			if err != nil {
+				why = "lingering could not be checked: " + err.Error()
+			}
+			fmt.Fprintf(warn, "fastener: warning: launcher systemd: %s, so sessions stop when you log out (loginctl enable-linger keeps them running)\n", why)
+		}
+		return Systemd{}, nil
 	}
 	return nil, fmt.Errorf("unknown launcher %q (want auto, setsid or systemd)", pref)
 }

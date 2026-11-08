@@ -12,6 +12,7 @@ import (
 
 	"github.com/ytjohn/fastener/internal/proc"
 	"github.com/ytjohn/fastener/internal/session"
+	"github.com/ytjohn/fastener/internal/systemd"
 )
 
 func cmdStop(args []string, stdout, stderr io.Writer) int {
@@ -29,6 +30,7 @@ func cmdStop(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(stderr, err)
 	}
+	*grace = clampGrace(v, *grace, stderr)
 	if err := stopSession(v, *grace, "stop"); err != nil {
 		return fail(stderr, err)
 	}
@@ -87,6 +89,23 @@ func cmdRm(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
+// clampGrace limits a per-call --grace to the session's own grace when a live
+// session runs under systemd with a max runtime: the unit's RuntimeMaxSec was
+// sized from the session's grace, so a longer stop could have that backstop
+// fire mid-grace (recorded as signal, not stop). TimeoutStopSec does not bound
+// a stop, which the monitor runs itself. It warns when it clamps.
+func clampGrace(v *session.View, grace time.Duration, stderr io.Writer) time.Duration {
+	if v.Launcher == nil || v.Launcher.Launcher != "systemd" || !v.Alive() || v.Session.MaxRuntime <= 0 {
+		return grace
+	}
+	if limit := v.Session.EffectiveGrace(); grace > limit {
+		fmt.Fprintf(stderr, "fastener: warning: session %s runs under systemd with a max runtime; --grace %s is longer than the session's grace and is clamped to %s (the unit's RuntimeMaxSec backstop was sized from it)\n",
+			v.Session.Name, grace, limit)
+		return limit
+	}
+	return grace
+}
+
 // stopSession stops a session through its monitor, or, for a lost session,
 // signals each verified orphan and finalizes status.json.
 func stopSession(v *session.View, grace time.Duration, by string) error {
@@ -97,10 +116,7 @@ func stopSession(v *session.View, grace time.Duration, by string) error {
 // to have a live monitor, so that path cannot recurse forever.
 func stopOnce(v *session.View, grace time.Duration, by string, retried bool) error {
 	if grace <= 0 {
-		grace = time.Duration(v.Session.Grace)
-	}
-	if grace <= 0 {
-		grace = 10 * time.Second
+		grace = v.Session.EffectiveGrace()
 	}
 	switch {
 	case v.State == session.StateExited && len(v.Orphans) > 0:
@@ -123,6 +139,14 @@ func stopOnce(v *session.View, grace time.Duration, by string, retried bool) err
 		if id, boot, ok := v.MonitorIdentity(); ok {
 			if err := proc.Signal(id, boot, syscall.SIGTERM); err != nil && !errors.Is(err, proc.ErrNoProcess) {
 				return fmt.Errorf("signal monitor of %s: %w", v.Session.Name, err)
+			}
+		} else if unit := unitOnly(v); unit != "" {
+			// Only the unit is known: SIGTERM its main process (the monitor).
+			// Never `systemctl stop`, which signals the whole cgroup at once.
+			if err := systemd.KillMain(unit); err != nil {
+				if alive, uerr := systemd.UnitAlive(unit); alive || uerr != nil {
+					return fmt.Errorf("signal monitor of %s (unit %s): %w", v.Session.Name, unit, err)
+				} // the unit is gone: waitStopped sees the outcome
 			}
 		} // else: the monitor has not started yet and will honour the request on start
 		return waitStopped(v.Session.Name, grace+2*handshakeTimeout()+10*time.Second, grace, by)
@@ -150,6 +174,14 @@ func stopOnce(v *session.View, grace time.Duration, by string, retried bool) err
 		return err
 	}
 	return fmt.Errorf("session %s in unexpected state %q", v.Session.Name, v.State)
+}
+
+// unitOnly returns the unit of a systemd launcher record with no monitor identity.
+func unitOnly(v *session.View) string {
+	if v.Launcher == nil || v.Launcher.Monitor != nil {
+		return ""
+	}
+	return v.Launcher.Unit
 }
 
 func waitStopped(name string, timeout, grace time.Duration, by string) error {

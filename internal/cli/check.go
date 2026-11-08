@@ -194,7 +194,7 @@ func runCheck(o launchOptions, opts checkOpts, stderr io.Writer) (r checkReport)
 	}
 	if opts.static {
 		// --static never reaches launch, so validate the launcher name here.
-		if _, err := p.selectLauncher(o); err != nil {
+		if _, err := p.selectLauncher(o, io.Discard); err != nil {
 			r.add("profile", stepFail, err.Error(), "")
 			return r
 		}

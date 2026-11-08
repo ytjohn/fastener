@@ -38,7 +38,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 - `marker`: the value of `FASTENER_SESSION` in the agent's environment
 - `fastener_version`, `planned_at`
 
-`launcher` fields: `schema_version`, `launcher` (`setsid`), `unit` (systemd only, v0.2), `monitor` (`{pid, start_time}`), `boot_id`, `launched_at`.
+`launcher` fields: `schema_version`, `launcher` (`setsid` | `systemd`), `unit` (systemd only: the transient unit, e.g. `fastener-<name>-g1-<rand>.service`), `monitor` (`{pid, start_time}`; for systemd, omitted when the unit's main pid could not be read, and the session is then judged by the unit's state), `boot_id`, `launched_at`.
 
 `status` fields:
 - `schema_version`, `state`, `generation`

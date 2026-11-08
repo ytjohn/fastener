@@ -75,5 +75,35 @@ backend must actually be checked.
 State lives under `~/.local/state/fastener` and config under `~/.config/fastener`;
 `FASTENER_STATE_DIR` and `FASTENER_CONFIG_DIR` override them.
 
+Sessions run under a transient user systemd unit when one is available and
+you have lingering enabled (`--launcher auto`, the default: `systemctl --user
+is-system-running` says `running` or `degraded`, and `loginctl show-user $UID -p
+Linger` is `yes`); otherwise, and on macOS, the monitor is started with
+`setsid`. Pick one with `--launcher systemd|setsid` or `launcher = "..."` in
+`config.toml`. `--launcher systemd` without linger works but warns: the user
+manager, and every session in it, stops when you log out (`loginctl
+enable-linger` fixes that). In systemd mode, for a session with `--max-runtime`,
+`stop --grace` cannot exceed the session's own `--grace` (it is clamped with a
+warning), because the unit's runtime backstop was sized from it. CI has no user
+systemd, so the systemd launcher is tested only on machines that have one.
+
+### Leftover processes
+
+An agent can start processes that outlive it. **systemd mode kills them;
+setsid mode keeps them running and tracks them** (`inspect` shows `orphans: N`,
+`rm` refuses until `stop` or `rm --force` cleans them up).
+
+- **The agent exits normally:** systemd SIGKILLs its leftovers as soon as the
+  session ends; setsid leaves them running, tracked.
+- **`fastener stop`:** both send the agent's process group SIGTERM, wait the
+  grace period, then SIGKILL; systemd also SIGKILLs anything that left the group.
+- **The monitor dies:** both kill the agent (Linux); systemd SIGKILLs the rest at
+  once, setsid leaves grandchildren running, tracked.
+- **Logout without linger, or the runtime backstop:** systemd stops the session
+  like an outside SIGTERM (`ended_by=signal`, with the normal grace) and then
+  kills the leftovers; under setsid, logout does not touch the session.
+
+Use `--launcher setsid` if an agent's background processes must keep running.
+
 Linux is the tested platform. macOS builds, but its lifecycle tests have not run
 yet (see `docs/followups.md`).

@@ -95,12 +95,12 @@ func prepare(o launchOptions, prompt string) (*prepared, error) {
 
 // selectLauncher resolves --launcher / config. It belongs to the launch step,
 // so `check` only reaches it after the binary step has run.
-func (p *prepared) selectLauncher(o launchOptions) (launcher.Launcher, error) {
+func (p *prepared) selectLauncher(o launchOptions, warn io.Writer) (launcher.Launcher, error) {
 	pref := o.Launcher
 	if pref == "" {
 		pref = p.cfg.Launcher
 	}
-	l, err := launcher.Select(pref)
+	l, err := launcher.Select(pref, warn)
 	if err != nil {
 		return nil, inStep("launch", err)
 	}
@@ -187,7 +187,7 @@ func launch(o launchOptions, stderr io.Writer) (*session.View, error) {
 	if err != nil {
 		return nil, err
 	}
-	l, err := p.selectLauncher(o)
+	l, err := p.selectLauncher(o, stderr)
 	if err != nil {
 		return nil, err
 	}

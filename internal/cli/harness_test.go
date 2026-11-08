@@ -68,14 +68,35 @@ type harness struct {
 	t                   *testing.T
 	state, config, work string
 	extraEnv            []string
+	// launcher is written into every config.toml. It is setsid by default, so
+	// the suite behaves the same whether or not the machine has a user systemd
+	// (auto would pick systemd on a developer box and setsid in CI);
+	// systemd_test.go covers the systemd launcher explicitly.
+	launcher string
+	// softNofile, when set, is the soft RLIMIT_NOFILE the CLI is started with.
+	softNofile string
 }
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	h := &harness{t: t, state: t.TempDir(), config: t.TempDir(), work: t.TempDir()}
+	h := &harness{t: t, state: t.TempDir(), config: t.TempDir(), work: t.TempDir(), launcher: "setsid"}
 	h.writeProfile("fake", fmt.Sprintf(fakeProfile, fakeBin))
+	h.writeConfig("")
 	t.Cleanup(h.cleanup)
 	return h
+}
+
+// writeConfig replaces config.toml with body plus the harness's launcher line.
+func (h *harness) writeConfig(body string) error {
+	h.t.Helper()
+	if h.launcher != "" {
+		body = fmt.Sprintf("launcher = %q\n", h.launcher) + body
+	}
+	err := os.WriteFile(filepath.Join(h.config, "config.toml"), []byte(body), 0o600)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return err
 }
 
 func (h *harness) writeProfile(name, body string) {
@@ -89,6 +110,9 @@ func (h *harness) writeProfile(name, body string) {
 func (h *harness) cmd(args ...string) (string, string, int) {
 	h.t.Helper()
 	c := exec.Command(fastenerBin, args...)
+	if h.softNofile != "" {
+		c = exec.Command("/bin/sh", append([]string{"-c", `ulimit -Sn "$0" && exec "$@"`, h.softNofile, fastenerBin}, args...)...)
+	}
 	// extraEnv first: with duplicate keys the last entry wins, so the
 	// harness's own values must come after it.
 	c.Env = append(append([]string{}, h.extraEnv...),

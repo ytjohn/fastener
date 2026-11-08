@@ -199,7 +199,7 @@ func TestRunAutoPrunes(t *testing.T) {
 
 func TestAutoPruneDisabledByConfig(t *testing.T) {
 	h := newHarness(t)
-	os.WriteFile(filepath.Join(h.config, "config.toml"), []byte("auto_prune = false\n"), 0o600)
+	h.writeConfig("auto_prune = false\n")
 	h.doneSession("old", 200*time.Hour)
 	os.Remove(h.stamp())
 	h.ok("ps")
@@ -217,7 +217,7 @@ func TestAutoPruneDisabledByConfig(t *testing.T) {
 
 func TestAutoPruneObeysConfigRetention(t *testing.T) {
 	h := newHarness(t)
-	os.WriteFile(filepath.Join(h.config, "config.toml"), []byte("retention = \"2h\"\n"), 0o600)
+	h.writeConfig("retention = \"2h\"\n")
 	h.doneSession("old", 3*time.Hour)
 	h.doneSession("young", time.Hour)
 	os.Remove(h.stamp())
@@ -325,7 +325,7 @@ func TestPruneWarnsBelowOneHour(t *testing.T) {
 
 func TestShortConfigRetentionIsClamped(t *testing.T) {
 	h := newHarness(t)
-	os.WriteFile(filepath.Join(h.config, "config.toml"), []byte("retention = \"30m\"\n"), 0o600)
+	h.writeConfig("retention = \"30m\"\n")
 	h.doneSession("mid", 45*time.Minute) // older than 30m, younger than the 1h floor
 	h.doneSession("old", 2*time.Hour)
 	// The config still loads for other commands, with no warning.
