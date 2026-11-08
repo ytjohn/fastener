@@ -73,7 +73,7 @@ ${FASTENER_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/fastener}/
     monitor.log          # monitor diagnostics
     lock                 # flock target for CLI-side finalization
     attach.sock          # phase B
-  .last-prune            # prune throttle stamp (v0.2)
+  .last-prune            # prune throttle stamp: empty until a prune completes, then its time; mtime is the throttle; also the prune flock target
 ```
 
 - **Unique names:** `mkdir` of the session directory is the atomic name reservation; a duplicate name fails. `--name` is optional; when omitted, Fastener generates `<backend>-<6 random base32 chars>`. Names only need to be unique among sessions that still exist. Names match `^[a-z0-9][a-z0-9._-]{0,62}$`.
@@ -454,7 +454,7 @@ fastener logs <name> [-f] [--stderr] [--generation N]   # --generation: phase B
 fastener wait <name> [--timeout D]
 fastener stop <name> [--grace D]
 fastener rm <name> [--force]
-fastener prune [--older-than D]   # v0.2
+fastener prune [--older-than D] [--dry-run] [--json]
 fastener backends [--json]
 fastener check <backend> | --all [--static] [--keep] [--expect-model M] [run options] [--json]
 fastener version [--json]
@@ -495,14 +495,27 @@ fastener install-restore
   A caller can therefore tell "timed out" from "lost" without a follow-up `inspect`. As with Podman, 124, 125 and 127 can collide with real agent exit codes. The documentation names `inspect --json` as the authoritative answer.
 - **`logs`:** prints `output.log`; `--stderr` prints `stderr.log`; `-f` follows until the session ends.
 - **`rm`:** refuses a session that is alive, or has orphans (including descendants an exited agent left behind), unless `--force` (which stops it first). `--force` also removes a corrupt session that cannot be loaded, after killing whatever marked processes it can still identify. Orphans that survive SIGKILL block removal.
-- **Retention (v0.2; v0.1 never prunes):**
-  - Ended, unpinned sessions older than the retention period (default 7 days; config `retention`) are pruned.
-  - `lost` sessions with orphans are never pruned, because pruning would destroy the record needed to clean them up.
-  - `run` and `ps` prune opportunistically, at most once per hour (the `.last-prune` stamp).
-  - `prune` runs on demand.
+- **Retention:**
+  - A session is pruned when all of these hold:
+    - its effective state is `exited` or `restore-failed` (never `starting`, `running` or `lost`);
+    - its `ended_at` (else its `created_at`) is older than the retention period (default 168h; config `retention`, or `prune --older-than`, which must be positive);
+    - it has no orphans (the same scan `rm` uses; a grandchild left by a normal exit blocks pruning until it is stopped);
+    - it is not pinned (`restart=on-reboot`; v0.1 never sets it).
+  - `lost` sessions are never pruned, because they may hold the only record of live processes. `prune` reports old ones as kept.
+  - `prune [--older-than D] [--dry-run] [--json]` runs on demand and prints the names removed (or, with `--dry-run`, that would be). It exits 0, or 1 if any removal failed. `--json` is `{"removed": [...], "kept": [{"name", "reason"}]}`, where `kept` lists only sessions old enough to prune that were kept (`lost`, `orphans` or `pinned`).
+  - `run` and `ps` prune opportunistically, at most once per hour:
+    - the stamp is `.last-prune` in the state root; if it is non-empty and under an hour old, the command does one `stat` and moves on;
+    - otherwise the command takes a non-blocking `flock` on the stamp, so only one of several concurrent CLIs prunes, and the rest skip;
+    - the stamp is written when the prune completes;
+    - all errors are ignored, so a prune never fails or delays the command beyond the work itself;
+    - `ps` prunes before it lists, so it never shows sessions it is about to remove;
+    - nothing happens before the first session exists (no stamp is created without a `sessions/` directory);
+    - config `auto_prune = false` turns it off (default `true`); `fastener prune` still works. The opportunistic prune obeys `retention`.
+  - Concurrent `prune` calls serialize on the same lock and do not error.
   - There is no `--rm`-on-exit flag, because it would race callers reading results.
 - **Config:** `~/.config/fastener/config.toml` holds:
-  - `retention`
+  - `retention` (positive duration, default `168h`)
+  - `auto_prune` (bool, default `true`: opportunistic pruning by `run` and `ps`)
   - `default_permissions` (must be a level defined by each profile used; it overrides every profile's own `default_permissions`)
   - `handshake_timeout`
   - `launcher` (`auto` | `systemd` | `setsid`)
@@ -560,13 +573,12 @@ docs/                  json-schema.md, design specs
   - a profile edited between `run` and the monitor starting: the monitor uses the plan, and the recorded `sha256` matches what ran;
   - concurrent `stop` and `rm` finalizing a dead monitor (deferred to v0.2; `Finalize` has a unit test);
   - an old state fixture read by the new CLI (deferred to v0.2);
-  - prune and retention (deferred to v0.2, with the feature);
   - `wait` exit codes;
   - label filtering (shipped as `ps --filter`).
 - **Live smoke** (opt-in, `FASTENER_SMOKE=1`; costs model calls): runs `fastener check --all --json` and requires every built-in backend to pass. This is the release check that built-in flags are correct. There is no separate smoke-test logic.
 - **`check` itself** is tested against the fake agent: a passing reply, a wrong reply, `agent_error`, a timeout (built-in hint), a `diagnose` pattern match in `stderr.log`, and a missing binary.
 - **CI:** Linux and macOS runners; `go vet`, `go test -race`. The macOS job is `continue-on-error` in v0.1 because its lifecycle tests have never run there. `staticcheck` is not wired in yet.
-- **Deferred to v0.2:** concurrent `stop`/`rm` through the CLI (`Finalize` has a unit test), `--grace` clamping in systemd mode, schema fixtures per release, and prune/retention (those features are v0.2).
+- **Deferred to v0.2:** concurrent `stop`/`rm` through the CLI (`Finalize` has a unit test), `--grace` clamping in systemd mode and schema fixtures per release.
 
 ## 13. Milestones
 

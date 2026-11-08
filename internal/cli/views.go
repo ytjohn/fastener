@@ -169,6 +169,7 @@ func cmdPs(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(stderr, err)
 	}
+	autoPrune() // before listing, so ps never shows what it is about to remove
 	names, err := session.Names()
 	if err != nil {
 		return fail(stderr, err)

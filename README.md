@@ -27,8 +27,20 @@ session keeps running if your shell exits. Then:
 fastener logs <name> [-f] [--stderr]    # agent output (-f follows)
 fastener stop <name> [--grace 10s]      # SIGTERM, then SIGKILL after the grace period; also cleans up leftover processes of an exited session
 fastener rm <name> [--force]            # remove a finished session (refuses if it has leftover processes; --force kills them)
+fastener prune [--older-than D] [--dry-run]   # remove old ended sessions (see Retention)
 fastener check --all --static           # profile and binary checks for every backend, no model call
 ```
+
+### Retention
+
+Ended sessions are deleted after `retention` (config; default `168h`, 7 days),
+measured from when they ended. `run` and `ps` do this opportunistically, at most
+once an hour (`.last-prune` in the state directory); `ps` prunes before it lists.
+`fastener prune [--older-than D] [--dry-run] [--json]` does it on demand. Only
+`exited` and `restore-failed` sessions are removed. Sessions that are running,
+`lost`, or that still have leftover processes are never removed (`prune` reports
+the old ones it kept). Set `auto_prune = false` in the config to turn off the
+opportunistic pruning.
 
 `logs` shows the agent's stdout as recorded in `output.log`. After the agent
 exits, the monitor reads its stdout for at most 2 s more: if a process the agent

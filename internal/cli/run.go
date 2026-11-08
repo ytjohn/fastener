@@ -44,6 +44,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "fastener: --json and --follow cannot be combined")
 		return exitUsage
 	}
+	autoPrune()
 	v, err := launch(o, stderr)
 	if err != nil {
 		if v != nil && asJSON {
