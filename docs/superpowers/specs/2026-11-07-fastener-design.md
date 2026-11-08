@@ -166,7 +166,7 @@ A process that cleared its environment is not counted, and is never signalled. T
 1. The CLI creates the directory and writes `prompt.txt`, `session.json`, `generations/1.json` (the plan) and `status.json` with state `starting`.
 2. The CLI starts the monitor through the chosen launcher, passing the session directory and the generation number.
 3. The CLI writes `generations/1.launcher.json`. If that write fails it is a warning, not an error, because the monitor records its own identity in `status.json` first thing.
-4. The CLI waits up to 5 s (configurable) for `running` or `exited`.
+4. The CLI waits up to 5 s (configurable) for `running` or `exited`. On timeout it stops the session (a `stop-request.json` for generation 1 plus SIGTERM to the monitor if it is identified; the monitor honours the request at start and before the spawn), so a late-starting monitor never runs the prompt unattended. The error says the session was stopped.
 
 Every handshake error names the session (`session <name>: ...`) so a caller can inspect or remove it. If the monitor dies during the handshake, the CLI finalizes the session as `launch-failed` only when nothing was ever spawned: no agent identity recorded, status still `starting`, and no marked process alive. A session that is `lost` after a spawned agent (or with surviving marked processes) is left `lost` with its orphans, so `stop` and `rm` can still find them. Should the handshake be unable to reload a view for the error return, it falls back to the cheap view it already has.
 
@@ -211,6 +211,7 @@ This rules out a reused pid, including one reused after a reboot, being mistaken
   2. waits for the grace period;
   3. sends SIGKILL to the group;
   4. records `ended_by=stop` (with a request) or `signal` (without one).
+  Grandchildren may get no grace period of their own: if the leader exits first, the grace wait ends early and the SIGKILL to the group follows immediately.
 - **A pending exit beats a signal or limit.** If the agent has already exited by the time the monitor handles a stop signal or the `--max-runtime` timer, the exit stands (`ended_by=exit`); the monitor does not relabel a finished agent as stopped.
 - **Zombie pinning (Linux).** After the agent dies, the monitor leaves it unreaped (`waitid` with `WNOWAIT`) until group signalling is finished, then reaps. While the zombie exists its pid and pgid cannot be reused, so the final SIGKILL of the group cannot reach a stranger. macOS has no such pin in v0.1 (`x/sys/unix` has no `Waitid`); the agent is reaped immediately and there is a small pgid-reuse window (see `docs/followups.md`).
 - **Output drain.** After the agent exits the monitor waits up to 2 s for its stdout to close. A descendant that keeps the pipe open cannot hold the session open; output written after that is not recorded.
@@ -219,6 +220,7 @@ This rules out a reused pid, including one reused after a reboot, being mistaken
   - `RuntimeMaxSec` = max_runtime + grace + 30 s, a backstop if the monitor hangs;
   - `TimeoutStopSec` = grace + 30 s, so systemd never cuts the grace period short.
 - **`stop` on a `lost` session** with orphans signals each identified orphan pid (per the process-identity check above), using the same TERM / grace / KILL sequence. It then finalizes `ended_by=stop`, unless `Finalize` refuses with `ErrMonitorAlive` (the monitor came back), in which case it takes the normal stop path once.
+- **`stop` on an `exited` session** that still has orphans (marker, pgid and boot verified, as above) cleans them up with TERM / grace / KILL and does not re-finalize, since `status.json` is already final. Descendants of a normally exited agent are tracked, not killed automatically.
 - **`rm --force`** stops first, as above. For a session whose files are corrupt and cannot be loaded, `rm --force` reads whatever parses (`status.json` and the plan) to find and kill marked processes, then deletes the directory; a warning says when the status or plan could not be read, because orphans cannot then be found.
 
 ### Monitor death
@@ -242,7 +244,7 @@ A parser panic is recovered: it is logged, counted in `parse_errors`, and never 
 
 - A running monitor is unaffected by replacing the binary on disk.
 - The monitor reads its generation plan once, at start, and never reads the profile.
-- New CLIs read old state through `schema_version`. A `testdata` fixture directory from each released schema version is kept and tested.
+- New CLIs read old state through `schema_version`. Keeping and testing a `testdata` fixture directory from each released schema version is a follow-up; v0.1 does not keep them yet.
 
 ## 5. Environment
 
@@ -292,7 +294,7 @@ diagnose = [
   { match = '(?i)not logged in|please run /login|invalid api key', hint = "auth: run `claude` interactively and log in" },
 ]
 
-# Phase B
+# Phase B: the [interactive] tables below are rejected by v0.1
 [interactive]
 args = []
 conversation_finder = "claude-transcripts"   # named finder (§8)
@@ -463,7 +465,7 @@ fastener install-restore
 
   A caller can therefore tell "timed out" from "lost" without a follow-up `inspect`. As with Podman, 124, 125 and 127 can collide with real agent exit codes. The documentation names `inspect --json` as the authoritative answer.
 - **`logs`:** prints `output.log`; `--stderr` prints `stderr.log`; `-f` follows until the session ends.
-- **`rm`:** refuses a session that is alive, or has orphans, unless `--force` (which stops it first). `--force` also removes a corrupt session that cannot be loaded, after killing whatever marked processes it can still identify. Orphans that survive SIGKILL block removal.
+- **`rm`:** refuses a session that is alive, or has orphans (including descendants an exited agent left behind), unless `--force` (which stops it first). `--force` also removes a corrupt session that cannot be loaded, after killing whatever marked processes it can still identify. Orphans that survive SIGKILL block removal.
 - **Retention (v0.2; v0.1 never prunes):**
   - Ended, unpinned sessions older than the retention period (default 7 days; config `retention`) are pruned.
   - `lost` sessions with orphans are never pruned, because pruning would destroy the record needed to clean them up.
@@ -495,7 +497,7 @@ internal/parser/       claude-stream-json, codex-jsonl, none; testdata/
 internal/proc/         identity, Check/Alive/MaybeAlive, marked-process scan (linux, darwin)
 internal/testbin/fakeagent/  test helper agent
 internal/version/      version string (ldflags)
-docs/                  json-schema.md, profiles.md, design specs
+docs/                  json-schema.md, design specs
 ```
 
 ## 12. Testing
@@ -508,7 +510,7 @@ docs/                  json-schema.md, profiles.md, design specs
   - schema readers against every older fixture version;
   - the liveness check with a mismatched start time.
 - **Fake agent:** `internal/testbin/fakeagent`, built by the tests. It emits scripted stream-json or JSONL, sleeps, ignores SIGTERM, crashes, exits with a chosen code, forks a grandchild and reads stdin. A backend profile pointing at it (built by the tests; `internal/testbin/fakeagent`) lets the whole CLI-to-monitor path run in CI with no model calls.
-- **Lifecycle** (each in setsid mode, and in systemd mode where a user systemd instance exists, otherwise skipped):
+- **Lifecycle** (v0.1 tests setsid mode only on Linux; the systemd-mode runs are deferred to v0.2 with the systemd launcher):
   - the session survives the CLI exiting;
   - duplicate names;
   - launch failure;
@@ -521,20 +523,21 @@ docs/                  json-schema.md, profiles.md, design specs
     - on Linux the agent dies;
     - a grandchild shows in `orphans`;
     - `stop` cleans the grandchild up;
+  - an agent that exits normally but leaves a grandchild: the session is `exited` with `orphans: N`, `rm` refuses, `stop` kills the grandchild without re-finalizing, then `rm` succeeds;
   - a monitor that dies before writing `status.json` (becomes `lost` via the generation record);
   - a reused pid, and a mismatched `boot_id`;
   - a process in a reused pgid without the session marker: it is never counted as an orphan and never signalled;
   - a stale `stop-request.json` from an earlier generation is ignored;
   - a profile edited between `run` and the monitor starting: the monitor uses the plan, and the recorded `sha256` matches what ran;
-  - concurrent `stop` and `rm` finalizing a dead monitor;
-  - an old state fixture read by the new CLI;
-  - prune and retention;
+  - concurrent `stop` and `rm` finalizing a dead monitor (deferred to v0.2; `Finalize` has a unit test);
+  - an old state fixture read by the new CLI (deferred to v0.2);
+  - prune and retention (deferred to v0.2, with the feature);
   - `wait` exit codes;
-  - label filtering.
+  - label filtering (deferred to v0.2, with the feature).
 - **Live smoke** (opt-in, `FASTENER_SMOKE=1`; costs model calls): runs `fastener check --all --json` and requires every built-in backend to pass. This is the release check that built-in flags are correct. There is no separate smoke-test logic.
 - **`check` itself** is tested against the fake agent: a passing reply, a wrong reply, `agent_error`, a timeout (built-in hint), a `diagnose` pattern match in `stderr.log`, and a missing binary.
 - **CI:** Linux and macOS runners; `go vet`, `go test -race`. The macOS job is `continue-on-error` in v0.1 because its lifecycle tests have never run there. `staticcheck` is not wired in yet.
-- **Deferred to v0.2:** the CLI-level handshake timeout test (needs a launcher hook), concurrent `stop`/`rm` through the CLI (`Finalize` has a unit test), `--grace` clamping in systemd mode, schema fixtures per release, and prune/retention and label filtering (those features are v0.2).
+- **Deferred to v0.2:** concurrent `stop`/`rm` through the CLI (`Finalize` has a unit test), `--grace` clamping in systemd mode, schema fixtures per release, and prune/retention and label filtering (those features are v0.2).
 
 ## 13. Milestones
 
@@ -571,6 +574,7 @@ No Fastener daemon is involved at any point.
 - How Claude auto-permission mode and Codex's equivalent behave in a headless run when an action is denied: whether the denial is reported to the model or the run blocks.
 - On macOS the exited agent is reaped immediately, so its pgid is not pinned while the group is signalled, and the TERM/KILL sequence has small race windows. Linux pins the zombie with `waitid(WNOWAIT)`.
 - Unknown liveness (an unreadable `/proc` or failed sysctl) is treated as maybe-alive, so a session can stay `running` or block finalization until liveness can be read.
+- A normally exited agent can leave descendants running. They are tracked (`inspect` shows `orphans: N` for the `exited` session; `rm` refuses without `--force`), never killed implicitly; `stop` or `rm --force` cleans them up.
 - In setsid mode an agent's descendants can outlive a killed monitor (on Linux: grandchildren only; on macOS: the agent too). This is handled by group-level orphan cleanup, not prevented. systemd mode prevents it.
 - Orphan identity fails safe, so some orphans can be missed:
   - a descendant that moves to its own process group, or clears its environment, is never counted or signalled;

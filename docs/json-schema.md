@@ -14,7 +14,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 | `schema_version` | 1 |
 | `name`, `backend` | Session name and backend |
 | `state` | Effective state: `starting`, `running`, `exited`, `lost` (inferred: not exited and the monitor is not alive), `restore-failed` |
-| `orphans` | Number of live processes still carrying this session's marker. Always present; non-zero only for `lost` sessions. |
+| `orphans` | Number of live processes still carrying this session's marker. Always present; non-zero only for `lost` sessions and for `exited` sessions whose agent left descendants running. |
 | `session` | Contents of `session.json` (intent; see below) |
 | `status` | Contents of `status.json` (runtime facts; see below) |
 | `plan` | The current generation's launch plan. Omitted if unreadable. |
@@ -30,7 +30,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 
 `plan` fields:
 - `schema_version`, `generation`
-- `argv`: the fully resolved argument list; `argv[0]` is an absolute path
+- `argv`: the fully resolved argument list; `argv[0]` is an absolute path. For `prompt = "arg"` backends it contains the prompt text itself
 - `prompt_mode` (`stdin` | `arg`), `parser`
 - `profile_source` (`builtin` or the file path), `profile_sha256`
 - `marker`: the value of `FASTENER_SESSION` in the agent's environment
