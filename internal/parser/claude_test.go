@@ -2,6 +2,7 @@ package parser
 
 import (
 	"bufio"
+	"bytes"
 	"os"
 	"testing"
 )
@@ -14,9 +15,15 @@ func feed(t *testing.T, p Parser, path string) Fields {
 	}
 	defer f.Close()
 	var out Fields
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		p.Line(sc.Bytes(), &out)
+	r := bufio.NewReader(f)
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 {
+			p.Line(bytes.TrimRight(line, "\r\n"), &out)
+		}
+		if err != nil {
+			break
+		}
 	}
 	return out
 }
@@ -73,5 +80,32 @@ func TestNoneExtractsNothing(t *testing.T) {
 func TestUnknownParser(t *testing.T) {
 	if _, ok := Get("nope"); ok {
 		t.Error("unknown parser reported as registered")
+	}
+}
+
+func TestClaudeRepeatedSessionAndUnknownType(t *testing.T) {
+	p, _ := Get("claude-stream-json")
+	var f Fields
+	if !p.Line([]byte(`{"type":"system","session_id":"s"}`), &f) {
+		t.Error("first session_id should report a change")
+	}
+	if p.Line([]byte(`{"type":"system","session_id":"s"}`), &f) {
+		t.Error("repeated session_id reported a change")
+	}
+	if p.Line([]byte(`{"type":"mystery"}`), &f) {
+		t.Error("unknown-type line reported a change")
+	}
+}
+
+func TestClaudeTypeMismatchKeepsPartial(t *testing.T) {
+	p, _ := Get("claude-stream-json")
+	var f Fields
+	p.Line([]byte(`{"type":"result","session_id":"s","result":{"x":1}}`), &f)
+	if f.ParseErrors != 1 || f.ConversationID != "s" {
+		t.Errorf("got %+v", f)
+	}
+	p.Line([]byte(`{"type":"result","session_id":"s2","is_error":true,"result":{"x":1}}`), &f)
+	if f.AgentError == nil || !*f.AgentError || f.ConversationID != "s2" {
+		t.Errorf("is_error not captured: %+v", f)
 	}
 }

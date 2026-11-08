@@ -3,6 +3,7 @@ package parser
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 )
 
 // claudeStreamJSON parses `claude -p --output-format stream-json --verbose`.
@@ -29,11 +30,16 @@ func (claudeStreamJSON) Line(line []byte, f *Fields) bool {
 		return false
 	}
 	var e claudeEvent
+	changed := false
 	if err := json.Unmarshal(line, &e); err != nil {
 		f.ParseErrors++
-		return true
+		changed = true
+		// A type mismatch leaves the rest of the event decoded; keep it.
+		var ute *json.UnmarshalTypeError
+		if !errors.As(err, &ute) {
+			return true
+		}
 	}
-	changed := false
 	if e.SessionID != "" && e.SessionID != f.ConversationID {
 		f.ConversationID = e.SessionID
 		changed = true

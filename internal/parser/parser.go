@@ -16,9 +16,11 @@ type Fields struct {
 
 // Usage counts all tokens the backend reported for the run.
 type Usage struct {
-	InputTokens  int64   `json:"input_tokens,omitempty"` // includes cache reads/writes
-	OutputTokens int64   `json:"output_tokens,omitempty"`
-	CostUSD      float64 `json:"cost_usd,omitempty"`
+	// InputTokens is all input tokens for the run, including cache reads and
+	// writes (differs from Anthropic's usage.input_tokens, which excludes cache).
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
 }
 
 // Parser consumes one stdout line (without its newline) and updates f.
