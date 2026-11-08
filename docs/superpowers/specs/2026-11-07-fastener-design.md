@@ -351,7 +351,7 @@ url_pattern = 'https://claude\.ai/\S+'
 | `binary` | `command` is found on the session's resolved PATH (not the caller's shell PATH); `version_args` exits 0 |
 | `launch` | The handshake reaches `running`; `session.json`, `prompt.txt`, the plan, the launcher record, `status.json` and `output.log` all exist |
 | `exit` | The session ends `ended_by=exit` with exit code 0 within the limit |
-| `parse` | `conversation_id` and `final_message` were extracted; `agent_error` is not true; `parse_errors` is 0. With the `none` parser this step is `skip`. |
+| `parse` | `conversation_id` and `final_message` were extracted; `agent_error` is not true (on failure the detail includes the agent's error text, `final_message`, cut to about 200 bytes); `parse_errors` is 0. With the `none` parser this step is `skip`. |
 | `model` | The served `model` matches the expectation (`--expect-model`, else `--model`) under the prefix rule below. `skip` when the backend does not report its model (the detail says when an expectation could therefore not be verified); `pass` with `served <model>` when no model was requested. |
 | `reply` | `final_message` contains `pong` (case-insensitive). With the `none` parser the text searched is `output.log` with every line containing the prompt removed, so an agent that merely echoes its input cannot pass. |
 | `cleanup` | The session is stopped if still alive, and removed unless `--keep` |
@@ -384,7 +384,7 @@ Phase B adds `check --interactive [--remote]`. It launches with a pty, confirms 
 Named Go functions selected by profile. v0.1 ships `claude-stream-json`, `pi-json` and `none`; `codex-jsonl` arrives in v0.2 (Codex uses `none` until then, so its `parse` step is `skip` and `reply` searches `output.log`).
 
 - **`claude-stream-json`** (`claude -p --output-format stream-json --verbose`): `conversation_id` from any event's `session_id`; `model` from the `system/init` event (a bare model id); `final_message`, `agent_error` (`is_error`) and `usage` from the `result` event.
-- **`pi-json`** (`pi -p --mode json`): `conversation_id` from the `session` event's `id`. Everything else comes from the last assistant `message_end`: `model` is `provider/model`; `final_message` is the concatenated `text` content blocks (`thinking` blocks are skipped), or `errorMessage` when `stopReason` is `error`; `agent_error` is `stopReason == "error"`; `usage` is `input + cacheRead + cacheWrite` input tokens, `output` output tokens and `cost.total`. Pi exits 0 even when the model call failed, so `agent_error` is what catches it.
+- **`pi-json`** (`pi -p --mode json`): `conversation_id` from the `session` event's `id`. `model`, `final_message` and `agent_error` come from the last assistant `message_end`: `model` is `provider/model`; `final_message` is the concatenated `text` content blocks (`thinking` blocks are skipped), or `errorMessage` when `stopReason` is `error`; `agent_error` is `stopReason == "error"`. `usage` is summed over every assistant `message_end` in the run (each reports one API call): `input + cacheRead + cacheWrite` input tokens, `output` output tokens and `cost.total`. Pi exits 0 even when the model call failed, so `agent_error` is what catches it.
 
 - Run inside the monitor, streaming, one line at a time, while raw output is written to `output.log` unchanged.
 - **Extracted fields** (all optional, omitted when unknown):

@@ -90,3 +90,17 @@ func TestPiJSONMalformedUnknownAndMismatch(t *testing.T) {
 		t.Errorf("type mismatch lost the event: %+v", f)
 	}
 }
+
+func TestPiJSONUsageSummedAcrossRun(t *testing.T) {
+	p, _ := Get("pi-json")
+	var f Fields
+	p.Line([]byte(`{"type":"message_end","message":{"role":"assistant","provider":"p","model":"m1","content":[{"type":"text","text":"calling a tool"}],"stopReason":"toolUse","usage":{"input":10,"output":5,"cacheRead":100,"cacheWrite":1000,"cost":{"total":0.25}}}}`), &f)
+	p.Line([]byte(`{"type":"message_end","message":{"role":"toolResult","content":[{"type":"text","text":"ok"}],"usage":{"input":999,"output":999}}}`), &f)
+	p.Line([]byte(`{"type":"message_end","message":{"role":"assistant","provider":"p","model":"m2","content":[{"type":"text","text":"done"}],"stopReason":"stop","usage":{"input":20,"output":7,"cacheRead":1110,"cacheWrite":0,"cost":{"total":0.5}}}}`), &f)
+	if f.Usage == nil || f.Usage.InputTokens != 10+100+1000+20+1110 || f.Usage.OutputTokens != 12 || f.Usage.CostUSD != 0.75 {
+		t.Fatalf("Usage = %+v", f.Usage)
+	}
+	if f.Model != "p/m2" || f.FinalMessage != "done" || f.AgentError == nil || *f.AgentError {
+		t.Fatalf("last message fields: %+v", f)
+	}
+}

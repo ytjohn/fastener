@@ -107,9 +107,20 @@ func TestCheckWrongReply(t *testing.T) {
 
 func TestCheckAgentError(t *testing.T) {
 	h := newHarness(t)
-	r, _ := h.check("fake", "--env", "FAKE_IS_ERROR=1")
+	r, _ := h.check("fake", "--env", "FAKE_IS_ERROR=1", "--env", "FAKE_REPLY=model_not_supported")
 	if st, _ := stepStatus(r[0], "parse"); st != "fail" {
 		t.Fatalf("parse %q", st)
+	}
+	if d := stepDetail(r[0], "parse"); !strings.HasPrefix(d, "agent reported an error: model_not_supported") {
+		t.Errorf("parse detail lacks the error text: %q", d)
+	}
+	r, _ = h.check("fake", "--env", "FAKE_IS_ERROR=1", "--env", "FAKE_REPLY="+strings.Repeat("x", 500))
+	if d := stepDetail(r[0], "parse"); !strings.Contains(d, strings.Repeat("x", 200)+"…") || strings.Contains(d, strings.Repeat("x", 201)) {
+		t.Errorf("long error text not truncated to 200: %d bytes", len(d))
+	}
+	r, _ = h.check("fake", "--env", "FAKE_IS_ERROR=1", "--env", "FAKE_REPLY=")
+	if d := stepDetail(r[0], "parse"); !strings.Contains(d, "agent reported an error") || strings.Contains(d, "agent reported an error:") {
+		t.Errorf("empty error text: %q", d)
 	}
 }
 

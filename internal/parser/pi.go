@@ -10,7 +10,8 @@ import (
 // piJSON parses `pi -p --mode json`. The "session" event carries the
 // conversation id. Each assistant "message_end" carries the served provider
 // and model, its content blocks, stopReason (and errorMessage on "error") and
-// usage; the last one wins. Streaming events (message_update and friends) are
+// its own usage. Model, final message and error come from the last one; usage
+// is summed over all of them. Streaming events (message_update and friends) are
 // ignored.
 type piJSON struct{}
 
@@ -91,14 +92,17 @@ func piAssistant(m *piMessage, f *Fields) bool {
 		f.FinalMessage = m.ErrorMessage
 	}
 	if m.Usage != nil {
-		u := &Usage{
-			InputTokens:  m.Usage.Input + m.Usage.CacheRead + m.Usage.CacheWrite,
-			OutputTokens: m.Usage.Output,
+		// Usage is per API call; sum it so multi-turn runs count every call.
+		u := Usage{}
+		if f.Usage != nil {
+			u = *f.Usage
 		}
+		u.InputTokens += m.Usage.Input + m.Usage.CacheRead + m.Usage.CacheWrite
+		u.OutputTokens += m.Usage.Output
 		if m.Usage.Cost != nil {
-			u.CostUSD = m.Usage.Cost.Total
+			u.CostUSD += m.Usage.Cost.Total
 		}
-		f.Usage = u
+		f.Usage = &u
 	}
 	return f.Model != before.Model || f.FinalMessage != before.FinalMessage ||
 		before.AgentError == nil || *before.AgentError != isErr ||

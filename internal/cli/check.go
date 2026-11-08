@@ -267,7 +267,11 @@ func runCheck(o launchOptions, opts checkOpts, stderr io.Writer) (r checkReport)
 			problems = append(problems, "no final_message")
 		}
 		if s.AgentError != nil && *s.AgentError {
-			problems = append(problems, "agent reported an error")
+			msg := "agent reported an error"
+			if t := strings.TrimSpace(s.FinalMessage); t != "" {
+				msg += ": " + truncate(t, 200)
+			}
+			problems = append(problems, msg)
 		}
 		if s.ParseErrors > 0 {
 			problems = append(problems, fmt.Sprintf("%d unparseable lines", s.ParseErrors))
