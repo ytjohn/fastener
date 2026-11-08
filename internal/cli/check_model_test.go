@@ -30,6 +30,7 @@ func TestModelMatches(t *testing.T) {
 		{"claude-haiku-4.5", "claude-haiku-4-6", false},
 		{"qwen3", "qwen3_8b", true},
 		{"qwen3", "qwen3:8b", true},
+		{"claude-haiku-", "claude-haiku-4-5", false},
 		{"qwen3", "qwen38b", false},
 		{"claude-haiku-4-5-20251001", "claude-haiku-4-5", false},
 		{"openrouter/anthropic/claude-haiku", "openrouter/anthropic/claude-haiku-4.5", true},
@@ -52,7 +53,9 @@ func TestModelMismatchHint(t *testing.T) {
 		{"github-copilot/claude-haiku", "openrouter/claude-haiku-4-5", "the backend substituted a different model"},
 		{"github-copilot/haiku", "openrouter/claude-haiku-4-5", "the backend substituted a different model"},
 		{"opus", "claude-sonnet-5-5", "the backend substituted a different model"},
-		{"haiku", "İclaude-haiku", "--model "},
+		{"claude-haiku-", "claude-haiku-4-5", "drop the trailing separator"},
+		{"qwen3:", "qwen3:8b", "drop the trailing separator"},
+		{"anthropic/claude-haiku", "openrouter/anthropic/claude-haiku-4.5", "the served provider is openrouter/anthropic; include it in --expect-model"},
 	}
 	for _, c := range cases {
 		if got := modelMismatchHint(c.expected, c.served); !strings.Contains(got, c.want) {
@@ -61,21 +64,35 @@ func TestModelMismatchHint(t *testing.T) {
 	}
 }
 
+func TestModelMismatchHintNonASCII(t *testing.T) {
+	// Case folding changes the byte length, so the suggestion comes from the
+	// folded name.
+	got := modelMismatchHint("haiku", "İclaude-haiku")
+	want := "e.g. --model iclaude-haiku, or keep --model and pass --expect-model iclaude-haiku" // Go folds U+0130 to "i"
+	if !strings.Contains(got, want) {
+		t.Fatalf("hint %q, want it to contain %q", got, want)
+	}
+}
+
 func TestModelStep(t *testing.T) {
 	cases := []struct {
-		expected, flag, served string
-		status, detail         string
+		expected, flag, served, source string
+		status, detail                 string
 	}{
-		{"", "", "claude-opus-5-5", stepPass, "served claude-opus-5-5"},
-		{"", "", "", stepSkip, "backend does not report its model"},
-		{"claude-haiku", "--model", "", stepSkip, "could not be verified"},
-		{"claude-haiku", "--model", "claude-haiku-4-5", stepPass, "requested claude-haiku, served claude-haiku-4-5"},
-		{"glm", "--expect-model", "glm-5.3-flash-next", stepPass, "expected glm, served glm-5.3-flash-next"},
-		{"flash-next", "--model", "glm-5.3-flash-next", stepFail, "requested flash-next, but the backend served glm-5.3-flash-next"},
+		{"", "", "claude-opus-5-5", "server", stepPass, "served claude-opus-5-5"},
+		{"", "", "", "", stepSkip, "backend does not report its model"},
+		{"claude-haiku", "--model", "", "", stepSkip, "could not be verified"},
+		{"claude-haiku", "--model", "claude-haiku-4-5", "server", stepPass, "requested claude-haiku, served claude-haiku-4-5"},
+		{"glm", "--expect-model", "glm-5.3-flash-next", "server", stepPass, "expected glm, served glm-5.3-flash-next"},
+		{"flash-next", "--model", "glm-5.3-flash-next", "server", stepFail, "requested flash-next, but the backend served glm-5.3-flash-next"},
+		{"gpt-5", "--model", "p/gpt-5", "client", stepPass, "requested gpt-5, served p/gpt-5 (client-reported: the backend does not confirm the serving model, so a provider-side swap would not be detected)"},
+		{"", "", "p/gpt-5", "client", stepPass, "served p/gpt-5 (client-reported"},
+		{"claude", "--model", "p/gpt-5", "client", stepFail, "but the backend served p/gpt-5"},
 	}
 	for _, c := range cases {
-		st := modelStep(c.expected, c.flag, c.served)
-		if st.Name != "model" || st.Status != c.status || !strings.Contains(st.Detail, c.detail) {
+		st := modelStep(c.expected, c.flag, c.served, c.source)
+		if st.Name != "model" || st.Status != c.status || !strings.Contains(st.Detail, c.detail) ||
+			(c.source != "client" && strings.Contains(st.Detail, "client-reported")) {
 			t.Errorf("modelStep(%q, %q, %q) = %+v", c.expected, c.flag, c.served, st)
 		}
 		if (st.Status == stepFail) != (st.Hint != "") {

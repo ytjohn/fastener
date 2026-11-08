@@ -21,7 +21,7 @@ func splitModel(name string) (provider, model string) {
 // modelMatches is check's prefix rule: the served model is the expected one,
 // or a more specific version of it. Providers must agree when both sides name
 // one. The served name must equal the expected name, or start with it followed
-// by one of "-", "_", ":" or "/", so "gpt-5" matches "gpt-5.6-luna" but not
+// by one of "-", "_" or ":", so "gpt-5" matches "gpt-5.6-luna" but not
 // "gpt-50", and "sonnet" does not match "claude-sonnet-5-5".
 func modelMatches(expected, served string) bool {
 	ep, em := splitModel(expected)
@@ -35,7 +35,19 @@ func modelMatches(expected, served string) bool {
 	if !strings.HasPrefix(sm, em) || len(sm) == len(em) {
 		return false
 	}
-	return strings.ContainsRune("-_:/", rune(sm[len(em)]))
+	return strings.ContainsRune(modelSeps, rune(sm[len(em)]))
+}
+
+// modelSeps may follow the expected name in a more specific served name. "/"
+// cannot appear: splitModel has already split at the last one.
+const modelSeps = "-_:"
+
+// validExpectation rejects an expectation with no model part ("p/", "/", "").
+func validExpectation(expected string) error {
+	if _, m := splitModel(expected); m == "" {
+		return usagef("expected model %q has no model name after the provider", expected)
+	}
+	return nil
 }
 
 // modelMismatchHint explains a failed match. When the served name contains the
@@ -45,7 +57,14 @@ func modelMismatchHint(expected, served string) string {
 	const substituted = "the backend substituted a different model"
 	ep, em := splitModel(expected)
 	sp, sm := splitModel(served)
+	if em != "" && strings.ContainsRune(modelSeps, rune(em[len(em)-1])) {
+		return fmt.Sprintf("drop the trailing separator from the expected name (%s)", strings.TrimRight(expected, modelSeps+"."))
+	}
 	if ep != "" && sp != "" && ep != sp {
+		if strings.HasSuffix(sp, "/"+ep) {
+			full := served[:strings.LastIndexByte(served, '/')]
+			return fmt.Sprintf("the served provider is %s; include it in --expect-model", full)
+		}
 		return substituted
 	}
 	i := strings.Index(sm, em)
@@ -67,10 +86,15 @@ func modelMismatchHint(expected, served string) string {
 	return fmt.Sprintf("the served name contains %q but does not start with it: name the model from its start, e.g. --model %s, or keep --model and pass --expect-model %s", em, suggest, suggest)
 }
 
+// clientNote marks a pass whose model the agent CLI recorded itself.
+const clientNote = " (client-reported: the backend does not confirm the serving model, so a provider-side swap would not be detected)"
+
 // modelStep checks the served model against the expectation. flag names where
 // the expectation came from ("--model" or "--expect-model"; "" when none was
-// given). served is the parser's model field.
-func modelStep(expected, flag, served string) checkStep {
+// given). served and source are the parser's model and model_source fields.
+// A client-reported model still gets the prefix rule (that catches an agent
+// CLI resolving a pattern to another model), but a pass says it is unconfirmed.
+func modelStep(expected, flag, served, source string) checkStep {
 	st := checkStep{Name: "model"}
 	verb := "requested"
 	if flag == "--expect-model" {
@@ -89,6 +113,9 @@ func modelStep(expected, flag, served string) checkStep {
 		st.Status = stepFail
 		st.Detail = fmt.Sprintf("%s %s, but the backend served %s", verb, expected, served)
 		st.Hint = modelMismatchHint(expected, served)
+	}
+	if st.Status == stepPass && source == "client" {
+		st.Detail += clientNote
 	}
 	return st
 }

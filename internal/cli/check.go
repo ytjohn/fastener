@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -73,6 +74,19 @@ func cmdCheck(args []string, stdout, stderr io.Writer) int {
 		return parseFail(err)
 	}
 	o.Env = env
+	expectSet := false
+	fs.Visit(func(f *flag.Flag) { expectSet = expectSet || f.Name == "expect-model" })
+	if expected := expectModel; expectSet || o.Model != "" {
+		if !expectSet {
+			expected = o.Model
+		}
+		if err := validExpectation(expected); err != nil {
+			return fail(stderr, err)
+		}
+	}
+	if static && expectModel != "" {
+		fmt.Fprintln(stderr, "fastener: warning: --expect-model has no effect with --static (no model call)")
+	}
 	if err := validateDurations(o.Grace, o.MaxRuntime); err != nil {
 		return fail(stderr, err)
 	}
@@ -291,7 +305,7 @@ func runCheck(o launchOptions, opts checkOpts, stderr io.Writer) (r checkReport)
 	if expected == "" {
 		from = ""
 	}
-	ms := modelStep(expected, from, s.Model)
+	ms := modelStep(expected, from, s.Model, s.ModelSource)
 	r.Steps = append(r.Steps, ms)
 	if ms.Status == stepFail {
 		return r

@@ -450,3 +450,62 @@ func TestCheckModelStep(t *testing.T) {
 		t.Errorf("no expectation: code %d, %q %q", code, st, stepDetail(r[0], "model"))
 	}
 }
+
+// piShProfile is a pi-json backend that prints one canned run: a session event
+// and an assistant message_end built from msg (a JSON object body).
+func piShProfile(name, msg string) string {
+	script := `cat >/dev/null; printf '%s\n' '{"type":"session","id":"sess-1"}' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"pong"}],"stopReason":"stop",` + msg + `}}'`
+	return fmt.Sprintf("schema_version = 1\nname = %q\ncommand = \"sh\"\n[headless]\nargs = [\"-c\", %q]\nprompt = \"stdin\"\nparser = \"pi-json\"\n[permissions]\nauto = []\n", name, script)
+}
+
+func TestCheckPiResponseModelMismatch(t *testing.T) {
+	h := newHarness(t)
+	h.writeProfile("picomp", piShProfile("picomp", `"api":"openai-completions","provider":"p","model":"qwen3-x","responseModel":"glm-5"`))
+	r, code := h.check("picomp", "--expect-model", "qwen3")
+	if st, _ := stepStatus(r[0], "model"); code != 1 || st != "fail" || !strings.Contains(stepDetail(r[0], "model"), "served p/glm-5") {
+		t.Fatalf("code %d: %+v", code, r[0].Steps)
+	}
+}
+
+func TestCheckPiClientReportedModel(t *testing.T) {
+	h := newHarness(t)
+	h.writeProfile("piresp", piShProfile("piresp", `"api":"openai-responses","provider":"p","model":"gpt-5.6"`))
+	r, code := h.check("piresp", "--expect-model", "gpt-5")
+	if code != 0 {
+		t.Fatalf("code %d: %+v", code, r[0].Steps)
+	}
+	if d := stepDetail(r[0], "model"); !strings.Contains(d, "served p/gpt-5.6 (client-reported") {
+		t.Errorf("model detail %q", d)
+	}
+	var v struct {
+		Status struct {
+			ModelSource string `json:"model_source"`
+		} `json:"status"`
+	}
+	r, _ = h.check("piresp", "--keep")
+	if err := json.Unmarshal([]byte(h.ok("inspect", r[0].Session, "--json")), &v); err != nil || v.Status.ModelSource != "client" {
+		t.Errorf("model_source = %q (%v)", v.Status.ModelSource, err)
+	}
+}
+
+func TestCheckExpectationUsageErrors(t *testing.T) {
+	h := newHarness(t)
+	for _, args := range [][]string{
+		{"check", "fake", "--expect-model", "github-copilot/"},
+		{"check", "fake", "--expect-model", "/"},
+		{"check", "fake", "--expect-model", ""},
+		{"check", "fake", "--model", "github-copilot/"},
+	} {
+		if _, errOut, code := h.cmd(args...); code != 2 {
+			t.Errorf("%v: exit %d, want 2 (%s)", args, code, errOut)
+		}
+	}
+}
+
+func TestCheckStaticWarnsAboutExpectModel(t *testing.T) {
+	h := newHarness(t)
+	_, errOut, code := h.cmd("check", "fake", "--static", "--expect-model", "x")
+	if code != 0 || !strings.Contains(errOut, "--expect-model has no effect") {
+		t.Fatalf("code %d, stderr %q", code, errOut)
+	}
+}
