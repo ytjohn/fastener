@@ -44,10 +44,16 @@ func cmdPrune(args []string, stdout, stderr io.Writer) int {
 	if session.SessionsDir() == "" {
 		return fail(stderr, session.ErrNoStateDir)
 	}
-	res := session.PruneLocked(session.PruneOptions{
+	if ret < session.MinRetention {
+		fmt.Fprintf(stderr, "fastener: warning: retention %s is under %s; recently ended sessions will be removed\n", ret, session.MinRetention)
+	}
+	res, err := session.PruneLocked(session.PruneOptions{
 		Retention: ret, Handshake: cfg.Handshake(), DryRun: *dry,
 		Warn: func(s string) { fmt.Fprintf(stderr, "fastener: warning: %s\n", s) },
 	})
+	if err != nil {
+		return fail(stderr, err)
+	}
 	for _, f := range res.Failed {
 		fmt.Fprintf(stderr, "fastener: prune: removing %s: %s\n", f.Name, f.Err)
 	}

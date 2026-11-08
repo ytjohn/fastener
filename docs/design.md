@@ -498,11 +498,11 @@ fastener install-restore
 - **Retention:**
   - A session is pruned when all of these hold:
     - its effective state is `exited` or `restore-failed` (never `starting`, `running` or `lost`);
-    - its `ended_at` (else its `created_at`) is older than the retention period (default 168h; config `retention`, or `prune --older-than`, which must be positive);
-    - it has no orphans (the same scan `rm` uses; a grandchild left by a normal exit blocks pruning until it is stopped);
+    - the later of its `ended_at` and `created_at` (zero values ignored; a session with neither is never pruned) is older than the retention period (default 168h; config `retention`, which must be at least 1h, or `prune --older-than`, which must be positive and warns on stderr below 1h);
+    - it has no orphans (the same scan `rm` uses; a grandchild left by a normal exit blocks pruning until it is stopped), and the scan was possible: an exited session that recorded a process group but has no readable plan, or whose process scan failed, is kept with reason `unknown` (fail closed; `rm` warns in the same case but behaves as before);
     - it is not pinned (`restart=on-reboot`; v0.1 never sets it).
   - `lost` sessions are never pruned, because they may hold the only record of live processes. `prune` reports old ones as kept.
-  - `prune [--older-than D] [--dry-run] [--json]` runs on demand and prints the names removed (or, with `--dry-run`, that would be). It exits 0, or 1 if any removal failed. `--json` is `{"removed": [...], "kept": [{"name", "reason"}]}`, where `kept` lists only sessions old enough to prune that were kept (`lost`, `orphans` or `pinned`).
+  - `prune [--older-than D] [--dry-run] [--json]` runs on demand and prints the names removed (or, with `--dry-run`, that would be). It exits 0, or 1 if any removal failed. `--json` is `{"removed": [...], "kept": [{"name", "reason"}]}`, where `kept` lists only sessions old enough to prune that were kept (`lost`, `orphans`, `pinned` or `unknown`). If a removal fails, a `failed` array of `{name, error}` is added and the exit code is 1.
   - `run` and `ps` prune opportunistically, at most once per hour:
     - the stamp is `.last-prune` in the state root; if it is non-empty and under an hour old, the command does one `stat` and moves on;
     - otherwise the command takes a non-blocking `flock` on the stamp, so only one of several concurrent CLIs prunes, and the rest skip;
@@ -511,7 +511,10 @@ fastener install-restore
     - `ps` prunes before it lists, so it never shows sessions it is about to remove;
     - nothing happens before the first session exists (no stamp is created without a `sessions/` directory);
     - config `auto_prune = false` turns it off (default `true`); `fastener prune` still works. The opportunistic prune obeys `retention`.
-  - Concurrent `prune` calls serialize on the same lock and do not error.
+  - Deletion is safe against the name being reused: prune and `rm` first rename the directory to a hidden tombstone (`.prune-<name>-<rand>`, which no command lists), re-read it from there, check it is the same session (same `created_at`, generation and process marker) and still prunable, and only then delete it. If the check fails it is renamed back; if the name was taken meanwhile the tombstone is left and a warning names it.
+  - `fastener prune` takes the same lock but polls it for up to 10 s; if another prune is still running it exits 1 with "another prune is running". If the filesystem does not support `flock` (ENOLCK, EOPNOTSUPP) it proceeds without the lock and warns. `--dry-run` takes no lock. Concurrent `prune` calls otherwise serialize and do not error.
+  - A stamp is fresh only if it is under an hour old and not in the future.
+  - Callers should know that `run --name foo` may succeed after an old exited `foo` has been auto-pruned, and that a forward clock jump can make sessions look old and prune them early.
   - There is no `--rm`-on-exit flag, because it would race callers reading results.
 - **Config:** `~/.config/fastener/config.toml` holds:
   - `retention` (positive duration, default `168h`)

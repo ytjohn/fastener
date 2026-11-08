@@ -38,8 +38,10 @@ measured from when they ended. `run` and `ps` do this opportunistically, at most
 once an hour (`.last-prune` in the state directory); `ps` prunes before it lists.
 `fastener prune [--older-than D] [--dry-run] [--json]` does it on demand. Only
 `exited` and `restore-failed` sessions are removed. Sessions that are running,
-`lost`, or that still have leftover processes are never removed (`prune` reports
-the old ones it kept). Set `auto_prune = false` in the config to turn off the
+`lost`, pinned, that still have leftover processes, or whose leftover-process
+check could not be done (reason `unknown`) are never removed (`prune` reports
+the old ones it kept). `retention` must be at least 1h. After an old session is
+auto-pruned, its name can be reused by `run --name`. Set `auto_prune = false` in the config to turn off the
 opportunistic pruning.
 
 `logs` shows the agent's stdout as recorded in `output.log`. After the agent

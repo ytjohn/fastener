@@ -59,6 +59,9 @@ func cmdRm(args []string, stdout, stderr io.Writer) int {
 		}
 		return exitOK
 	}
+	if v.OrphanErr != "" {
+		fmt.Fprintf(stderr, "fastener: warning: %s: orphan check unavailable (%s); leftover processes may not be detected\n", name, v.OrphanErr)
+	}
 	if v.Alive() || len(v.Orphans) > 0 {
 		if !*force {
 			return fail(stderr, fmt.Errorf("session %s is %s (orphans: %d); stop it first or use --force", name, v.State, len(v.Orphans)))
@@ -67,8 +70,16 @@ func cmdRm(args []string, stdout, stderr io.Writer) int {
 			return fail(stderr, err)
 		}
 	}
-	if err := os.RemoveAll(string(v.Dir)); err != nil {
+	// Claim through a tombstone, so a session recreated under this name
+	// while we were looking is never deleted.
+	removed, err := session.Reap(v, handshakeTimeout(), func(nv *session.View) bool {
+		return !nv.Alive() && len(nv.Orphans) == 0
+	}, func(s string) { fmt.Fprintf(stderr, "fastener: warning: %s\n", s) })
+	if err != nil {
 		return fail(stderr, err)
+	}
+	if !removed {
+		return fail(stderr, fmt.Errorf("session %s changed while being removed; nothing was deleted", name))
 	}
 	return exitOK
 }

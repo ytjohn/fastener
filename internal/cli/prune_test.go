@@ -249,3 +249,74 @@ func TestConcurrentPrune(t *testing.T) {
 		}
 	}
 }
+
+// orphanedSession leaves an exited session with a live marked grandchild.
+func orphanedSession(t *testing.T, h *harness, name string) {
+	t.Helper()
+	pidfile := filepath.Join(t.TempDir(), "gc.pid")
+	h.start(name, []string{"FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile}, "--grace", "1s")
+	h.ok("wait", name, "--timeout", "10s")
+	pid := waitPid(t, pidfile)
+	t.Cleanup(func() { syscall.Kill(pid, syscall.SIGKILL) })
+	h.backdate(name, 500*time.Hour)
+}
+
+func TestPruneKeepsWhenPlanMissingOrCorrupt(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("process scan test is Linux-specific")
+	}
+	for _, mode := range []string{"missing", "corrupt"} {
+		t.Run(mode, func(t *testing.T) {
+			h := newHarness(t)
+			orphanedSession(t, h, "s1")
+			plan := filepath.Join(h.state, "sessions", "s1", "generations", "1.json")
+			saved, err := os.ReadFile(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "missing" {
+				os.Remove(plan)
+			} else {
+				os.WriteFile(plan, []byte("{not json"), 0o600)
+			}
+			// Restore before the harness cleanup so rm --force can find the process.
+			t.Cleanup(func() { os.WriteFile(plan, saved, 0o600) })
+			var r pruneJSON
+			if err := json.Unmarshal([]byte(h.ok("prune", "--json")), &r); err != nil {
+				t.Fatal(err)
+			}
+			if len(r.Removed) != 0 || len(r.Kept) != 1 || r.Kept[0].Reason != "unknown" || !h.exists("s1") {
+				t.Fatalf("%s plan: %+v", mode, r)
+			}
+			if _, e, code := h.cmd("rm", "s1"); code != 0 || !strings.Contains(e, "orphan check unavailable") {
+				// rm keeps its behaviour but warns.
+				t.Fatalf("rm: exit %d, stderr %q", code, e)
+			}
+		})
+	}
+}
+
+func TestPruneKeepsFreshSessionWithZeroEndedAt(t *testing.T) {
+	h := newHarness(t)
+	h.start("fresh", nil)
+	h.ok("wait", "fresh", "--timeout", "10s")
+	p := filepath.Join(h.state, "sessions", "fresh", "status.json")
+	b, _ := os.ReadFile(p)
+	var m map[string]any
+	json.Unmarshal(b, &m)
+	m["ended_at"] = "0001-01-01T00:00:00Z"
+	b, _ = json.Marshal(m)
+	os.WriteFile(p, b, 0o600)
+	h.ok("prune", "--older-than", "1h")
+	if !h.exists("fresh") {
+		t.Fatal("fresh session with zero ended_at was pruned")
+	}
+}
+
+func TestPruneWarnsBelowOneHour(t *testing.T) {
+	h := newHarness(t)
+	_, e, code := h.cmd("prune", "--older-than", "10m", "--dry-run")
+	if code != 0 || !strings.Contains(e, "under 1h") {
+		t.Fatalf("exit %d stderr %q", code, e)
+	}
+}

@@ -67,7 +67,7 @@ An array (never null) of `{name, backend, state, created_at, ended_at?, ended_by
 
 ## `prune --json`
 
-`{removed, kept}`: `removed` is an array (never null) of session names deleted, or, with `--dry-run`, that would be; `kept` is an array (never null) of `{name, reason}` for sessions old enough to prune that were kept, where `reason` is `lost`, `orphans` or `pinned`. Sessions that are not old enough, or are alive, appear in neither. If a removal fails, a `failed` array of `{name, error}` is added and the exit code is 1. Opportunistic pruning by `run` and `ps` prints nothing.
+`{removed, kept}`: `removed` is an array (never null) of session names deleted, or, with `--dry-run`, that would be; `kept` is an array (never null) of `{name, reason}` for sessions old enough to prune that were kept, where `reason` is `lost`, `orphans`, `pinned` or `unknown` (the leftover-process scan was not possible). Sessions that are not old enough, or are alive, appear in neither. If a removal fails, a `failed` array of `{name, error}` is added and the exit code is 1. Opportunistic pruning by `run` and `ps` prints nothing.
 
 ## `check --json`
 
