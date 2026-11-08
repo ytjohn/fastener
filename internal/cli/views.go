@@ -37,13 +37,16 @@ type inspectOut struct {
 	// LivenessError is set while the session is starting or running and the
 	// monitor's liveness could not be determined (it is then assumed alive).
 	LivenessError string `json:"liveness_error,omitempty"`
+	// OrphanError is set when the orphan count cannot be trusted (no readable
+	// plan, a failed process scan, or a reload that failed after launch).
+	OrphanError string `json:"orphan_error,omitempty"`
 }
 
 func inspectOf(v *session.View) inspectOut {
 	return inspectOut{
 		SchemaVersion: JSONSchemaVersion, Name: v.Session.Name, State: v.State, Backend: v.Session.Backend,
 		Orphans: len(v.Orphans), Session: v.Session, Status: v.Status, Plan: v.Plan, Launcher: v.Launcher,
-		Warnings: v.Warnings, LivenessError: v.LivenessError,
+		Warnings: v.Warnings, LivenessError: v.LivenessError, OrphanError: v.OrphanErr,
 		Paths: pathsOut{Dir: string(v.Dir), OutputLog: v.Dir.OutputLog(), StderrLog: v.Dir.StderrLog(), MonitorLog: v.Dir.MonitorLog()},
 	}
 }
@@ -117,6 +120,9 @@ func renderInspect(stdout io.Writer, v *session.View, out inspectOut) {
 	row("name", out.Name)
 	row("backend", out.Backend)
 	row("state", out.State)
+	if v.OrphanErr != "" {
+		row("orphans", "unknown ("+v.OrphanErr+")")
+	}
 	if v.LivenessError != "" {
 		row("liveness", "unknown ("+v.LivenessError+")")
 	}

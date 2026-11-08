@@ -16,6 +16,10 @@ import (
 	"github.com/ytjohn/fastener/internal/version"
 )
 
+// selectFunc picks the launcher. It is a variable only so a test in this
+// package can substitute one whose Start fails; production never reassigns it.
+var selectFunc = launcher.Select
+
 type launchOptions struct {
 	Backend, Name, Cwd string
 	Prompt, PromptFile string
@@ -100,7 +104,7 @@ func (p *prepared) selectLauncher(o launchOptions, warn io.Writer) (launcher.Lau
 	if pref == "" {
 		pref = p.cfg.Launcher
 	}
-	l, err := launcher.Select(pref, warn)
+	l, err := selectFunc(pref, warn)
 	if err != nil {
 		return nil, inStep("launch", err)
 	}
@@ -267,12 +271,7 @@ func handshakeLostAction(v *session.View) (finalize bool) {
 func handshake(name string, timeout time.Duration) (*session.View, error) {
 	deadline := time.Now().Add(timeout)
 	// full upgrades a cheap view to one with the orphan scan, for error returns.
-	full := func(v *session.View) *session.View {
-		if nv, err := session.LoadFull(name, timeout); err == nil {
-			return nv
-		}
-		return v
-	}
+	full := func(v *session.View) *session.View { return withOrphanScan(v, name, timeout, session.LoadFull) }
 	for {
 		v, err := session.Load(name, timeout)
 		if err != nil {
@@ -308,4 +307,22 @@ func handshake(name string, timeout time.Duration) (*session.View, error) {
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+}
+
+// withOrphanScan upgrades a cheap view to one with the orphan scan, for error
+// returns. It retries load once; if both attempts fail it keeps v but sets
+// OrphanErr, so the orphan count is reported as unknown rather than silently low.
+func withOrphanScan(v *session.View, name string, timeout time.Duration,
+	load func(string, time.Duration) (*session.View, error)) *session.View {
+	var err error
+	for i := 0; i < 2; i++ {
+		var nv *session.View
+		if nv, err = load(name, timeout); err == nil {
+			return nv
+		}
+	}
+	if v.OrphanErr == "" {
+		v.OrphanErr = "orphan scan unavailable: " + err.Error()
+	}
+	return v
 }

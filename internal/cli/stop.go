@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -250,6 +251,44 @@ func cleanCorrupt(name string, stderr io.Writer) error {
 		}
 	} else if err != nil {
 		fmt.Fprintf(stderr, "fastener: warning: %s: cannot read status for orphan cleanup: %v\n", name, err)
+		// No pgid or boot ID: fall back to a marker-only scan of the current
+		// boot, using the markers of whatever plans still parse.
+		if err := killByMarkers(name, d, stderr); err != nil {
+			return err
+		}
 	}
 	return os.RemoveAll(string(d))
+}
+
+// killByMarkers finds and kills processes carrying the marker of any readable
+// generation plan of the session, regardless of process group. Identity is
+// verified per pid by FindMarkedAnyGroup and killOrphans.
+func killByMarkers(name string, d session.Dir, stderr io.Writer) error {
+	boot, err := proc.BootID()
+	if err != nil {
+		fmt.Fprintf(stderr, "fastener: warning: %s: cannot determine boot for orphan cleanup: %v\n", name, err)
+		return nil
+	}
+	paths, _ := filepath.Glob(filepath.Join(string(d), "generations", "*.json"))
+	var ids []proc.Identity
+	readable := false
+	for _, pp := range paths {
+		var p session.Plan
+		if session.ReadJSON(pp, &p) != nil || p.Marker == "" {
+			continue
+		}
+		readable = true
+		found, _ := proc.FindMarkedAnyGroup(p.Marker)
+		ids = append(ids, found...)
+	}
+	if !readable {
+		fmt.Fprintf(stderr, "fastener: warning: %s: cannot read any plan for orphan cleanup\n", name)
+		return nil
+	}
+	if len(ids) > 0 {
+		if left := killOrphans(ids, boot, 10*time.Second); len(left) > 0 {
+			return fmt.Errorf("session %s: %d orphaned process(es) survived SIGKILL (%s); not removing", name, len(left), pidList(left))
+		}
+	}
+	return nil
 }

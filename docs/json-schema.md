@@ -21,6 +21,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 | `launcher` | The launcher record. Omitted if not written. |
 | `paths` | `dir`, `output_log`, `stderr_log`, `monitor_log` (absolute paths) |
 | `liveness_error` | String, omitted when empty. Present only while `state` is `starting` or `running` and the check on the monitor process failed (for example a permission error reading `/proc`). Fastener then assumes the monitor is alive rather than declaring the session `lost`, so a session can look `running` for as long as the error persists. |
+| `orphan_error` | String, omitted when empty. Why `orphans` cannot be trusted: no readable plan for the current generation, a failed process scan, or (after a failed `run`) a reload that failed twice, so the true count may be higher than reported. |
 | `warnings` | Array of strings, omitted when empty. One entry per state file whose `schema_version` is newer than this fastener understands, e.g. `status.json has schema_version 2; this fastener understands up to 1, so some fields may be ignored`. The file is still read; unknown fields are ignored. |
 
 `session` fields:

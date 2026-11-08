@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -684,6 +685,120 @@ func TestPromptFileRejectsDevicesAndDirs(t *testing.T) {
 		}
 		if code != 2 || !strings.Contains(errOut, "not a regular file or pipe") {
 			t.Errorf("%s: code %d, want 2 with a not-a-regular-file error: %s", name, code, errOut)
+		}
+	}
+}
+
+// With status.json unreadable there is no pgid or boot ID, so rm --force
+// falls back to a marker-only scan scoped to the current boot.
+func TestRmForceCorruptStatusKillsMarkedOrphans(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("pdeathsig behaviour is Linux-specific")
+	}
+	h := newHarness(t)
+	pidfile := filepath.Join(t.TempDir(), "gc.pid")
+	h.start("c1", []string{"FAKE_SLEEP=60s", "FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile}, "--grace", "1s")
+	v := h.waitState("c1", "running", 5*time.Second)
+	gcPid := waitPid(t, pidfile)
+	syscall.Kill(v.Status.Monitor.PID, syscall.SIGKILL)
+	h.waitState("c1", "lost", 5*time.Second)
+	os.WriteFile(filepath.Join(h.state, "sessions", "c1", "status.json"), []byte("{not json"), 0o600)
+	if !pidAlive(gcPid) {
+		t.Fatal("grandchild died before rm")
+	}
+	h.ok("rm", "--force", "c1")
+	if _, _, code := h.cmd("inspect", "c1"); code != 127 {
+		t.Fatal("session not removed")
+	}
+	if pidAlive(gcPid) {
+		t.Fatalf("grandchild %d survived rm --force", gcPid)
+	}
+}
+
+func TestRmForceWarnsWhenPlanUnreadable(t *testing.T) {
+	h := newHarness(t)
+	h.start("p1", nil)
+	h.ok("wait", "p1", "--timeout", "10s")
+	dir := filepath.Join(h.state, "sessions", "p1")
+	// A corrupt session.json makes the session fail to load, so rm --force
+	// takes the corrupt path; status.json stays readable and carries the pgid,
+	// and the plan holding the marker is unreadable.
+	if err := os.WriteFile(filepath.Join(dir, "session.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "generations", "1.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, errOut, code := h.cmd("rm", "p1"); code != 1 || !strings.Contains(errOut, "--force") {
+		t.Fatalf("rm without --force: %d %s", code, errOut)
+	}
+	_, errOut, code := h.cmd("rm", "--force", "p1")
+	if code != 0 || !strings.Contains(errOut, "cannot read plan for orphan cleanup") {
+		t.Fatalf("rm --force: exit %d, stderr %q; want a plan-read warning", code, errOut)
+	}
+	if _, _, code := h.cmd("inspect", "p1"); code != 127 {
+		t.Fatal("session not removed")
+	}
+}
+
+// stop and rm --force racing on a session whose monitor died: whichever wins,
+// the other must end cleanly, nothing may survive, and no tombstone may remain.
+func TestConcurrentStopAndRmOnLostSession(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("pdeathsig behaviour is Linux-specific")
+	}
+	h := newHarness(t)
+	for round := 0; round < 4; round++ {
+		name := fmt.Sprintf("race%d", round)
+		pidfile := filepath.Join(t.TempDir(), "gc.pid")
+		h.start(name, []string{"FAKE_SLEEP=60s", "FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile}, "--grace", "1s")
+		v := h.waitState(name, "running", 5*time.Second)
+		gc := waitPid(t, pidfile)
+		syscall.Kill(v.Status.Monitor.PID, syscall.SIGKILL)
+		if v = h.waitState(name, "lost", 5*time.Second); v.Orphans < 1 {
+			t.Fatalf("%s: orphans = %d, want the grandchild", name, v.Orphans)
+		}
+
+		type result struct {
+			what, errOut string
+			code         int
+		}
+		results := make(chan result, 2)
+		start := make(chan struct{})
+		for _, args := range [][]string{{"stop", name, "--grace", "1s"}, {"rm", "--force", name}} {
+			go func(args []string) {
+				<-start
+				_, errOut, code := h.run(args...)
+				results <- result{args[0], errOut, code}
+			}(args)
+		}
+		close(start)
+		for i := 0; i < 2; i++ {
+			r := <-results
+			if r.code != 0 && r.code != 127 {
+				t.Errorf("%s: %s exited %d: %s", name, r.what, r.code, r.errOut)
+			}
+			if strings.Contains(strings.ToLower(r.errOut), "panic") {
+				t.Errorf("%s: %s crashed: %s", name, r.what, r.errOut)
+			}
+		}
+
+		// Either the session is gone (rm won or ran last) or it is finalized once.
+		if _, _, code := h.cmd("inspect", name); code != 127 {
+			after := h.inspect(name)
+			if after.State != "exited" || after.Orphans != 0 || after.Status.EndedBy != "stop" {
+				t.Errorf("%s: leftover session %+v", name, after)
+			}
+			h.ok("rm", "--force", name)
+		}
+		if pidAlive(gc) {
+			t.Errorf("%s: grandchild %d survived", name, gc)
+		}
+		entries, _ := os.ReadDir(filepath.Join(h.state, "sessions"))
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), ".prune-") {
+				t.Errorf("%s: tombstone %s left behind", name, e.Name())
+			}
 		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -24,6 +25,10 @@ var ErrMonitorAlive = errors.New("monitor is still alive")
 func Finalize(d Dir, mutate func(*Status)) (bool, error) {
 	f, err := os.OpenFile(d.LockPath(), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// The session directory is gone: a concurrent rm removed it.
+			return false, fmt.Errorf("%w: %s", ErrNotFound, filepath.Base(string(d)))
+		}
 		return false, err
 	}
 	defer f.Close()
