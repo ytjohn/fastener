@@ -28,10 +28,13 @@ func Dir() string {
 	if v := os.Getenv("FASTENER_CONFIG_DIR"); v != "" {
 		return v
 	}
-	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
+	if v := os.Getenv("XDG_CONFIG_HOME"); filepath.IsAbs(v) {
 		return filepath.Join(v, "fastener")
 	}
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
 	return filepath.Join(home, ".config", "fastener")
 }
 
@@ -51,6 +54,9 @@ func defaults() Config {
 // Load returns defaults overlaid with config.toml, if present. Unknown keys are errors.
 func Load() (Config, error) {
 	c := defaults()
+	if Dir() == "" {
+		return c, nil
+	}
 	path := filepath.Join(Dir(), "config.toml")
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -71,9 +77,18 @@ func Load() (Config, error) {
 		return c, fmt.Errorf("%s: unknown keys: %s", path, strings.Join(keys, ", "))
 	}
 	for _, d := range []struct{ name, v string }{{"handshake_timeout", c.HandshakeTimeout}, {"retention", c.Retention}} {
-		if _, err := time.ParseDuration(d.v); err != nil {
+		dur, err := time.ParseDuration(d.v)
+		if err != nil {
 			return c, fmt.Errorf("%s: %s: %w", path, d.name, err)
 		}
+		if dur <= 0 {
+			return c, fmt.Errorf("%s: %s must be positive, got %q", path, d.name, d.v)
+		}
+	}
+	switch c.Launcher {
+	case "auto", "setsid", "systemd":
+	default:
+		return c, fmt.Errorf("%s: launcher must be auto, setsid or systemd, got %q", path, c.Launcher)
 	}
 	return c, nil
 }

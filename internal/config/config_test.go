@@ -21,7 +21,7 @@ func TestDefaultsWhenMissing(t *testing.T) {
 func TestLoadAndUnknownKey(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("FASTENER_CONFIG_DIR", dir)
-	os.WriteFile(filepath.Join(dir, "config.toml"), []byte("handshake_timeout = \"2s\"\nenv_passthrough = [\"HOME\"]\n"), 0o600)
+	writeCfg(t, dir, "handshake_timeout = \"2s\"\nenv_passthrough = [\"HOME\"]\n")
 	c, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -29,11 +29,11 @@ func TestLoadAndUnknownKey(t *testing.T) {
 	if c.Handshake() != 2*time.Second || len(c.EnvPassthrough) != 1 {
 		t.Fatalf("got %+v", c)
 	}
-	os.WriteFile(filepath.Join(dir, "config.toml"), []byte("bogus = 1\n"), 0o600)
+	writeCfg(t, dir, "bogus = 1\n")
 	if _, err := Load(); err == nil {
 		t.Fatal("unknown key accepted")
 	}
-	os.WriteFile(filepath.Join(dir, "config.toml"), []byte("handshake_timeout = \"soon\"\n"), 0o600)
+	writeCfg(t, dir, "handshake_timeout = \"soon\"\n")
 	if _, err := Load(); err == nil {
 		t.Fatal("bad duration accepted")
 	}
@@ -43,5 +43,63 @@ func TestBackendsDir(t *testing.T) {
 	t.Setenv("FASTENER_CONFIG_DIR", "/x/cfg")
 	if BackendsDir() != "/x/cfg/backends" {
 		t.Fatal(BackendsDir())
+	}
+}
+
+func writeCfg(t *testing.T, dir, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPartialFileKeepsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FASTENER_CONFIG_DIR", dir)
+	writeCfg(t, dir, "launcher = \"setsid\"\n")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Launcher != "setsid" || c.Handshake() != 5*time.Second || c.Retention != "168h" || len(c.EnvPassthrough) == 0 || c.DetachKey != "ctrl-]" {
+		t.Fatalf("defaults lost: %+v", c)
+	}
+}
+
+func TestEmptyPassthrough(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FASTENER_CONFIG_DIR", dir)
+	writeCfg(t, dir, "env_passthrough = []\n")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.EnvPassthrough) != 0 {
+		t.Fatalf("EnvPassthrough = %v, want empty", c.EnvPassthrough)
+	}
+}
+
+func TestRejectsBadValues(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FASTENER_CONFIG_DIR", dir)
+	for _, body := range []string{
+		"handshake_timeout = \"0s\"\n",
+		"handshake_timeout = \"-1s\"\n",
+		"retention = \"0s\"\n",
+		"retention = \"-1h\"\n",
+		"launcher = \"sytemd\"\n",
+	} {
+		writeCfg(t, dir, body)
+		if _, err := Load(); err == nil {
+			t.Errorf("accepted %q", body)
+		}
+	}
+}
+
+func TestRelativeXDGIgnored(t *testing.T) {
+	t.Setenv("FASTENER_CONFIG_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", "relative")
+	if d := Dir(); d == filepath.Join("relative", "fastener") {
+		t.Fatalf("relative XDG_CONFIG_HOME used: %q", d)
 	}
 }
