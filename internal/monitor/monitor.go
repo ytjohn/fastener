@@ -46,6 +46,8 @@ type monitor struct {
 	plan session.Plan
 	log  *log.Logger
 
+	beforeWait func(pid int) // test hook, called just before the main wait
+
 	mu    sync.Mutex
 	st    session.Status
 	dirty bool
@@ -195,7 +197,11 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 		m.log.Printf("received %v before spawn", sig)
 		pw.Close()
 		pr.Close()
-		m.finish(session.EndedBySignal, nil)
+		endedBy := session.EndedBySignal
+		if _, ok := m.stopRequest(); ok {
+			endedBy = session.EndedByStop
+		}
+		m.finish(endedBy, nil)
 		return 0
 	default:
 	}
@@ -265,17 +271,18 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 			return false
 		}
 	}
-	gone := false // exitPending already consumed
+	if m.beforeWait != nil {
+		m.beforeWait(pid) // test hook: lets a test make exit and signal ready together
+	}
 	select {
 	case <-exitPending:
-		gone = true
 	case <-limit:
-		if gone = exitedAlready(); !gone {
+		if !exitedAlready() {
 			endedBy = session.EndedByLimit
-			gone = m.terminate(cmd, pid, time.Duration(m.sess.Grace), exitPending)
+			m.terminate(cmd, pid, time.Duration(m.sess.Grace), exitPending)
 		}
 	case sig := <-sigs:
-		if gone = exitedAlready(); !gone {
+		if !exitedAlready() {
 			grace := time.Duration(m.sess.Grace)
 			endedBy = session.EndedBySignal
 			if req, ok := m.stopRequest(); ok {
@@ -285,10 +292,9 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 				}
 			}
 			m.log.Printf("received %v; ended_by=%s grace=%s", sig, endedBy, grace)
-			gone = m.terminate(cmd, pid, grace, exitPending)
+			m.terminate(cmd, pid, grace, exitPending)
 		}
 	}
-	_ = gone
 	close(reapNow) // signalling is finished; let the spawn goroutine reap
 	ps := <-exited
 
@@ -323,7 +329,8 @@ func (m *monitor) terminate(cmd *exec.Cmd, pgid int, grace time.Duration, exitPe
 	select {
 	case <-exitPending:
 	case <-time.After(30 * time.Second):
-		m.log.Printf("agent did not exit 30s after SIGKILL")
+		m.log.Printf("agent still alive after SIGKILL; still waiting for it to exit")
+		<-exitPending
 	}
 	return true
 }

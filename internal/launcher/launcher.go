@@ -43,17 +43,16 @@ func (Setsid) Start(d session.Dir, gen int) (session.LauncherRecord, error) {
 	if err != nil {
 		return session.LauncherRecord{}, err
 	}
-	abs, err := filepath.Abs(string(d)) // the monitor runs with cwd "/"
+	d, args, err := monitorArgs(d, gen)
 	if err != nil {
 		return session.LauncherRecord{}, err
 	}
-	d = session.Dir(abs)
 	logf, err := os.OpenFile(d.MonitorLog(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return session.LauncherRecord{}, err
 	}
 	defer logf.Close()
-	cmd := exec.Command(exe, "_monitor", string(d), strconv.Itoa(gen))
+	cmd := exec.Command(exe, args...)
 	cmd.Dir = "/"
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -70,4 +69,14 @@ func (Setsid) Start(d session.Dir, gen int) (session.LauncherRecord, error) {
 		SchemaVersion: session.SchemaVersion, Launcher: "setsid",
 		Monitor: &id, BootID: boot, LaunchedAt: time.Now().UTC(),
 	}, nil
+}
+
+// monitorArgs returns the absolute session dir and the monitor's argv (after
+// the executable). The monitor runs with cwd "/", so the dir must be absolute.
+func monitorArgs(d session.Dir, gen int) (session.Dir, []string, error) {
+	abs, err := filepath.Abs(string(d))
+	if err != nil {
+		return d, nil, err
+	}
+	return session.Dir(abs), []string{"_monitor", abs, strconv.Itoa(gen)}, nil
 }
