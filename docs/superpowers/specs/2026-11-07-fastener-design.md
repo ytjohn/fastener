@@ -65,8 +65,9 @@ ${XDG_STATE_HOME:-~/.local/state}/fastener/
     generations/<n>.launcher.json # launcher identity; written by the CLI right after the monitor starts
     status.json          # runtime facts; written by the monitor (see "single writer")
     stop-request.json    # written by the CLI before signalling a stop
-    output.log           # raw agent output for the current generation
-    output.<n>.log       # previous generations (restored sessions)
+    output.log           # agent stdout (raw stream) for the current generation
+    stderr.log           # agent stderr for the current generation (headless; a pty merges both)
+    output.<n>.log       # previous generations (restored sessions); likewise stderr.<n>.log
     monitor.log          # monitor diagnostics
     lock                 # flock target for CLI-side finalization
     attach.sock          # phase B
@@ -265,6 +266,12 @@ skip = ["--dangerously-skip-permissions"]
 [resume]
 args = ["--resume", "{conversation_id}"]
 
+[check]                          # used by `fastener check` (§6.1)
+version_args = ["--version"]     # for --static
+diagnose = [
+  { match = '(?i)not logged in|please run /login|invalid api key', hint = "auth: run `claude` interactively and log in" },
+]
+
 # Phase B
 [interactive]
 args = []
@@ -284,8 +291,58 @@ url_pattern = 'https://claude\.ai/\S+'
   - Fastener never substitutes the backend's default permissions or `skip`.
 - **Resolution:** `~/.config/fastener/backends/<name>.toml` (`$XDG_CONFIG_HOME`) **replaces** the embedded built-in of the same name entirely. There is no merging.
 - **Validation:** an unknown key, a missing required section or an unknown parser or finder name is an error, both at load time and in `fastener backends --check`.
-- **Built-ins** (`profiles/*.toml`, embedded with `go:embed`): `claude`, `codex`, `pi`. Every flag in a built-in profile must be verified against the real CLI by the opt-in smoke tests before release. The values above are illustrative until then.
+- **Built-ins** (`profiles/*.toml`, embedded with `go:embed`): `claude`, `codex`, `pi`. Every flag in a built-in profile must be verified against the real CLI by `fastener check` (the opt-in smoke tests, §12) before release. The values above are illustrative until then.
 - **Adding a backend** means writing a TOML file. Adding a *built-in* backend is a PR containing the profile plus a recorded-output test fixture. If the backend needs a new output format, the PR also adds a parser.
+
+### 6.1 `fastener check`: proving a backend works
+
+`fastener check <backend> [run options]` runs a real session through the normal path (same launcher, monitor, profile rendering and parser). It then verifies every step, so "does this backend work, with these options, right now?" has a mechanical answer. It is not a separate code path: if `check` passes, `run` with the same options works.
+
+- **Prompt:** fixed: `Reply with exactly one word: pong`.
+- **Defaults:**
+  - `--max-runtime 2m`;
+  - `--cwd` is a fresh temporary directory, removed afterwards;
+  - label `fastener.check=true`;
+  - permissions resolved exactly as for `run`.
+- **Options:** the same as `run` (`--model`, `--permissions`, `--env-file`, `--env`, `--cwd`, `--launcher`, `--max-runtime`). So `fastener check pi --model X` tests that exact combination.
+- **Other flags:**
+  - `--keep` keeps the session for inspection; by default it is removed after the check.
+  - `--all` checks every resolvable backend.
+  - `--static` skips the model call.
+  - `--json` gives the step-by-step result.
+
+**Steps** (stop at the first failure; each reports `pass` / `fail` / `skip` with detail):
+
+| Step | Passes when |
+|---|---|
+| `profile` | The profile resolves and validates; the requested permission level and every given option are mapped |
+| `binary` | `command` is found on the session's resolved PATH (not the caller's shell PATH); `version_args` exits 0 |
+| `launch` | The handshake reaches `running`; `session.json`, `prompt.txt`, the plan, the launcher record, `status.json` and `output.log` all exist |
+| `exit` | The session ends `ended_by=exit` with exit code 0 within the limit |
+| `parse` | `conversation_id` and `final_message` were extracted; `agent_error` is not true; `parse_errors` is 0 |
+| `reply` | `final_message` contains `pong` (case-insensitive) |
+| `cleanup` | The session is stopped if still alive, and removed unless `--keep` |
+
+`--static` runs only `profile` and `binary`, with no model call and no cost. It suits CI and install checks, and replaces a separate `backends --check`.
+
+**Diagnosis.** On failure, the profile's `[check].diagnose` patterns (regexes) are matched against `stderr.log`, `output.log` and the parser's `final_message`. The first match's `hint` is printed. This turns known failures into actionable messages. Examples:
+- Claude logged out: "auth: run `claude` interactively and log in".
+- A provider no longer serves Pi's default model: "model unavailable: pass --model, or update the backend's default model".
+
+Built-in fallbacks:
+- A `limit` ending: "timed out: the agent may be waiting for interactive input (for example a login prompt)".
+- Any other unmatched failure: the last 20 lines of `stderr.log`.
+
+`diagnose` entries are data and ship in built-in profiles. Adding one for a newly seen failure is a profile PR.
+
+**Exit code:** 0 if every requested check passed, 1 otherwise. Usage errors exit 2, and an unknown backend exits 127.
+
+**Who uses it:**
+- humans after installing or upgrading an agent CLI;
+- the release smoke tests (§12);
+- callers that want to check a backend before dispatching work to it (for example, catching a logged-out CLI before it wastes an attempt).
+
+Phase B adds `check --interactive [--remote]`. It launches with a pty, confirms the conversation finder found an ID, and (for `--remote`) that `url_pattern` matched.
 
 ## 7. Parsers
 
@@ -348,7 +405,8 @@ fastener wait <name> [--timeout D]
 fastener stop <name> [--grace D]
 fastener rm <name> [--force]
 fastener prune [--older-than D]
-fastener backends [--check] [--json]
+fastener backends [--json]
+fastener check <backend> | --all [--static] [--keep] [run options] [--json]
 fastener version [--json]
 # phase B
 fastener run <backend> --interactive [--remote] [--restart no|on-reboot] ...
@@ -436,7 +494,8 @@ docs/                  json-schema.md, profiles.md, design specs
   - prune and retention;
   - `wait` exit codes;
   - label filtering.
-- **Live smoke** (opt-in, `FASTENER_SMOKE=1`; costs model calls): each built-in profile runs a trivial prompt with `auto` permissions. The test checks for `exited` with exit 0, a non-empty `conversation_id` and a non-empty `final_message`. This is also the release check that built-in flags are correct.
+- **Live smoke** (opt-in, `FASTENER_SMOKE=1`; costs model calls): runs `fastener check --all --json` and requires every built-in backend to pass. This is the release check that built-in flags are correct. There is no separate smoke-test logic.
+- **`check` itself** is tested against the fake agent: a passing reply, a wrong reply, `agent_error`, a timeout (built-in hint), a `diagnose` pattern match in `stderr.log`, and a missing binary.
 - **CI:** Linux and macOS runners; `go vet`, `staticcheck`, `go test -race`.
 
 ## 13. Milestones
@@ -445,12 +504,14 @@ docs/                  json-schema.md, profiles.md, design specs
    - setsid launcher;
    - `run`, `ps`, `inspect`, `logs`, `wait`, `stop`, `rm`;
    - profiles plus the `none` parser;
+   - `check`, both full and `--static`, with stderr capture;
    - fake agent and lifecycle tests.
 2. **v0.2:**
    - systemd launcher;
    - `claude-stream-json` and `codex-jsonl` parsers;
    - built-in `claude`, `codex` and `pi` profiles verified by smoke tests;
-   - labels, prune, `backends --check`.
+   - labels, prune;
+   - `diagnose` patterns for the known Claude auth and Pi model failures.
 3. **v0.3, phase B:** pty monitor, `attach`, `--remote`, conversation finders, `restore`, `install-restore`.
 
 **Acceptance for v0.3:**
