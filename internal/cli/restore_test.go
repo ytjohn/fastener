@@ -190,7 +190,7 @@ func TestRestoreSkips(t *testing.T) {
 
 	// Lost with orphans alive: the monitor dies (taking the agent with it on
 	// Linux), but a grandchild that ignores SIGTERM survives.
-	h.startOnReboot("br-orphan", "FAKE_GRANDCHILD=1")
+	h.startOnReboot("br-orphan", "FAKE_GRANDCHILD=1", "--grace=300ms")
 	mon := h.inspect("br-orphan").Status.Monitor.PID
 	syscall.Kill(mon, syscall.SIGKILL)
 	h.waitState("br-orphan", "lost", 10*time.Second)
@@ -202,7 +202,27 @@ func TestRestoreSkips(t *testing.T) {
 	if exists(filepath.Join(h.sessDir("br-orphan"), "generations", "2.json")) {
 		t.Error("a generation 2 was planned beside live orphans")
 	}
-	h.ok("stop", "br-orphan") // kills the orphans, finalizes
+	if !strings.Contains(rs[0].Message, "then fastener restore br-orphan") {
+		t.Errorf("orphans message = %q", rs[0].Message)
+	}
+	// The way out the message names: stop cleans them up and finalizes, after
+	// which an unnamed restore leaves the session alone, and a named one
+	// relaunches it.
+	h.ok("stop", "br-orphan")
+	if v := h.inspect("br-orphan"); v.State != "exited" || v.Orphans != 0 || v.Status.EndedBy != "stop" {
+		t.Fatalf("after stop: %+v", v)
+	}
+	if rs := h.restore(0); len(rs) != 0 {
+		t.Errorf("unnamed restore took a stopped session: %+v", rs)
+	}
+	if rs := h.restore(0, "br-orphan"); len(rs) != 1 || rs[0].Result != "restored" || rs[0].Generation != 2 || rs[0].RemoteURL != fakeBridgeURL {
+		t.Errorf("named restore after stop = %+v", rs)
+	}
+	h.ok("stop", "br-orphan")
+	// A session stopped normally (not finalized from lost) is still refused.
+	if rs := h.restore(0, "br-orphan"); len(rs) != 1 || rs[0].Reason != "not_lost" {
+		t.Errorf("restore of a normally stopped session = %+v", rs)
+	}
 
 	// Headless sessions are never restored.
 	h.start("hl", []string{"FAKE_SLEEP=1h"})
@@ -257,7 +277,7 @@ func TestRestoreFailedProfile(t *testing.T) {
 		}
 	}
 	v := h.restoreInspect("br-norem")
-	if v.State != "restore-failed" || v.Status.RestoreReason != "no_remote" || v.Status.Generation != 1 {
+	if v.State != "restore-failed" || v.Status.RestoreReason != "no_remote" || v.Status.Generation != 1 || v.Status.RemoteURL != "" {
 		t.Errorf("inspect = %+v", v)
 	}
 	if exists(filepath.Join(h.sessDir("br-norem"), "generations", "2.json")) || !bytes.Equal(h.readFile("br-norem", "output.log"), gen1) {
@@ -451,4 +471,111 @@ func TestRestoreKeepsSystemdLauncher(t *testing.T) {
 	}
 	h.ok("stop", "br-sysd")
 	h.waitState("br-sysd", "exited", 15*time.Second)
+}
+
+// orphanWrapper is a profile command that leaves a marked grandchild behind
+// (same process group, ignoring SIGTERM) and then fails as an untrusted
+// folder would.
+func orphanWrapper(t *testing.T) string {
+	t.Helper()
+	w := filepath.Join(t.TempDir(), "orphaning-agent")
+	body := "#!/bin/sh\nFAKE_ROLE=grandchild " + fakeBin + " >/dev/null 2>&1 &\nFAKE_UNTRUSTED=1 exec " + fakeBin + " \"$@\"\n"
+	if err := os.WriteFile(w, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+// TestRestoreFailedOrphans: a relaunch that failed but left a marked process
+// behind shows it in inspect; plain rm refuses, stop and rm --force clean up.
+func TestRestoreFailedOrphans(t *testing.T) {
+	h := newBridgeHarness(t)
+	full := fmt.Sprintf(fakeBridgeProfile, fakeBin)
+	for _, n := range []string{"rf-stop", "rf-force"} {
+		h.startOnReboot(n, "--grace=300ms")
+		h.simulateReboot(n)
+	}
+	h.writeProfile("fakebridge", strings.Replace(full, fmt.Sprintf("%q", fakeBin), fmt.Sprintf("%q", orphanWrapper(t)), 1))
+	rs := h.restore(1)
+	if len(rs) != 2 || rs[0].Reason != "untrusted_workspace" || rs[1].Reason != "untrusted_workspace" {
+		t.Fatalf("restore = %+v", rs)
+	}
+	for _, n := range []string{"rf-stop", "rf-force"} {
+		if v := h.inspect(n); v.State != "restore-failed" || v.Orphans != 1 {
+			t.Fatalf("%s: state %s, orphans %d; want restore-failed with 1", n, v.State, v.Orphans)
+		}
+		if _, errOut, code := h.cmd("rm", n); code != 1 || !strings.Contains(errOut, "orphans: 1") {
+			t.Errorf("rm %s: exit %d, %q", n, code, errOut)
+		}
+	}
+	h.ok("stop", "rf-stop")
+	if v := h.inspect("rf-stop"); v.State != "restore-failed" || v.Orphans != 0 {
+		t.Errorf("after stop: state %s, orphans %d", v.State, v.Orphans)
+	}
+	h.ok("rm", "rf-stop")
+	h.ok("rm", "--force", "rf-force")
+	if out := h.ok("ps", "--all", "--json"); strings.TrimSpace(out) != "[]" {
+		t.Errorf("left behind: %s", out)
+	}
+}
+
+// TestRestoreStoppedWhileWaiting: a relaunched bridge stopped while restore
+// waits for its URL is skipped as stopped and stays exited.
+func TestRestoreStoppedWhileWaiting(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.writeConfig("remote_wait = \"500ms\"\n") // the URL never comes; do not wait long for it here
+	h.ok("run", "fakebridge", "--remote", "--restart", "on-reboot", "--cwd", h.work, "--name", "br-stop",
+		"--env", "FAKE_BRIDGE=1", "--env", "FAKE_BRIDGE_URL_AFTER=1h", "--grace", "2s")
+	h.simulateReboot("br-stop")
+	h.writeConfig("remote_wait = \"20s\"\n") // restore is still waiting when stop comes
+	done := make(chan string, 1)
+	go func() {
+		out, _, _ := h.run("restore", "--json")
+		done <- out
+	}()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		v := h.restoreInspect("br-stop")
+		if v.State == "running" && v.Status.Generation == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("generation 2 never ran: %+v", v)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	h.ok("stop", "br-stop")
+	var rs []restoreJSON
+	if err := json.Unmarshal([]byte(<-done), &rs); err != nil || len(rs) != 1 {
+		t.Fatalf("restore output: %v %+v", err, rs)
+	}
+	if r := rs[0]; r.Result != "skipped" || r.Reason != "stopped" || r.Generation != 2 {
+		t.Errorf("restore = %+v", r)
+	}
+	if v := h.restoreInspect("br-stop"); v.State != "exited" || v.Status.RestoreReason != "" {
+		t.Errorf("after stop: %+v", v)
+	}
+}
+
+// TestRmRefusesDuringRestore: rm never removes a session whose restore lock
+// is held.
+func TestRmRefusesDuringRestore(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.startOnReboot("br-rm")
+	h.simulateReboot("br-rm")
+	f, err := os.OpenFile(filepath.Join(h.sessDir("br-rm"), "restore.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"rm", "br-rm"}, {"rm", "--force", "br-rm"}} {
+		if _, errOut, code := h.cmd(args...); code != 1 || !strings.Contains(errOut, "a restore is in progress") {
+			t.Errorf("%v: exit %d, %q", args, code, errOut)
+		}
+	}
+	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	h.ok("rm", "br-rm")
 }

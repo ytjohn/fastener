@@ -62,6 +62,13 @@ func cmdRm(args []string, stdout, stderr io.Writer) int {
 		}
 		return exitOK
 	}
+	// Never remove a session a restore is relaunching (it holds restore.lock
+	// for the whole relaunch). The lock is only tried, never waited for.
+	if unlock, err := session.LockRestore(v.Dir, 0); errors.Is(err, session.ErrRestoreBusy) {
+		return fail(stderr, fmt.Errorf("session %s: a restore is in progress; try again once it has finished", name))
+	} else if err == nil {
+		defer unlock()
+	}
 	if v.OrphanErr != "" {
 		if !*force {
 			return fail(stderr, fmt.Errorf("session %s: orphan check unavailable (%s), so leftover processes cannot be ruled out; use --force to remove it anyway", name, v.OrphanErr))
@@ -120,10 +127,11 @@ func stopOnce(v *session.View, grace time.Duration, by string, retried bool) err
 		grace = v.Session.EffectiveGrace()
 	}
 	switch {
-	case v.State == session.StateExited && len(v.Orphans) > 0:
-		// The agent ended normally but left descendants. status.json is already
-		// final, so just clean them up; do not re-finalize.
-		if left := killOrphans(v.Orphans, v.Status.BootID, grace); len(left) > 0 {
+	case (v.State == session.StateExited || v.State == session.StateRestoreFailed) && len(v.Orphans) > 0:
+		// The agent ended normally (or a relaunch ended at once) but left
+		// descendants. status.json is already final, so just clean them up;
+		// do not re-finalize.
+		if left := killOrphans(v.Orphans, orphanBoot(v), grace); len(left) > 0 {
 			return fmt.Errorf("session %s: %d orphaned process(es) survived SIGKILL (%s)", v.Session.Name, len(left), pidList(left))
 		}
 		return nil
@@ -153,7 +161,7 @@ func stopOnce(v *session.View, grace time.Duration, by string, retried bool) err
 		return waitStopped(v.Session.Name, grace+2*handshakeTimeout()+10*time.Second, grace, by)
 	case v.State == session.StateLost:
 		if len(v.Orphans) > 0 {
-			if left := killOrphans(v.Orphans, v.Status.BootID, grace); len(left) > 0 {
+			if left := killOrphans(v.Orphans, orphanBoot(v), grace); len(left) > 0 {
 				return fmt.Errorf("session %s: %d orphaned process(es) survived SIGKILL (%s); not finalizing", v.Session.Name, len(left), pidList(left))
 			}
 		}
@@ -161,7 +169,7 @@ func stopOnce(v *session.View, grace time.Duration, by string, retried bool) err
 			now := time.Now().UTC()
 			s.State, s.EndedBy, s.EndedAt = session.StateExited, session.EndedByStop, &now
 			if s.Error == "" {
-				s.Error = "monitor was lost; finalized by " + by
+				s.Error = lostFinalizedBy + by
 			}
 		})
 		if errors.Is(err, session.ErrMonitorAlive) && !retried {
@@ -175,6 +183,21 @@ func stopOnce(v *session.View, grace time.Duration, by string, retried bool) err
 		return err
 	}
 	return fmt.Errorf("session %s in unexpected state %q", v.Session.Name, v.State)
+}
+
+// lostFinalizedBy starts the error a lost session is finalized with by stop
+// or rm ("monitor was lost; finalized by stop").
+const lostFinalizedBy = "monitor was lost; finalized by "
+
+// orphanBoot is the boot to verify orphans against: the recorded one, else
+// the current boot (an any-group marker scan finds only current-boot
+// processes, and a session that never recorded a boot has nothing older).
+func orphanBoot(v *session.View) string {
+	if b := v.RecordedBoot(); b != "" {
+		return b
+	}
+	b, _ := proc.BootID()
+	return b
 }
 
 // unitOnly returns the unit of a systemd launcher record with no monitor identity.

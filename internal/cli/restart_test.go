@@ -9,12 +9,17 @@ import (
 )
 
 // startOnReboot starts a fake bridge with --restart on-reboot and waits for
-// its URL (run --remote does).
+// its URL (run --remote does). env entries become --env flags, except ones
+// starting with "--", which are passed as they are.
 func (h *harness) startOnReboot(name string, env ...string) {
 	h.t.Helper()
 	args := []string{"run", "fakebridge", "--remote", "--restart", "on-reboot", "--cwd", h.work, "--name", name,
 		"--env", "FAKE_BRIDGE=1"}
 	for _, e := range env {
+		if strings.HasPrefix(e, "--") {
+			args = append(args, e) // a flag, e.g. --grace=300ms
+			continue
+		}
 		args = append(args, "--env", e)
 	}
 	h.ok(args...)

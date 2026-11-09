@@ -10,7 +10,6 @@ import (
 
 	"github.com/ytjohn/fastener/internal/config"
 	"github.com/ytjohn/fastener/internal/launcher"
-	"github.com/ytjohn/fastener/internal/proc"
 	"github.com/ytjohn/fastener/internal/profile"
 	"github.com/ytjohn/fastener/internal/runenv"
 	"github.com/ytjohn/fastener/internal/session"
@@ -38,6 +37,7 @@ const (
 	rsOrphans        = "orphans"         // marked processes of the old generation are alive
 	rsOrphansUnknown = "orphans_unknown" // the leftover-process scan was not possible
 	rsBusy           = "restore_in_progress"
+	rsStopped        = "stopped" // the relaunched generation was stopped (fastener stop) while restore waited
 	// failed
 	rsNotFound     = "not_found"
 	rsConfig       = "config"
@@ -149,7 +149,7 @@ func restoreOne(name string, explicit, dry bool, stderr io.Writer) (r restoreOut
 	if !explicit && (v.Session.Restart != restartOnReboot || v.State != session.StateLost) {
 		return r, false // only lost on-reboot sessions are candidates
 	}
-	if reason, msg := notRestorable(v); reason != "" {
+	if reason, msg := notRestorable(v, explicit); reason != "" {
 		return skip(reason, msg)
 	}
 	if dry {
@@ -170,7 +170,7 @@ func restoreOne(name string, explicit, dry bool, stderr io.Writer) (r restoreOut
 		r.Result, r.Reason, r.Message = restoreFailed, rsError, err.Error()
 		return r, true
 	}
-	if reason, msg := notRestorable(v); reason != "" {
+	if reason, msg := notRestorable(v, explicit); reason != "" {
 		return skip(reason, msg)
 	}
 	if reason, msg := restoreOrphans(v); reason != "" {
@@ -181,8 +181,9 @@ func restoreOne(name string, explicit, dry bool, stderr io.Writer) (r restoreOut
 
 // notRestorable is why v cannot be restored at all, "" if it can be tried.
 // Lost and restore-failed sessions with restart=on-reboot that are remote
-// bridges can be.
-func notRestorable(v *session.View) (reason, msg string) {
+// bridges can be, and, when named (explicit), one that `stop` finalized from
+// lost (after cleaning up the orphans that made restore skip it).
+func notRestorable(v *session.View, explicit bool) (reason, msg string) {
 	s := v.Session
 	switch {
 	case s.Restart != restartOnReboot:
@@ -191,12 +192,20 @@ func notRestorable(v *session.View) (reason, msg string) {
 		return rsNotRemote, fmt.Sprintf("a %s session is never restored (only remote bridges are, in this version)", kindOf(s))
 	case v.Alive():
 		return rsRunning, "the session is " + v.State
+	case v.State == session.StateExited && explicit && finalizedFromLost(v):
+		return "", "" // `stop` cleaned up a lost session's orphans; named, it may be restored
 	case v.State == session.StateExited:
 		return rsNotLost, "the session ended (ended_by=" + v.Status.EndedBy + "); restore only relaunches lost sessions"
 	case v.State != session.StateLost && v.State != session.StateRestoreFailed:
 		return rsNotLost, "the session is " + v.State
 	}
 	return "", ""
+}
+
+// finalizedFromLost reports whether an exited session was finalized by
+// `stop` from lost, rather than ending under its monitor.
+func finalizedFromLost(v *session.View) bool {
+	return v.Status.EndedBy == session.EndedByStop && v.Status.Error == lostFinalizedBy+"stop"
 }
 
 func kindOf(s session.Session) string {
@@ -207,34 +216,19 @@ func kindOf(s session.Session) string {
 }
 
 // restoreOrphans checks that nothing of the old generation is still alive:
-// every process carrying its marker, in any process group (stricter than the
-// pgid scan stop and rm use, since a relaunch would run beside it). A previous
-// boot's processes cannot have survived, so that case needs no scan.
+// every process carrying its marker, in any process group
+// (session.View.MarkedAnyGroup: a previous boot's processes cannot have
+// survived, so that case needs no scan). stop uses the same scan for a lost
+// session, so the way out the message names clears exactly what blocks.
 func restoreOrphans(v *session.View) (reason, msg string) {
-	if v.Plan == nil || v.Plan.Marker == "" {
-		if v.Status.PGID > 0 || v.Status.Agent != nil {
-			return rsOrphansUnknown, "no readable plan for the current generation, so leftover processes cannot be ruled out"
-		}
-		return "", "" // nothing was ever spawned
-	}
-	boot := v.Status.BootID
-	if boot == "" && v.Launcher != nil {
-		boot = v.Launcher.BootID
-	}
-	cur, err := proc.BootID()
+	ids, err := v.MarkedAnyGroup()
 	if err != nil {
-		return rsOrphansUnknown, "cannot read the boot ID: " + err.Error()
-	}
-	if boot != "" && boot != cur {
-		return "", ""
-	}
-	ids, err := proc.FindMarkedAnyGroup(v.Plan.Marker)
-	if err != nil {
-		return rsOrphansUnknown, "process scan failed: " + err.Error()
+		return rsOrphansUnknown, err.Error() + ", so leftover processes cannot be ruled out"
 	}
 	if len(ids) > 0 {
-		return rsOrphans, fmt.Sprintf("%d process(es) of generation %d are still alive (%s); stop it first (fastener stop %s)",
-			len(ids), v.Generation(), pidList(ids), v.Session.Name)
+		n := v.Session.Name
+		return rsOrphans, fmt.Sprintf("%d process(es) of generation %d are still alive (%s); stop it first (fastener stop %s), then fastener restore %s",
+			len(ids), v.Generation(), pidList(ids), n, n)
 	}
 	return "", ""
 }
@@ -376,6 +370,13 @@ func relaunch(v *session.View, stderr io.Writer) restoreOut {
 		var rf *remoteFailure
 		if !errors.As(err, &rf) {
 			return failed(rsError, err.Error(), false) // a read error: the bridge may be running
+		}
+		if nv != nil && nv.State == session.StateExited && nv.Status.EndedBy == session.EndedByStop {
+			// Someone stopped the new generation: that is their decision, not
+			// a failed restore, so it is left exited.
+			r.Result, r.Reason = restoreSkipped, rsStopped
+			r.Message = fmt.Sprintf("generation %d was stopped before it reported its URL", gen)
+			return r
 		}
 		reason, record := earlyOutcome(nv, rf.reason)
 		return failed(reason, err.Error(), record)
