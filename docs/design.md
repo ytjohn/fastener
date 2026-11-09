@@ -442,29 +442,66 @@ Named Go functions selected by profile. v0.1 ships `claude-stream-json`, `pi-jso
 - `status.json` is updated whenever a field changes (debounced to about 1 per second) and always at exit. The monitor snapshots its status under a lock and writes the snapshot (marshal, fsync, rename) outside it, so a slow disk never stalls the parser or backs up the agent's stdout. Writes are serialized and carry a sequence number: an older snapshot never overwrites a newer one, and nothing is written after the `exited` record.
 - Each parser is tested against recorded real output in `internal/parser/testdata/`. A backend output change is fixed by updating the fixture and the parser.
 
-## 8. Interactive and remote sessions (phase B)
+## 8. Remote and interactive sessions
 
-Designed now so that v1's state layout and monitor need no rework; built after v1.
+Phase B is split by how each backend offers remote control. Probes on 2026-11-09 (Claude Code 2.1.319) found two different Claude modes:
+
+| Mode | Command | Needs a terminal | What it is |
+|---|---|---|---|
+| Remote bridge | `claude remote-control [--name N]` | **No** | A long-running bridge for one folder. Sessions are added to it from claude.ai/code or the mobile app; each runs as a child `claude --print --sdk-url …`. |
+| Interactive remote session | `claude --remote-control [name]` | **Yes** (without a tty it falls into `--print` and fails) | One interactive TUI session, driven locally or remotely. |
+
+Codex has its own server and remote-control model; supporting it is a separate later phase.
+
+### 8.1 Route A: remote bridges (v0.3)
+
+A remote bridge is a long-running headless session, so it reuses the v0.2 machinery (monitor, launchers, liveness, stop, prune) with no pty.
+
+- **Profile:** a new `[remote]` section, e.g. `args = ["remote-control", "--name", "{name}"]`, with no prompt. The permission level maps through `[permissions]` as for headless runs (`remote-control` takes `--permission-mode`). Running `--remote` against a profile without `[remote]` is a usage error (no silent fallback).
+- **CLI:** `fastener run <backend> --remote --cwd DIR [--name N]`, with no `--prompt` and no default time limit. `run` waits briefly (configurable, default 15 s) until the bridge reports its URL, then prints it; if the bridge exits first, `run` fails with its reason.
+- **What Claude prints** (observed): a status screen redrawn every few seconds, containing the bridge URL `https://claude.ai/code?environment=env_…` and one `https://claude.ai/code/session_…` link per session (wrapped in OSC 8 hyperlink escapes). A `claude-remote` parser strips terminal escapes and records `remote_url` (the bridge) and `remote_sessions` (session URLs seen) in `status.json`.
+- **Log growth:** because the status screen is redrawn continuously, the monitor de-duplicates identical consecutive frames before writing `output.log` (or rotates it), so a bridge left running for days does not fill the disk.
+- **Shutdown:** SIGTERM stops the bridge in about 3 s and its session children exit with it, so the existing stop path applies unchanged.
+- **Workspace trust:** `claude remote-control` refuses a folder whose trust dialog has not been accepted (`Workspace not trusted. Please run claude in <dir> first …`). Trust is stored per *exact* path in `~/.claude.json` (`projects[<path>].hasTrustDialogAccepted`); a trusted parent does not count, and the home directory is never persisted. There is no flag, setting or environment variable to trust a folder non-interactively. In v0.3 an untrusted folder makes `run --remote` fail with a stable, machine-readable reason (`untrusted_workspace` in `--json`, plus the folder) and a hint naming the authorization command in §8.3, so a caller such as a dispatcher or assistant can ask the user to authorize it.
+- **Restore after reboot:** `--restart=on-reboot`, `fastener restore` and `fastener install-restore` as in §8.4. Reattaching to the same bridge needs `remote-control --session-id <id>`; `--continue` only works within about 4 hours. Which recorded ID it expects (the `env_…` bridge ID or a `cse_…` session ID) is still to be probed.
+
+### 8.2 Route B: interactive sessions with a pty (v0.4)
+
+Needed for `claude --remote-control`, for local attach to any backend, and for Pi.
 
 - **The monitor owns the pty** (the `dtach`/`abduco` model, using `github.com/creack/pty`). Not tmux: one tmux server holds every session for a user, which is the shared-daemon failure mode Fastener avoids.
 - **Attach:** the monitor listens on `attach.sock`. `fastener attach <name>` connects the user's terminal. The detach key defaults to `ctrl-]` and is configurable. Several clients may attach at once. On attach, the monitor resizes the pty and sends SIGWINCH to force a redraw; Fastener does not emulate the screen. Terminal output is also written to `output.log`.
 - **Attach protocol:** versioned framed messages (`hello{version}`, `data`, `resize{rows,cols}`, `detach`), independent of the transport. The Unix socket is the only transport in scope.
-- **Remote:** `run --interactive --remote` uses `[interactive.remote]` args. If `url_pattern` matches terminal output, `remote_url` is set. A detached remote session is an interactive session nobody is attached to.
+- **Remote:** `run --interactive --remote` uses `[interactive.remote]` args (for Claude, `["--remote-control", "{name}"]`). If `url_pattern` matches terminal output (for Claude, `https://claude\.ai/code/session_\S+` after stripping escapes), `remote_url` is set. A detached remote session is an interactive session nobody is attached to.
 - **Conversation ID:** found by a named **finder** (for example `claude-transcripts`: the newest transcript for the session's `cwd` created after `started_at`). Codex and Pi finders still need investigation and are a known risk.
-- **Restart policy:**
-  - `--restart=no|on-reboot`, default `no`. `on-reboot` is refused for headless sessions.
-  - A session with a restart policy is pinned and never pruned.
-  - `fastener restore` relaunches every `lost` session with `on-reboot`:
-    - same name;
-    - the next `generation` number, with a new `generations/<n>.json`; the previous `output.log` is rotated to `output.<n>.log`;
-    - `[resume]` args with the recorded `conversation_id`;
-    - remote control re-enabled.
 
-    The argument list is **re-rendered from the profile current at restore time** (so a fixed flag takes effect) using the intent in `session.json`. The new generation's plan and launcher files record the new argv, profile hash, marker, launcher and Fastener version. `session.json` stays unchanged.
+### 8.3 Authorizing folder trust (v0.4, with the pty)
 
-    If the current profile no longer defines the session's permission level, `[resume]` or `[interactive.remote]`, the session becomes `restore-failed` with that reason. This is the same no-silent-fallback rule as for `run`.
-  - If there is no `conversation_id`, the session becomes `restore-failed` with a reason. **Never a fresh conversation.**
-  - `fastener install-restore` installs the trigger: a one-shot `fastener-restore.service` user unit on systemd, a launchd agent on macOS, or prints a cron `@reboot` line otherwise. Without it nothing restarts.
+Starting a bridge in a new folder should not require someone to open a terminal there, but trust is a security decision and is never granted implicitly.
+
+- **`fastener authorize claude-folder-trust <dir>`** is an explicit, one-off command the user runs (or approves). It adds the folder to Fastener's trust allowlist (`trust_dirs` in config) and then accepts Claude's trust dialog for that folder by running `claude` in a pty inside the folder, so Claude's own code persists the trust. Fastener never edits `~/.claude.json` itself.
+- Fastener only ever accepts the dialog for folders on the allowlist. A caller that hits `untrusted_workspace` (§8.1) asks the user to confirm and then runs the authorize command; it does not authorize on its own.
+- Each authorization is recorded (folder, time, Claude version) so it can be listed and revoked (`fastener authorize --list`, `--revoke <dir>` removes it from the allowlist; it does not change Claude's own record).
+
+### 8.4 Restart policy and restore (v0.3 for bridges, v0.4 for interactive)
+
+- `--restart=no|on-reboot`, default `no`. `on-reboot` is refused for headless sessions.
+- A session with a restart policy is pinned and never pruned.
+- `fastener restore` relaunches every `lost` session with `on-reboot`:
+  - same name;
+  - the next `generation` number, with a new `generations/<n>.json`; the previous `output.log` is rotated to `output.<n>.log`;
+  - the profile's resume arguments with the recorded ID (`[resume]` with `conversation_id` for interactive sessions; the bridge's `--session-id` for remote bridges);
+  - remote control re-enabled.
+
+  The argument list is **re-rendered from the profile current at restore time** (so a fixed flag takes effect) using the intent in `session.json`. The new generation's plan and launcher files record the new argv, profile hash, marker, launcher and Fastener version. `session.json` stays unchanged.
+
+  If the current profile no longer defines the session's permission level, its resume arguments or its remote section, the session becomes `restore-failed` with that reason. This is the same no-silent-fallback rule as for `run`.
+- If there is no recorded ID to resume, the session becomes `restore-failed` with a reason. **Never a fresh conversation.**
+- `fastener install-restore` installs the trigger: a one-shot `fastener-restore.service` user unit on systemd, a launchd agent on macOS, or prints a cron `@reboot` line otherwise. Without it nothing restarts.
+
+### 8.5 Codex remote (later phase)
+
+Codex's server and remote-control model is different enough to be planned separately once routes A and B exist.
 
 ## 9. Future, explicitly out of scope
 
@@ -635,15 +672,17 @@ docs/                  json-schema.md, design specs
    - prune and retention;
    - more `diagnose` patterns;
    - macOS hardening (done: zombie pinning with kqueue, blocking macOS CI; see `docs/followups.md`).
-3. **v0.3, phase B:** pty monitor, `attach`, `--remote`, conversation finders, `restore`, `install-restore`.
+3. **v0.3, remote bridges (route A, §8.1):** `[remote]` profiles, `run --remote`, the `claude-remote` parser (`remote_url`, `remote_sessions`), frame de-duplication in `output.log`, `untrusted_workspace` failures, `--restart on-reboot`, `restore` and `install-restore` for bridges.
+4. **v0.4, interactive sessions (route B, §8.2–§8.3):** pty monitor, `attach`, `run --interactive [--remote]`, conversation finders, interactive restore, and `fastener authorize claude-folder-trust`. Pi's interactive and remote support depends on this.
+5. **Later:** Codex remote (§8.5).
 
 **Acceptance for v0.3:**
-1. Start a detached remote-control Claude session.
-2. Disconnect.
-3. Upgrade the Fastener binary.
-4. `ps` and `inspect` the session, and open `remote_url`.
-5. Reboot; `restore` resumes the same conversation.
-6. `stop` and `rm` it.
+1. Start a detached remote bridge for a trusted folder; `run` prints its URL.
+2. Add a session to it from claude.ai/code or the mobile app; `inspect` lists it.
+3. Disconnect, upgrade the Fastener binary, then `ps` and `inspect` the bridge.
+4. Reboot; `restore` brings the bridge back and it reattaches.
+5. `stop` and `rm` it.
+6. An untrusted folder fails with `untrusted_workspace` and the authorize hint.
 
 No Fastener daemon is involved at any point.
 
