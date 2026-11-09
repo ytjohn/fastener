@@ -156,12 +156,14 @@ func TestInstallRestoreSystemd(t *testing.T) {
 	}
 }
 
-// TestInstallRestoreNoFastenerEnv: without FASTENER_* set, the unit carries
-// no Environment= lines, and the unit dir falls back to ~/.config.
-func TestInstallRestoreNoFastenerEnv(t *testing.T) {
+// TestInstallRestoreDefaultDirs: without FASTENER_* set, the trigger still
+// names the resolved default state and config dirs, so it does not depend on
+// the environment it runs in; the unit dir falls back to ~/.config.
+func TestInstallRestoreDefaultDirs(t *testing.T) {
 	home, _, _, _ := installEnvDirs(t)
 	t.Setenv("FASTENER_STATE_DIR", "")
 	t.Setenv("FASTENER_CONFIG_DIR", "")
+	t.Setenv("XDG_STATE_HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "relative/ignored")
 	f := &fakeHost{linger: true}
 	f.install(t, "linux", true, testExe)
@@ -172,8 +174,10 @@ func TestInstallRestoreNoFastenerEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(b), "Environment=") {
-		t.Errorf("unexpected Environment= lines:\n%s", b)
+	golden(t, "fastener-restore-defaults.service", string(b), map[string]string{"HOME": home})
+	out, _, _ := runInstall(t, "--print")
+	if !strings.Contains(out, "Environment=FASTENER_STATE_DIR="+home+"/.local/state/fastener\n") {
+		t.Errorf("--print lacks the default state dir:\n%s", out)
 	}
 }
 
@@ -224,10 +228,10 @@ func TestInstallRestoreLaunchd(t *testing.T) {
 func TestInstallRestoreCron(t *testing.T) {
 	home, xdg, state, cfg := installEnvDirs(t)
 	f := &fakeHost{}
-	f.install(t, "linux", false, "/opt/my fastener/fastener")
+	f.install(t, "linux", false, "/opt/my fastener/100%/fastener")
 	for _, args := range [][]string{nil, {"--print"}, {"--uninstall"}} {
 		out, errOut, code := runInstall(t, args...)
-		want := "@reboot FASTENER_CONFIG_DIR=" + cfg + " FASTENER_STATE_DIR=" + state + " '/opt/my fastener/fastener' restore\n"
+		want := "@reboot FASTENER_CONFIG_DIR=" + cfg + " FASTENER_STATE_DIR=" + state + " '/opt/my fastener/100\\%/fastener' restore\n"
 		if code != 0 || out != want || !strings.Contains(errOut, "crontab -e") {
 			t.Errorf("%v: exit %d, stdout %q (want %q), stderr %q", args, code, out, want, errOut)
 		}

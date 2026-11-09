@@ -119,19 +119,16 @@ func transientBinary(exe string) string {
 }
 
 // restoreEnv is the environment the trigger passes to `fastener restore`:
-// FASTENER_STATE_DIR and FASTENER_CONFIG_DIR when set, made absolute, so the
-// boot-time restore looks where this shell does. Sorted by name.
+// the resolved, absolute state root and config directory, always, so the
+// boot-time restore looks exactly where this command does whatever the
+// trigger's own environment (a user manager, launchd, cron) would resolve.
 func restoreEnv() [][2]string {
 	var env [][2]string
-	if os.Getenv("FASTENER_CONFIG_DIR") != "" {
-		if d := config.Dir(); d != "" {
-			env = append(env, [2]string{"FASTENER_CONFIG_DIR", d})
-		}
+	if d := config.Dir(); d != "" {
+		env = append(env, [2]string{"FASTENER_CONFIG_DIR", d})
 	}
-	if os.Getenv("FASTENER_STATE_DIR") != "" {
-		if d := session.Root(); d != "" {
-			env = append(env, [2]string{"FASTENER_STATE_DIR", d})
-		}
+	if d := session.Root(); d != "" {
+		env = append(env, [2]string{"FASTENER_STATE_DIR", d})
 	}
 	return env
 }
@@ -354,7 +351,8 @@ func cronLine(exe string, env [][2]string) string {
 		parts = append(parts, kv[0]+"="+shellQuote(kv[1]))
 	}
 	parts = append(parts, shellQuote(exe), "restore")
-	return "@reboot " + strings.Join(parts, " ")
+	// cron turns an unescaped % in the command into a newline.
+	return "@reboot " + strings.ReplaceAll(strings.Join(parts, " "), "%", `\%`)
 }
 
 func shellQuote(s string) string {
