@@ -7,6 +7,7 @@ package monitor
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -540,32 +541,51 @@ func (m *monitor) lineSafe(p parser.Parser, line []byte) (changed bool) {
 	return p.Line(line, &m.st.Fields)
 }
 
-// pump copies agent stdout to output.log unchanged and feeds the parser one
-// line at a time. Every byte is written through as it is read. A line is
-// accumulated for the parser only up to maxParseLine bytes; once it is longer
-// the pump stops accumulating, keeps writing the rest straight through,
-// counts one parse error, and resumes parsing after the next newline. So
-// memory stays bounded however long a line is.
+// pump copies agent stdout to output.log and feeds the parser one line at a
+// time. Normally every byte is written through unchanged as it is read. A
+// line is accumulated for the parser only up to maxParseLine bytes; once it
+// is longer the pump stops accumulating, keeps writing the rest straight
+// through, counts one parse error, and resumes parsing after the next
+// newline. So memory stays bounded however long a line is.
+//
+// With the plan's dedupe_frames (a remote bridge that redraws its status
+// screen every few seconds), output.log would otherwise grow without bound
+// while saying nothing new, so the pump holds each line until it ends and
+// writes it only if it is not a repeat (see lineDedupe). Every line is still
+// parsed. A held line is the one the parser accumulates anyway, so memory is
+// bounded the same way: a line that outgrows maxParseLine is written as held
+// and then streamed through, never deduplicated.
 func (m *monitor) pump(r io.Reader, out io.Writer, p parser.Parser) {
 	br := bufio.NewReaderSize(r, 64*1024)
 	var line []byte
 	overlong := false
+	var dd *lineDedupe
+	if m.plan.DedupeFrames {
+		dd = &lineDedupe{}
+	}
 	for {
 		chunk, err := br.ReadSlice('\n') // valid only until the next read
 		if len(chunk) > 0 {
-			_, _ = out.Write(chunk)
-			if !overlong {
-				if len(line)+len(chunk) > maxParseLine {
-					overlong, line = true, nil
-				} else {
-					line = appendCapped(line, chunk)
+			if !overlong && len(line)+len(chunk) > maxParseLine {
+				if dd != nil {
+					_, _ = out.Write(line) // stop holding: write what was held
 				}
+				overlong, line = true, nil
+			}
+			if dd == nil || overlong {
+				_, _ = out.Write(chunk)
+			}
+			if !overlong {
+				line = appendCapped(line, chunk)
 			}
 		}
 		if err == bufio.ErrBufferFull {
 			continue // the line goes on
 		}
 		if err == nil || len(line) > 0 || overlong { // a newline, or a last unterminated line
+			if dd != nil && !overlong && !dd.repeat(line) {
+				_, _ = out.Write(line)
+			}
 			m.endLine(p, line, overlong)
 		}
 		if err != nil {
@@ -578,6 +598,44 @@ func (m *monitor) pump(r io.Reader, out io.Writer, p parser.Parser) {
 			line = line[:0]
 		}
 	}
+}
+
+// dedupeWindow is how many distinct recent lines lineDedupe remembers. A
+// Claude bridge's screen is about 8 lines plus one per session (32 at most by
+// default), so a whole frame fits with room to spare.
+const dedupeWindow = 128
+
+// lineDedupe recognizes a redrawn status screen. A redraw moves the cursor up
+// and reprints lines that were already shown, so instead of comparing whole
+// frames (whose boundaries the byte stream does not mark) it compares lines:
+// a line whose text, with terminal escapes stripped (the cursor movement
+// differs between redraws of the same line), equals one of the last
+// dedupeWindow distinct lines seen is a repeat. A line that changes (a new
+// session, a capacity count, a timestamped notice) is new and is written
+// with its raw bytes, escapes included. Lines are remembered by SHA-256, so
+// the window costs 4 KiB however long its lines are; a hit moves the line to
+// the most recent end, so a steady screen never ages out.
+type lineDedupe struct {
+	recent [][sha256.Size]byte // oldest first
+}
+
+// repeat reports whether line (with or without its newline) repeats a recent
+// line, and records it as the most recent.
+func (d *lineDedupe) repeat(line []byte) bool {
+	key := sha256.Sum256(parser.StripTerminal(bytes.TrimRight(line, "\r\n")))
+	for i, k := range d.recent {
+		if k == key {
+			copy(d.recent[i:], d.recent[i+1:])
+			d.recent[len(d.recent)-1] = key
+			return true
+		}
+	}
+	if len(d.recent) == dedupeWindow {
+		copy(d.recent, d.recent[1:])
+		d.recent = d.recent[:dedupeWindow-1]
+	}
+	d.recent = append(d.recent, key)
+	return false
 }
 
 // appendCapped appends chunk to line, growing it by doubling but never past

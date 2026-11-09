@@ -256,7 +256,7 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 	plan := session.Plan{
 		SchemaVersion: session.SchemaVersion, Generation: 1,
 		Argv: append([]string{p.argv0}, p.rendered.Args...), PromptMode: p.rendered.PromptMode,
-		Parser: p.rendered.Parser, ProfileSource: p.prof.Source, ProfileSHA256: p.prof.SHA256,
+		Parser: p.rendered.Parser, DedupeFrames: p.rendered.DedupeFrames, ProfileSource: p.prof.Source, ProfileSHA256: p.prof.SHA256,
 		Marker: session.NewMarker(name, 1), FastenerVersion: version.String(), PlannedAt: now,
 	}
 	writes := []struct {

@@ -206,3 +206,28 @@ func TestRunRemoteEndsEarly(t *testing.T) {
 		t.Errorf("exit %d, reason %q, stderr %q", code, v.Reason, errOut)
 	}
 }
+
+func TestRunRemoteOutputLogStaysSmall(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.ok("run", "fakebridge", "--remote", "--cwd", h.work, "--name", "br-log",
+		"--env", "FAKE_BRIDGE=1", "--env", "FAKE_BRIDGE_FRAMES=10000", "--env", "FAKE_BRIDGE_SESSION_AFTER=0s")
+	// Let the burst through and a few timed redraws on top.
+	time.Sleep(500 * time.Millisecond)
+	h.ok("stop", "br-log")
+	h.waitState("br-log", "exited", 10*time.Second)
+	b, err := os.ReadFile(filepath.Join(h.state, "sessions", "br-log", "output.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) > 4096 {
+		t.Errorf("output.log is %d bytes after 10,000+ frames; want it small", len(b))
+	}
+	for _, want := range []string{"environment=env_01FAKEBRIDGEFAKEBRIDGE01", "session_01FAKEBRIDGESESSION01", "Environment preserved"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("output.log lacks %q:\n%q", want, b)
+		}
+	}
+	if v := h.remoteInspect("br-log"); !v.Plan.DedupeFrames || len(v.Status.RemoteSessions) != 1 {
+		t.Errorf("inspect = %+v", v)
+	}
+}

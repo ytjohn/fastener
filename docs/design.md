@@ -116,7 +116,7 @@ ${FASTENER_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/fastener}/
 
 - `schema_version`, `generation` (the first launch is 1)
 - `argv`: the fully resolved argument list. `argv[0]` is resolved to an absolute path at plan time, against the session's PATH; the monitor never does a PATH lookup.
-- `prompt_mode` (`stdin` | `arg`), `parser`: copied from the profile. (`url_pattern` and `conversation_finder` arrive with phase B.)
+- `prompt_mode` (`stdin` | `arg` | `none` for a remote bridge), `parser`, `dedupe_frames` (remote bridges, §8.1): copied from the profile. (`url_pattern` and `conversation_finder` arrive with phase B.)
 - **Profile provenance:** `profile_source` (`builtin` | the file path), `profile_sha256`
 - `marker`: `<name>:<generation>:<random nonce>` (see "Process identity" in §4)
 - `fastener_version`, `planned_at`
@@ -432,7 +432,7 @@ Named Go functions selected by profile. v0.1 ships `claude-stream-json`, `pi-jso
 
 - **`claude-remote`** (`claude remote-control`, Claude Code 2.1.319): the bridge's stdout is a status screen redrawn every few seconds, with ANSI cursor and erase sequences, and each session line is an OSC 8 hyperlink (`ESC]8;;URL BEL label ESC]8;; BEL`; ST is accepted as the terminator too). The parser strips terminal escapes, keeping an OSC 8 link's URL as text, then records `remote_url`, the latest `https://claude.ai/code?environment=env_…` seen, and `remote_sessions`, every `https://claude.ai/code/session_…` seen, without its query, de-duplicated in the order first seen (the 64 most recent are kept). Nothing on the screen is an error, so it never counts parse errors.
 
-- Run inside the monitor, streaming, one line at a time, while raw output is written to `output.log` unchanged.
+- Run inside the monitor, streaming, one line at a time, while raw output is written to `output.log` unchanged. The one exception is a plan with `dedupe_frames` (§8.1): the monitor then holds each line until it ends and drops it from `output.log` when its text, terminal escapes stripped, repeats one of the last 128 distinct lines (remembered by SHA-256); every line is still parsed, a new line is written with its raw bytes, and a line longer than the 16 MB cap is written in full, never dropped.
 - **Extracted fields** (all optional, omitted when unknown):
   - `conversation_id`
   - `final_message`
