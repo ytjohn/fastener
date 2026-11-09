@@ -37,7 +37,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 - `schema_version`, `generation`
 - `argv`: the fully resolved argument list; `argv[0]` is an absolute path. For `prompt = "arg"` backends it contains the prompt text itself
 - `prompt_mode` (`stdin` | `arg` | `none`: a remote bridge, whose stdin is `/dev/null`), `parser`
-- `dedupe_frames`: `true` when the monitor drops redrawn status lines from `output.log` (from the profile's `[remote] dedupe_frames`; every line is still parsed). Omitted otherwise.
+- `dedupe_frames`: `true` when the monitor drops redrawn status lines from `output.log` (a line equal to the same position in the previous frame) and strips leading cursor-movement escapes from the lines it writes (from the profile's `[remote] dedupe_frames`; every line is still parsed). Omitted otherwise.
 - `profile_source` (`builtin` or the file path), `profile_sha256`
 - `marker`: the value of `FASTENER_SESSION` in the agent's environment
 - `fastener_version`, `planned_at`

@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
 	"runtime"
 	"slices"
 	"sync"
@@ -541,101 +542,224 @@ func (m *monitor) lineSafe(p parser.Parser, line []byte) (changed bool) {
 	return p.Line(line, &m.st.Fields)
 }
 
-// pump copies agent stdout to output.log and feeds the parser one line at a
-// time. Normally every byte is written through unchanged as it is read. A
-// line is accumulated for the parser only up to maxParseLine bytes; once it
-// is longer the pump stops accumulating, keeps writing the rest straight
-// through, counts one parse error, and resumes parsing after the next
-// newline. So memory stays bounded however long a line is.
+// pump copies agent stdout to output.log unchanged and feeds the parser one
+// line at a time. Every byte is written through as it is read. A line is
+// accumulated for the parser only up to maxParseLine bytes; once it is longer
+// the pump stops accumulating, keeps writing the rest straight through,
+// counts one parse error, and resumes parsing after the next newline. So
+// memory stays bounded however long a line is.
 //
-// With the plan's dedupe_frames (a remote bridge that redraws its status
-// screen every few seconds), output.log would otherwise grow without bound
-// while saying nothing new, so the pump holds each line until it ends and
-// writes it only if it is not a repeat (see lineDedupe). Every line is still
-// parsed. A held line is the one the parser accumulates anyway, so memory is
-// bounded the same way: a line that outgrows maxParseLine is written as held
-// and then streamed through, never deduplicated.
+// With the plan's dedupe_frames the pump is pumpDedupe instead.
 func (m *monitor) pump(r io.Reader, out io.Writer, p parser.Parser) {
+	if m.plan.DedupeFrames {
+		m.pumpDedupe(r, out, p)
+		return
+	}
 	br := bufio.NewReaderSize(r, 64*1024)
 	var line []byte
 	overlong := false
-	var dd *lineDedupe
-	if m.plan.DedupeFrames {
-		dd = &lineDedupe{}
-	}
 	for {
 		chunk, err := br.ReadSlice('\n') // valid only until the next read
 		if len(chunk) > 0 {
-			if !overlong && len(line)+len(chunk) > maxParseLine {
-				if dd != nil {
-					_, _ = out.Write(line) // stop holding: write what was held
-				}
-				overlong, line = true, nil
-			}
-			if dd == nil || overlong {
-				_, _ = out.Write(chunk)
-			}
+			_, _ = out.Write(chunk)
 			if !overlong {
-				line = appendCapped(line, chunk)
+				if len(line)+len(chunk) > maxParseLine {
+					overlong, line = true, nil
+				} else {
+					line = appendCapped(line, chunk)
+				}
 			}
 		}
 		if err == bufio.ErrBufferFull {
 			continue // the line goes on
 		}
 		if err == nil || len(line) > 0 || overlong { // a newline, or a last unterminated line
-			if dd != nil && !overlong && !dd.repeat(line) {
-				_, _ = out.Write(line)
-			}
 			m.endLine(p, line, overlong)
 		}
 		if err != nil {
 			return
 		}
 		overlong = false
-		if cap(line) > keepLineCap {
-			line = nil
-		} else {
-			line = line[:0]
+		line = resetLine(line)
+	}
+}
+
+// resetLine empties a line buffer for reuse, releasing one that grew past
+// keepLineCap.
+func resetLine(line []byte) []byte {
+	if cap(line) > keepLineCap {
+		return nil
+	}
+	return line[:0]
+}
+
+// pumpDedupe is pump for a remote bridge, which redraws its status screen
+// every few seconds: written through unchanged, output.log would grow without
+// bound while saying nothing new. So:
+//
+//   - A line ends at "\n" or at a "\r" not followed by "\n" (a carriage-return
+//     redraw), and every line is parsed.
+//   - Each line is held until it ends, then written unless frameDedupe calls
+//     it a repeat. A written line keeps its raw bytes, colours and OSC 8
+//     links included, except that leading cursor-movement and erase
+//     sequences are removed (see trimCursor), so `logs` on a terminal does
+//     not erase earlier, unrelated lines.
+//   - The held line is the one the parser accumulates anyway, so memory is
+//     bounded the same way: a line that outgrows maxParseLine is written as
+//     held, the rest streamed through raw, and it counts one parse error.
+func (m *monitor) pumpDedupe(r io.Reader, out io.Writer, p parser.Parser) {
+	br := bufio.NewReaderSize(r, 64*1024)
+	fd := &frameDedupe{}
+	var line []byte
+	overlong := false
+	pendingCR := false // the last byte read was "\r"; whether it ends the line depends on the next byte
+	end := func() {
+		if overlong {
+			fd.unique() // written already; nothing repeats it
+		} else if !fd.repeat(line) {
+			_, _ = out.Write(trimCursor(line))
+		}
+		m.endLine(p, line, overlong)
+		overlong = false
+		line = resetLine(line)
+	}
+	add := func(seg []byte) {
+		switch {
+		case overlong:
+			_, _ = out.Write(seg)
+		case len(line)+len(seg) > maxParseLine:
+			_, _ = out.Write(line) // stop holding: write what was held, then stream
+			_, _ = out.Write(seg)
+			overlong, line = true, nil
+		default:
+			line = appendCapped(line, seg)
+		}
+	}
+	for {
+		chunk, err := br.ReadSlice('\n') // valid only until the next read
+		if pendingCR && len(chunk) > 0 {
+			pendingCR = false
+			if chunk[0] != '\n' {
+				end()
+			}
+		}
+		for len(chunk) > 0 {
+			i := bytes.IndexByte(chunk, '\r')
+			if i < 0 {
+				add(chunk)
+				break
+			}
+			add(chunk[:i+1])
+			chunk = chunk[i+1:]
+			if len(chunk) == 0 {
+				pendingCR = true // decided by the next read
+				break
+			}
+			if chunk[0] != '\n' {
+				end() // a lone "\r"
+			}
+		}
+		switch {
+		case err == bufio.ErrBufferFull:
+			continue // the line goes on
+		case err == nil:
+			end() // a newline
+		default:
+			if len(line) > 0 || overlong || pendingCR { // a last unterminated line
+				end()
+			}
+			return
 		}
 	}
 }
 
-// dedupeWindow is how many distinct recent lines lineDedupe remembers. A
-// Claude bridge's screen is about 8 lines plus one per session (32 at most by
-// default), so a whole frame fits with room to spare.
-const dedupeWindow = 128
+// cursorRE matches cursor-movement and erase sequences (CSI n A-H, J, K) at
+// the start of a line.
+var cursorRE = regexp.MustCompile("^(?:\x1b\\[[0-9;]*[A-HJK])+")
 
-// lineDedupe recognizes a redrawn status screen. A redraw moves the cursor up
-// and reprints lines that were already shown, so instead of comparing whole
-// frames (whose boundaries the byte stream does not mark) it compares lines:
-// a line whose text, with terminal escapes stripped (the cursor movement
-// differs between redraws of the same line), equals one of the last
-// dedupeWindow distinct lines seen is a repeat. A line that changes (a new
-// session, a capacity count, a timestamped notice) is new and is written
-// with its raw bytes, escapes included. Lines are remembered by SHA-256, so
-// the window costs 4 KiB however long its lines are; a hit moves the line to
-// the most recent end, so a steady screen never ages out.
-type lineDedupe struct {
-	recent [][sha256.Size]byte // oldest first
+// trimCursor drops leading cursor-movement and erase sequences from line.
+func trimCursor(line []byte) []byte {
+	if n := cursorRE.Find(line); n != nil {
+		return line[len(n):]
+	}
+	return line
 }
 
-// repeat reports whether line (with or without its newline) repeats a recent
-// line, and records it as the most recent.
-func (d *lineDedupe) repeat(line []byte) bool {
-	key := sha256.Sum256(parser.StripTerminal(bytes.TrimRight(line, "\r\n")))
-	for i, k := range d.recent {
-		if k == key {
-			copy(d.recent[i:], d.recent[i+1:])
-			d.recent[len(d.recent)-1] = key
-			return true
-		}
+// frameMarkerRE recognizes the first line of a redrawn frame: Claude moves
+// the cursor up over the previous frame (ESC [ n A, then ESC [ J) at the
+// start of a line.
+var frameMarkerRE = regexp.MustCompile("^\x1b\\[[0-9]*A")
+
+// dedupeMaxLine: longer lines are never de-duplicated (always written), so
+// the stripped copy hashed for each line stays small.
+const dedupeMaxLine = 64 << 10
+
+// dedupeMaxFrame caps how many lines of one frame are remembered; lines past
+// it are compared with nothing and written. A Claude bridge's screen is about
+// 8 lines plus one per session (32 by default).
+const dedupeMaxFrame = 1024
+
+// frameKey identifies a line by the SHA-256 of its text with terminal escapes
+// stripped (redraws of the same line differ in cursor escapes). ok is false
+// for a line that is never de-duplicated, so it equals nothing.
+type frameKey struct {
+	sum [sha256.Size]byte
+	ok  bool
+}
+
+func (a frameKey) same(b frameKey) bool { return a.ok && b.ok && a.sum == b.sum }
+
+// frameDedupe recognizes a redrawn status screen by comparing each frame
+// with the previous one, position by position. A frame starts at a line that
+// begins with a cursor-up sequence (frameMarkerRE); a line is a repeat only
+// if it equals the line at the same position in the previous frame. So a
+// screen that changes and changes back (Connected, Disconnected, Connected)
+// logs every change, while a steady screen logs nothing after its first
+// frame. Until a frame marker is seen, a line is a repeat only if it equals
+// the line right before it. Memory is two frames of hashes, at most
+// 2 × dedupeMaxFrame keys.
+type frameDedupe struct {
+	framed    bool       // a frame marker has been seen
+	prev, cur []frameKey // the previous and the current frame, in order
+	last      frameKey   // the line before this one
+	hadLast   bool
+}
+
+// repeat reports whether line (with or without its terminator) repeats the
+// line at its position in the previous frame (or, before any frame marker,
+// the previous line), and records it.
+func (d *frameDedupe) repeat(line []byte) bool {
+	text := bytes.TrimRight(line, "\r\n")
+	var key frameKey
+	if len(text) <= dedupeMaxLine {
+		key = frameKey{sum: sha256.Sum256(parser.StripTerminal(text)), ok: true}
 	}
-	if len(d.recent) == dedupeWindow {
-		copy(d.recent, d.recent[1:])
-		d.recent = d.recent[:dedupeWindow-1]
+	return d.record(key, frameMarkerRE.Match(text))
+}
+
+// unique records a line that repeats nothing and that nothing repeats (an
+// overlong line, already written).
+func (d *frameDedupe) unique() { d.record(frameKey{}, false) }
+
+func (d *frameDedupe) record(key frameKey, marker bool) bool {
+	if marker {
+		d.framed = true
+		d.prev, d.cur = d.cur, d.prev[:0]
 	}
-	d.recent = append(d.recent, key)
-	return false
+	pos := len(d.cur)
+	var dup bool
+	if d.framed {
+		dup = pos < len(d.prev) && d.prev[pos].same(key)
+	} else {
+		dup = d.hadLast && d.last.same(key)
+	}
+	// The lines before the first marker are a frame too: the first redraw
+	// is compared with them.
+	if pos < dedupeMaxFrame {
+		d.cur = append(d.cur, key)
+	}
+	d.last, d.hadLast = key, true
+	return dup
 }
 
 // appendCapped appends chunk to line, growing it by doubling but never past
