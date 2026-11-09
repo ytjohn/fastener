@@ -462,7 +462,7 @@ A remote bridge is a long-running headless session, so it reuses the v0.2 machin
 - **What Claude prints** (observed): a status screen redrawn every few seconds, containing the bridge URL `https://claude.ai/code?environment=env_…` and one `https://claude.ai/code/session_…` link per session (wrapped in OSC 8 hyperlink escapes). A `claude-remote` parser strips terminal escapes and records `remote_url` (the bridge) and `remote_sessions` (session URLs seen) in `status.json`.
 - **Log growth:** because the status screen is redrawn continuously, the monitor de-duplicates identical consecutive frames before writing `output.log` (or rotates it), so a bridge left running for days does not fill the disk.
 - **Shutdown:** SIGTERM stops the bridge in about 3 s and its session children exit with it, so the existing stop path applies unchanged.
-- **Workspace trust:** `claude remote-control` refuses a folder whose trust dialog has not been accepted (`Workspace not trusted. Please run claude in <dir> first …`). Trust is stored per *exact* path in `~/.claude.json` (`projects[<path>].hasTrustDialogAccepted`); a trusted parent does not count, and the home directory is never persisted. There is no flag, setting or environment variable to trust a folder non-interactively. In v0.3 an untrusted folder makes `run --remote` fail with a stable, machine-readable reason (`untrusted_workspace` in `--json`, plus the folder) and a hint naming the authorization command in §8.3, so a caller such as a dispatcher or assistant can ask the user to authorize it.
+- **Workspace trust:** `claude remote-control` refuses a folder whose trust dialog has not been accepted (`Workspace not trusted. Please run claude in <dir> first …`). Trust is stored in Claude's global config (`projects[<key>].hasTrustDialogAccepted`), keyed by the folder's git repository root (or its real path outside a repo), so a trusted parent folder does not cover a separate repository; the home directory is never persisted. There is no flag, setting or environment variable to trust a folder non-interactively; Claude's own messages point to setting that field instead (§8.3). In v0.3 an untrusted folder makes `run --remote` fail with a stable, machine-readable reason (`untrusted_workspace` in `--json`, plus the folder) and a hint naming the authorization command in §8.3, so a caller such as a dispatcher or assistant can ask the user to authorize it.
 - **Restore after reboot:** `--restart=on-reboot`, `fastener restore` and `fastener install-restore` as in §8.4. Reattaching to the same bridge needs `remote-control --session-id <id>`; `--continue` only works within about 4 hours. Which recorded ID it expects (the `env_…` bridge ID or a `cse_…` session ID) is still to be probed.
 
 ### 8.2 Route B: interactive sessions with a pty (v0.4)
@@ -475,13 +475,17 @@ Needed for `claude --remote-control`, for local attach to any backend, and for P
 - **Remote:** `run --interactive --remote` uses `[interactive.remote]` args (for Claude, `["--remote-control", "{name}"]`). If `url_pattern` matches terminal output (for Claude, `https://claude\.ai/code/session_\S+` after stripping escapes), `remote_url` is set. A detached remote session is an interactive session nobody is attached to.
 - **Conversation ID:** found by a named **finder** (for example `claude-transcripts`: the newest transcript for the session's `cwd` created after `started_at`). Codex and Pi finders still need investigation and are a known risk.
 
-### 8.3 Authorizing folder trust (v0.4, with the pty)
+### 8.3 Authorizing folder trust (v0.3)
 
 Starting a bridge in a new folder should not require someone to open a terminal there, but trust is a security decision and is never granted implicitly.
 
-- **`fastener authorize claude-folder-trust <dir>`** is an explicit, one-off command the user runs (or approves). It adds the folder to Fastener's trust allowlist (`trust_dirs` in config) and then accepts Claude's trust dialog for that folder by running `claude` in a pty inside the folder, so Claude's own code persists the trust. Fastener never edits `~/.claude.json` itself.
-- Fastener only ever accepts the dialog for folders on the allowlist. A caller that hits `untrusted_workspace` (§8.1) asks the user to confirm and then runs the authorize command; it does not authorize on its own.
-- Each authorization is recorded (folder, time, Claude version) so it can be listed and revoked (`fastener authorize --list`, `--revoke <dir>` removes it from the allowlist; it does not change Claude's own record).
+- **`fastener authorize claude-folder-trust <dir>`** is an explicit, one-off command the user runs (or approves). It adds the folder to Fastener's trust allowlist (`trust_dirs` in config) and records Claude's trust for it. Fastener only ever does this for folders on the allowlist; a caller that hits `untrusted_workspace` (§8.1) asks the user to confirm and then runs the command, never on its own.
+- **How trust is recorded.** Claude Code stores it in its global config (`$CLAUDE_CONFIG_DIR/.claude.json`, default `~/.claude.json`) as `projects[<key>].hasTrustDialogAccepted = true`, and its own messages name setting that field as the alternative to the interactive dialog. Fastener writes it the way Claude does (verified against Claude Code 2.1.319, which saves with a `proper-lockfile` lock and re-reads the file under the lock before applying a change, so a running Claude does not overwrite an edit made under the same lock):
+  1. **Key.** The trust key is the folder's git repository root if it is inside one, else its normalized real path; forward slashes. The home directory is refused (Claude never persists its trust).
+  2. **Lock.** Take Claude's lock by creating the directory `<config>.lock`; retry with backoff; never remove a lock that is not stale.
+  3. **Write.** Back up the file, re-read it under the lock, change only `projects[<key>].hasTrustDialogAccepted` (keeping every other value and exact numbers), write to a temp file and rename it into place, then release the lock.
+  4. **Verify.** Re-read the file and confirm the field; optionally run a short bridge start in the folder. A failure here (for example after Claude moves trust out of this file) is reported with a `diagnose` hint rather than retried.
+- Each authorization is recorded (folder, key, time, Claude version) so it can be listed and revoked (`fastener authorize --list`; `--revoke <dir>` removes it from the allowlist and does not change Claude's own record).
 
 ### 8.4 Restart policy and restore (v0.3 for bridges, v0.4 for interactive)
 
@@ -672,8 +676,8 @@ docs/                  json-schema.md, design specs
    - prune and retention;
    - more `diagnose` patterns;
    - macOS hardening (done: zombie pinning with kqueue, blocking macOS CI; see `docs/followups.md`).
-3. **v0.3, remote bridges (route A, §8.1):** `[remote]` profiles, `run --remote`, the `claude-remote` parser (`remote_url`, `remote_sessions`), frame de-duplication in `output.log`, `untrusted_workspace` failures, `--restart on-reboot`, `restore` and `install-restore` for bridges.
-4. **v0.4, interactive sessions (route B, §8.2–§8.3):** pty monitor, `attach`, `run --interactive [--remote]`, conversation finders, interactive restore, and `fastener authorize claude-folder-trust`. Pi's interactive and remote support depends on this.
+3. **v0.3, remote bridges (route A, §8.1):** `[remote]` profiles, `run --remote`, the `claude-remote` parser (`remote_url`, `remote_sessions`), frame de-duplication in `output.log`, `untrusted_workspace` failures, `fastener authorize claude-folder-trust` (§8.3), `--restart on-reboot`, `restore` and `install-restore` for bridges.
+4. **v0.4, interactive sessions (route B, §8.2):** pty monitor, `attach`, `run --interactive [--remote]`, conversation finders and interactive restore. Pi's interactive and remote support depends on this.
 5. **Later:** Codex remote (§8.5).
 
 **Acceptance for v0.3:**
