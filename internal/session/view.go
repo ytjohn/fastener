@@ -134,14 +134,17 @@ func LoadFull(name string, handshake time.Duration) (*View, error) {
 	return v, nil
 }
 
-// FindOrphans fills Orphans with marked processes still alive:
-//   - lost: any process carrying the current generation's marker, in any
-//     process group (MarkedAnyGroup), the same scan restore uses, so what stop
-//     cleans up is what blocks a restore;
-//   - restore-failed: the marker in the recorded process group, or in any
-//     group when none was recorded;
-//   - exited, when the agent was spawned: the marker in its process group
-//     (descendants it left behind are tracked, never killed implicitly).
+// FindOrphans fills Orphans with marked processes still alive. Which
+// processes count depends on the session:
+//   - restore-failed, and a restart=on-reboot session that is lost or that
+//     stop finalized from lost: every process carrying the current
+//     generation's marker in any process group (MarkedAnyGroup), the scan
+//     restore uses, so what stop cleans up is exactly what blocks a restore;
+//   - any other lost session, or an exited one whose agent was spawned: the
+//     marker in the recorded process group only. A process the agent
+//     deliberately moved out of its group (a daemonized tmux server, an
+//     ssh-agent, a dev server) is never counted, so stop and rm --force never
+//     kill it.
 //
 // It is a no-op for other states, and for exited sessions that never spawned
 // an agent.
@@ -149,12 +152,16 @@ func (v *View) FindOrphans() {
 	v.OrphanErr = ""
 	var ids []proc.Identity
 	var err error
+	onReboot := v.Session.Restart == "on-reboot"
 	switch {
-	case v.State == StateLost, v.State == StateRestoreFailed && v.Status.PGID <= 0:
+	case v.State == StateRestoreFailed,
+		onReboot && (v.State == StateLost || v.State == StateExited && v.FinalizedFromLost()):
 		ids, err = v.MarkedAnyGroup()
-	case v.State == StateRestoreFailed, v.State == StateExited && v.Status.PGID > 0:
+	case v.State == StateLost, v.State == StateExited && v.Status.PGID > 0:
 		if v.Plan == nil {
-			v.OrphanErr = "no readable plan for the current generation"
+			if v.Status.PGID > 0 {
+				v.OrphanErr = "no readable plan for the current generation"
+			}
 			return
 		}
 		ids, err = proc.FindMarked(v.Status.PGID, v.Plan.Marker, v.Status.BootID)
@@ -168,6 +175,16 @@ func (v *View) FindOrphans() {
 	if err != nil {
 		v.OrphanErr = err.Error()
 	}
+}
+
+// LostFinalizedBy starts the error a lost session is finalized with by stop
+// or rm ("monitor was lost; finalized by stop").
+const LostFinalizedBy = "monitor was lost; finalized by "
+
+// FinalizedFromLost reports whether an exited session was finalized by
+// `stop` from lost, rather than ending under its monitor.
+func (v *View) FinalizedFromLost() bool {
+	return v.State == StateExited && v.Status.EndedBy == EndedByStop && v.Status.Error == LostFinalizedBy+"stop"
 }
 
 // currentBoot is proc.BootID; replaced in tests.

@@ -164,14 +164,24 @@ func TestMarkedAnyGroupAndBoot(t *testing.T) {
 	boot, _ := proc.BootID()
 	dead := deadIdentity(t)
 	markedSleeper(t, "anyg:1:x")
-	// Lost, recording a process group the sleeper is not in.
+	// Lost, recording a process group the sleeper is not in. A session
+	// without restart=on-reboot scans only that group, so the process an
+	// agent moved out of it is not counted.
 	d := writeSession(t, "anyg", time.Now(), Status{State: StateRunning, Generation: 1, Monitor: &dead, BootID: boot, PGID: 999999}, nil)
 	v, err := LoadFull("anyg", time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if v.State != StateLost || len(v.Orphans) != 0 || v.OrphanErr != "" {
+		t.Fatalf("lost headless: state %s, orphans %v, err %q", v.State, v.Orphans, v.OrphanErr)
+	}
+	// An on-reboot session scans every group.
+	WriteJSON(d.SessionPath(), Session{SchemaVersion: 1, Name: "anyg", CreatedAt: time.Now(), Restart: "on-reboot"})
+	if v, err = LoadFull("anyg", time.Second); err != nil {
+		t.Fatal(err)
+	}
 	if v.State != StateLost || len(v.Orphans) != 1 || v.OrphanErr != "" {
-		t.Fatalf("lost: state %s, orphans %v, err %q", v.State, v.Orphans, v.OrphanErr)
+		t.Fatalf("lost on-reboot: state %s, orphans %v, err %q", v.State, v.Orphans, v.OrphanErr)
 	}
 	// A previous boot: nothing is scanned, so the (current-boot) process is not counted.
 	old := currentBoot
@@ -187,10 +197,20 @@ func TestMarkedAnyGroupAndBoot(t *testing.T) {
 	if v, _ := LoadFull("anyg", time.Second); len(v.Orphans) != 1 {
 		t.Errorf("restore-failed, no pgid: orphans %v (%s)", v.Orphans, v.OrphanErr)
 	}
-	// With a process group recorded: only that group is scanned.
+	// With a process group recorded, every group is still scanned.
 	WriteJSON(d.StatusPath(), Status{State: StateRestoreFailed, Generation: 1, BootID: boot, PGID: 999999})
-	if v, _ := LoadFull("anyg", time.Second); len(v.Orphans) != 0 || v.OrphanErr != "" {
+	if v, _ := LoadFull("anyg", time.Second); len(v.Orphans) != 1 || v.OrphanErr != "" {
 		t.Errorf("restore-failed, other pgid: orphans %v (%s)", v.Orphans, v.OrphanErr)
+	}
+	// Exited: finalized from lost by stop scans every group; ended under its
+	// monitor, only the recorded group.
+	WriteJSON(d.StatusPath(), Status{State: StateExited, Generation: 1, BootID: boot, PGID: 999999, EndedBy: EndedByStop, Error: LostFinalizedBy + "stop"})
+	if v, _ := LoadFull("anyg", time.Second); len(v.Orphans) != 1 {
+		t.Errorf("exited from lost: orphans %v (%s)", v.Orphans, v.OrphanErr)
+	}
+	WriteJSON(d.StatusPath(), Status{State: StateExited, Generation: 1, BootID: boot, PGID: 999999, EndedBy: EndedByStop})
+	if v, _ := LoadFull("anyg", time.Second); len(v.Orphans) != 0 {
+		t.Errorf("exited normally: orphans %v (%s)", v.Orphans, v.OrphanErr)
 	}
 	// No plan for a generation that spawned something: unknown.
 	os.Remove(d.PlanPath(1))

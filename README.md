@@ -180,6 +180,14 @@ setsid mode keeps them running and tracks them** (`inspect` shows `orphans: N`,
   like an outside SIGTERM (`ended_by=signal`, with the normal grace) and then
   kills the leftovers; under setsid, logout does not touch the session.
 
+Only processes still in the agent's process group are tracked: a process the
+agent deliberately moved out of it (a daemonized tmux server, an ssh-agent, a dev
+server) is never counted, and `stop` and `rm --force` leave it alone, even after
+the monitor dies. The exception is a `--restart on-reboot` bridge that was lost (or
+stopped from lost) or whose restore failed: there every process carrying the
+session's marker counts, whatever its group, because `restore` will not relaunch
+beside it.
+
 Use `--launcher setsid` if an agent's background processes must keep running.
 
 Linux and macOS both run the full test suite in CI. macOS has no parent-death

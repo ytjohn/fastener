@@ -14,6 +14,8 @@
 //	FAKE_GRANDCHILD_PIDFILE=p  write that child's pid to p
 //	FAKE_GRANDCHILD_WRITES=d,… the child inherits stdout (holding the pipe open)
 //	                           and prints "grandchild-<i>" at each delay d after it starts
+//	FAKE_SETSID_CHILD=pidfile  first start a long-lived child in a new session (out of the
+//	                           process group, as a daemonizing agent would) and write its pid
 //	FAKE_CRASH=1               kill itself with SIGKILL after init
 //	FAKE_REPLY_RLIMIT=1        reply with the soft RLIMIT_NOFILE the agent was started with
 //	FAKE_MODEL=id              report id as the init event's model and in an assistant
@@ -68,6 +70,9 @@ func main() {
 		for {
 			time.Sleep(time.Hour)
 		}
+	}
+	if p := os.Getenv("FAKE_SETSID_CHILD"); p != "" {
+		detachedChild(p)
 	}
 	if os.Getenv("FAKE_UNTRUSTED") == "1" {
 		dir, _ := os.Getwd()
@@ -147,6 +152,25 @@ func grandchild() {
 	if p := os.Getenv("FAKE_GRANDCHILD_PIDFILE"); p != "" {
 		_ = os.WriteFile(p, []byte(strconv.Itoa(c.Process.Pid)), 0o644)
 	}
+}
+
+// detachedChild starts a grandchild-role child with setsid (its own session
+// and process group), writes its pid to pidfile and leaves it running.
+func detachedChild(pidfile string) {
+	c := exec.Command(os.Args[0])
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "FAKE_SETSID_CHILD=") {
+			c.Env = append(c.Env, kv)
+		}
+	}
+	c.Env = append(c.Env, "FAKE_ROLE=grandchild")
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := c.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "setsid child:", err)
+		os.Exit(90)
+	}
+	_ = os.WriteFile(pidfile, []byte(strconv.Itoa(c.Process.Pid)), 0o644)
+	_ = c.Process.Release()
 }
 
 func envDur(name string, def time.Duration) time.Duration {

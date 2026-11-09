@@ -192,7 +192,7 @@ func notRestorable(v *session.View, explicit bool) (reason, msg string) {
 		return rsNotRemote, fmt.Sprintf("a %s session is never restored (only remote bridges are, in this version)", kindOf(s))
 	case v.Alive():
 		return rsRunning, "the session is " + v.State
-	case v.State == session.StateExited && explicit && finalizedFromLost(v):
+	case v.State == session.StateExited && explicit && v.FinalizedFromLost():
 		return "", "" // `stop` cleaned up a lost session's orphans; named, it may be restored
 	case v.State == session.StateExited:
 		return rsNotLost, "the session ended (ended_by=" + v.Status.EndedBy + "); restore only relaunches lost sessions"
@@ -200,12 +200,6 @@ func notRestorable(v *session.View, explicit bool) (reason, msg string) {
 		return rsNotLost, "the session is " + v.State
 	}
 	return "", ""
-}
-
-// finalizedFromLost reports whether an exited session was finalized by
-// `stop` from lost, rather than ending under its monitor.
-func finalizedFromLost(v *session.View) bool {
-	return v.Status.EndedBy == session.EndedByStop && v.Status.Error == lostFinalizedBy+"stop"
 }
 
 func kindOf(s session.Session) string {

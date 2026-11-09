@@ -169,7 +169,7 @@ func stopOnce(v *session.View, grace time.Duration, by string, retried bool) err
 			now := time.Now().UTC()
 			s.State, s.EndedBy, s.EndedAt = session.StateExited, session.EndedByStop, &now
 			if s.Error == "" {
-				s.Error = lostFinalizedBy + by
+				s.Error = session.LostFinalizedBy + by
 			}
 		})
 		if errors.Is(err, session.ErrMonitorAlive) && !retried {
@@ -184,10 +184,6 @@ func stopOnce(v *session.View, grace time.Duration, by string, retried bool) err
 	}
 	return fmt.Errorf("session %s in unexpected state %q", v.Session.Name, v.State)
 }
-
-// lostFinalizedBy starts the error a lost session is finalized with by stop
-// or rm ("monitor was lost; finalized by stop").
-const lostFinalizedBy = "monitor was lost; finalized by "
 
 // orphanBoot is the boot to verify orphans against: the recorded one, else
 // the current boot (an any-group marker scan finds only current-boot

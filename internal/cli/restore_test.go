@@ -579,3 +579,94 @@ func TestRmRefusesDuringRestore(t *testing.T) {
 	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	h.ok("rm", "br-rm")
 }
+
+// readPid waits for a pid file and returns its pid; the process is killed at
+// cleanup.
+func readPid(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if b, err := os.ReadFile(path); err == nil && len(b) > 0 {
+			var pid int
+			fmt.Sscan(string(b), &pid)
+			t.Cleanup(func() { syscall.Kill(pid, syscall.SIGKILL) })
+			return pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no pid in %s", path)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func waitGone(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for pidAlive(pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("pid %d still alive", pid)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestRestoreFailedSetsidOrphan: a failed relaunch leaves a marked child that
+// moved out of the process group (setsid). restore-failed sessions are
+// scanned in every group, so it is counted, rm refuses, stop kills it, and a
+// named restore then relaunches.
+func TestRestoreFailedSetsidOrphan(t *testing.T) {
+	h := newBridgeHarness(t)
+	full := fmt.Sprintf(fakeBridgeProfile, fakeBin)
+	h.startOnReboot("rf-setsid", "--grace=300ms")
+	h.simulateReboot("rf-setsid")
+	pidfile := filepath.Join(t.TempDir(), "child.pid")
+	wrapper := filepath.Join(t.TempDir(), "detaching-agent")
+	body := "#!/bin/sh\nFAKE_SETSID_CHILD=" + pidfile + " FAKE_UNTRUSTED=1 exec " + fakeBin + " \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.writeProfile("fakebridge", strings.Replace(full, fmt.Sprintf("%q", fakeBin), fmt.Sprintf("%q", wrapper), 1))
+	if rs := h.restore(1); len(rs) != 1 || rs[0].Reason != "untrusted_workspace" {
+		t.Fatalf("restore = %+v", rs)
+	}
+	pid := readPid(t, pidfile)
+	if v := h.inspect("rf-setsid"); v.State != "restore-failed" || v.Orphans != 1 {
+		t.Fatalf("state %s, orphans %d; want restore-failed with 1", v.State, v.Orphans)
+	}
+	if _, errOut, code := h.cmd("rm", "rf-setsid"); code != 1 || !strings.Contains(errOut, "orphans: 1") {
+		t.Errorf("rm: exit %d, %q", code, errOut)
+	}
+	h.ok("stop", "rf-setsid")
+	waitGone(t, pid)
+	if v := h.inspect("rf-setsid"); v.Orphans != 0 {
+		t.Errorf("orphans after stop: %d", v.Orphans)
+	}
+	h.writeProfile("fakebridge", full)
+	if rs := h.restore(0, "rf-setsid"); len(rs) != 1 || rs[0].Result != "restored" || rs[0].Generation != 3 {
+		t.Errorf("named restore = %+v", rs)
+	}
+}
+
+// TestLostHeadlessKeepsDaemonizedChild: a headless session's agent that moved
+// a child out of its process group (as a tmux server or dev server would)
+// does not have it counted when the monitor dies, and stop leaves it alone.
+func TestLostHeadlessKeepsDaemonizedChild(t *testing.T) {
+	h := newHarness(t)
+	pidfile := filepath.Join(t.TempDir(), "child.pid")
+	h.start("hl-daemon", []string{"FAKE_SLEEP=1h", "FAKE_SETSID_CHILD=" + pidfile}, "--grace", "300ms")
+	pid := readPid(t, pidfile)
+	h.waitState("hl-daemon", "running", 10*time.Second)
+	h.simulateReboot("hl-daemon")
+	if v := h.inspect("hl-daemon"); v.State != "lost" || v.Orphans != 0 {
+		t.Fatalf("state %s, orphans %d; want lost with 0", v.State, v.Orphans)
+	}
+	h.ok("stop", "hl-daemon")
+	time.Sleep(500 * time.Millisecond)
+	if !pidAlive(pid) {
+		t.Error("stop killed a child the agent had moved out of its process group")
+	}
+	h.ok("rm", "hl-daemon")
+	if !pidAlive(pid) {
+		t.Error("rm killed it")
+	}
+}
