@@ -87,6 +87,21 @@ enable-linger` fixes that). In systemd mode, for a session with `--max-runtime`,
 warning), because the unit's runtime backstop was sized from it. CI has no user
 systemd, so the systemd launcher is tested only on machines that have one.
 
+### Remote bridges
+
+`fastener run claude --remote --cwd DIR [--name N]` starts `claude remote-control`
+in DIR as a long-running session you drive from claude.ai/code or the Claude app.
+It takes no prompt and has no default time limit. `run` waits up to `remote_wait`
+(config, default 15s) for the bridge URL and prints `<name>  <url>`; `inspect`
+shows `remote_url` and the `remote_sessions` opened so far, and `stop` ends the
+bridge and its sessions. Claude refuses a folder whose trust dialog was never
+accepted: `run --remote` then exits 1 with `<dir> is not a trusted workspace`
+(`"reason": "untrusted_workspace"` with `--json`); run `claude` in that folder once
+and accept the dialog. Redrawn status lines are dropped from `output.log`, so a
+bridge left running for days does not fill the disk. `--permissions skip` maps to
+`--permission-mode bypassPermissions`. Other backends opt in with a `[remote]`
+profile section (design §8.1).
+
 ### Leftover processes
 
 An agent can start processes that outlive it. **systemd mode kills them;
