@@ -175,7 +175,7 @@ func TestRunRemoteWaitTimeout(t *testing.T) {
 func TestRunRemoteUntrustedWorkspace(t *testing.T) {
 	h := newBridgeHarness(t)
 	dir := t.TempDir()
-	want := dir + " is not a trusted workspace for fakeagent bridge; authorize it with: fastener authorize fakebridge-folder-trust " + dir
+	want := dir + " is not a trusted workspace for fakeagent bridge; authorize it with: trust-it " + dir
 	_, errOut, code := h.cmd("run", "fakebridge", "--remote", "--cwd", dir, "--name", "br-untrusted", "--env", "FAKE_UNTRUSTED=1")
 	if code != 1 || strings.TrimSpace(errOut) != "fastener: "+want {
 		t.Errorf("exit %d, stderr %q; want exit 1 with %q", code, errOut, want)
@@ -229,5 +229,60 @@ func TestRunRemoteOutputLogStaysSmall(t *testing.T) {
 	}
 	if v := h.remoteInspect("br-log"); !v.Plan.DedupeFrames || len(v.Status.RemoteSessions) != 1 {
 		t.Errorf("inspect = %+v", v)
+	}
+}
+
+// TestRunRemoteUntrustedNoHint: without untrusted_hint the error names no
+// command.
+func TestRunRemoteUntrustedNoHint(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.writeProfile("fakebridge", strings.Replace(fmt.Sprintf(fakeBridgeProfile, fakeBin), "untrusted_hint    = \"trust-it {dir}\"\n", "", 1))
+	dir := t.TempDir()
+	_, errOut, code := h.cmd("run", "fakebridge", "--remote", "--cwd", dir, "--env", "FAKE_UNTRUSTED=1")
+	if want := "fastener: " + dir + " is not a trusted workspace for fakeagent bridge\n"; code != 1 || errOut != want {
+		t.Errorf("exit %d, stderr %q; want exit 1 with %q", code, errOut, want)
+	}
+}
+
+// TestRunRemoteUntrustedFalseNegative: stderr that does not match
+// untrusted_pattern is an ordinary early end.
+func TestRunRemoteUntrustedFalseNegative(t *testing.T) {
+	h := newBridgeHarness(t)
+	out, errOut, code := h.cmd("run", "fakebridge", "--remote", "--cwd", h.work, "--json",
+		"--env", "FAKE_EXIT=1", "--env", "FAKE_STDERR=[bridge] notice: workspace is trusted; network unreachable")
+	var v remoteJSON
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if code != 1 || v.Reason != "exited" || v.Folder != "" || strings.Contains(errOut, "not a trusted workspace") {
+		t.Errorf("exit %d, reason %q, folder %q, stderr %q", code, v.Reason, v.Folder, errOut)
+	}
+}
+
+// TestRunRemoteEndedAfterURL: a bridge that printed its URL and then exited
+// before run saw it is reported as ending after the URL.
+func TestRunRemoteEndedAfterURL(t *testing.T) {
+	h := newBridgeHarness(t)
+	const url = "https://claude.ai/code?environment=env_01FAKEBRIDGEFAKEBRIDGE01"
+	out, errOut, code := h.cmd("run", "fakebridge", "--remote", "--cwd", h.work, "--json",
+		"--env", "FAKE_BRIDGE=1", "--env", "FAKE_BRIDGE_EXIT_AFTER=200ms")
+	var v remoteJSON
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if code != 1 || v.Reason != "exited" || v.Status.RemoteURL != url ||
+		!strings.Contains(errOut, "the bridge ended after reporting "+url+" (state=exited, ended_by=exit, exit_code=0)") {
+		t.Errorf("exit %d, json %+v, stderr %q", code, v, errOut)
+	}
+}
+
+func TestRunRemoteFollowIsUsageError(t *testing.T) {
+	h := newBridgeHarness(t)
+	_, errOut, code := h.cmd("run", "fakebridge", "--remote", "--cwd", h.work, "--follow", "--env", "FAKE_BRIDGE=1")
+	if code != 2 || !strings.Contains(errOut, "--follow cannot be used with --remote") {
+		t.Errorf("exit %d, stderr %q", code, errOut)
+	}
+	if out := h.ok("ps", "--all", "--json"); strings.TrimSpace(out) != "[]" {
+		t.Errorf("a session was created: %s", out)
 	}
 }

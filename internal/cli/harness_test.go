@@ -84,6 +84,7 @@ skip = ["--skip"]
 [remote]
 args              = ["bridge", "--name", "{name}"]
 untrusted_pattern = '(?i)workspace not trusted'
+untrusted_hint    = "trust-it {dir}"
 dedupe_frames     = true
 
 [remote.permissions]

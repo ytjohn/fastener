@@ -17,7 +17,7 @@ import (
 // reported its URL.
 const (
 	reasonUntrusted = "untrusted_workspace" // the folder is not trusted by the backend
-	reasonExited    = "exited"              // any other early end
+	reasonExited    = "exited"              // any other end before run saw the URL
 )
 
 // remotePoll is how often `run --remote` re-reads the session while waiting
@@ -60,15 +60,18 @@ func waitRemoteURL(v *session.View, p *prepared, wait time.Duration) (*session.V
 }
 
 // explainEarlyEnd builds the failure for a bridge that ended: an untrusted
-// folder when stderr.log matches the profile's untrusted_pattern, else the
-// way it ended and the last line of stderr.
+// folder when stderr.log matches the profile's untrusted_pattern (with the
+// profile's untrusted_hint, if any), else the way it ended, the URL if it
+// reported one, and the last line of stderr.
 func explainEarlyEnd(v *session.View, p *prepared) error {
 	tail := readTail(v.Dir.StderrLog(), stderrTail)
 	cwd := v.Session.Cwd
 	if r := p.prof.Remote; r != nil && r.UntrustedPattern != "" && regexp.MustCompile(r.UntrustedPattern).Match(tail) {
-		return &remoteFailure{reason: reasonUntrusted, folder: cwd, msg: fmt.Sprintf(
-			"%s is not a trusted workspace for %s; authorize it with: fastener authorize %s-folder-trust %s",
-			cwd, bridgeCommand(p), p.prof.Name, cwd)}
+		msg := fmt.Sprintf("%s is not a trusted workspace for %s", cwd, bridgeCommand(p))
+		if r.UntrustedHint != "" {
+			msg += "; authorize it with: " + strings.ReplaceAll(r.UntrustedHint, "{dir}", cwd)
+		}
+		return &remoteFailure{reason: reasonUntrusted, folder: cwd, msg: msg}
 	}
 	how := []string{"state=" + v.State}
 	if s := v.Status; s.EndedBy != "" {
@@ -80,7 +83,11 @@ func explainEarlyEnd(v *session.View, p *prepared) error {
 			how = append(how, "signal="+s.Signal)
 		}
 	}
-	msg := fmt.Sprintf("session %s: the bridge ended before reporting its URL (%s)", v.Session.Name, strings.Join(how, ", "))
+	what := "before reporting its URL"
+	if u := v.Status.RemoteURL; u != "" {
+		what = "after reporting " + u // it started, then went away before run saw the URL
+	}
+	msg := fmt.Sprintf("session %s: the bridge ended %s (%s)", v.Session.Name, what, strings.Join(how, ", "))
 	if v.Status.Error != "" {
 		msg += ": " + v.Status.Error
 	}

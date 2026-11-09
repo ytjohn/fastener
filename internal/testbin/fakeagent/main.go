@@ -27,6 +27,7 @@
 //	FAKE_BRIDGE_SESSION_AFTER=dur  add an OSC 8 session link after this long (default 300ms)
 //	FAKE_BRIDGE_FRAMES=n       print n frames as fast as possible, then keep redrawing
 //	                           at the interval
+//	FAKE_BRIDGE_EXIT_AFTER=dur exit 0 on its own after this long
 package main
 
 import (
@@ -197,9 +198,15 @@ func bridge() {
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	var exitAfter <-chan time.Time
+	if d := envDur("FAKE_BRIDGE_EXIT_AFTER", 0); d > 0 {
+		exitAfter = time.After(d)
+	}
 	for {
 		frame()
 		select {
+		case <-exitAfter:
+			return
 		case <-term:
 			fmt.Fprintln(w, "Environment preserved. Restart to reconnect existing sessions.")
 			w.Flush()

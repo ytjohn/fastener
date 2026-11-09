@@ -42,6 +42,11 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	if o.Labels, err = parseLabels(labels); err != nil {
 		return fail(stderr, err)
 	}
+	if follow && o.Remote {
+		// A bridge runs until stopped, so --follow would never return.
+		fmt.Fprintln(stderr, "fastener: --follow cannot be used with --remote (a bridge runs until stopped); use fastener logs -f <name>")
+		return exitUsage
+	}
 	if follow && asJSON {
 		fmt.Fprintln(stderr, "fastener: --json and --follow cannot be combined")
 		return exitUsage

@@ -97,6 +97,9 @@ type Remote struct {
 	// that exits before reporting its URL; a match means the folder is not a
 	// trusted workspace for the backend.
 	UntrustedPattern string `toml:"untrusted_pattern"`
+	// UntrustedHint, optional, tells the user how to trust the folder; {dir}
+	// is replaced by the folder. Without it the error names no command.
+	UntrustedHint string `toml:"untrusted_hint"`
 	// DedupeFrames makes the monitor drop redrawn status lines from
 	// output.log (they are still parsed).
 	DedupeFrames bool `toml:"dedupe_frames"`
@@ -308,6 +311,9 @@ func (p *Profile) validateRemote() error {
 		if _, ok := p.Permissions[lvl]; !ok {
 			return fmt.Errorf("remote.permissions.%s: level is not defined in [permissions]", lvl)
 		}
+	}
+	if r.UntrustedHint != "" && r.UntrustedPattern == "" {
+		return errors.New("remote.untrusted_hint needs remote.untrusted_pattern")
 	}
 	if r.UntrustedPattern != "" {
 		if _, err := regexp.Compile(r.UntrustedPattern); err != nil {

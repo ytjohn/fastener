@@ -26,6 +26,7 @@ args = ["--resume", "{conversation_id}"]
 args              = ["remote-control", "--name", "{name}"]
 parser            = "claude-remote"
 untrusted_pattern = '(?i)workspace not trusted'
+untrusted_hint    = "fastener authorize claude-folder-trust {dir}"
 dedupe_frames     = true
 
 [remote.permissions]

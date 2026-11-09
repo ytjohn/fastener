@@ -25,6 +25,9 @@ func TestClaudeRemoteRender(t *testing.T) {
 		if !reflect.DeepEqual(r.Args, want) {
 			t.Errorf("%s: args = %q, want %q", lvl, r.Args, want)
 		}
+		if p.Remote.UntrustedHint != "fastener authorize claude-folder-trust {dir}" {
+			t.Errorf("untrusted_hint = %q", p.Remote.UntrustedHint)
+		}
 		if r.PromptMode != PromptNone || r.Parser != "claude-remote" || !r.DedupeFrames {
 			t.Errorf("%s: %+v", lvl, r)
 		}
@@ -75,6 +78,7 @@ func TestRemoteValidation(t *testing.T) {
 		{"name twice", "[remote]\nargs = [\"{name}\", \"--n={name}\"]\n", "at most once"},
 		{"unknown parser", "[remote]\nargs = [\"x\"]\nparser = \"nope\"\n", "remote.parser"},
 		{"unknown key", "[remote]\nargs = [\"x\"]\nprompt = \"stdin\"\n", "unknown keys"},
+		{"hint without pattern", "[remote]\nargs = [\"x\"]\nuntrusted_hint = \"trust {dir}\"\n", "needs remote.untrusted_pattern"},
 		{"bad pattern", "[remote]\nargs = [\"x\"]\nuntrusted_pattern = \"(\"\n", "untrusted_pattern"},
 		{"unknown level", "[remote]\nargs = [\"x\"]\n[remote.permissions]\nweird = []\n", "unknown level"},
 		{"level not in permissions", "[remote]\nargs = [\"x\"]\n[remote.permissions]\nskip = []\n", "not defined in [permissions]"},
