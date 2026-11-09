@@ -61,6 +61,7 @@ type authorizeOut struct {
 	ClaudeConfig   string `json:"claude_config"`
 	AlreadyTrusted bool   `json:"already_trusted"`
 	Backup         string `json:"backup,omitempty"`
+	Warning        string `json:"warning,omitempty"`
 	ClaudeVersion  string `json:"claude_version,omitempty"`
 }
 
@@ -179,6 +180,9 @@ func authorizeFolder(dir string, stdout, stderr io.Writer, asJSON bool) int {
 		fmt.Fprintf(stderr, "fastener: %s stays on the allowlist; run the command again to retry\n", folder)
 		return fail(stderr, err)
 	}
+	if res.Warning != "" {
+		fmt.Fprintf(stderr, "fastener: warning: %s\n", res.Warning)
+	}
 	ver := claudeVersion()
 	verified := time.Now().UTC().Truncate(time.Second)
 	err = config.UpdateAuthorizations(func(recs []config.Authorization) ([]config.Authorization, error) {
@@ -194,7 +198,7 @@ func authorizeFolder(dir string, stdout, stderr io.Writer, asJSON bool) int {
 	}
 
 	out := authorizeOut{Folder: folder, Key: key, KeyIsRepoRoot: inRepo, ClaudeConfig: claudeCfg,
-		AlreadyTrusted: res.AlreadyTrusted, Backup: res.Backup, ClaudeVersion: ver}
+		AlreadyTrusted: res.AlreadyTrusted, Backup: res.Backup, Warning: res.Warning, ClaudeVersion: ver}
 	if asJSON {
 		writeJSON(stdout, out)
 		return exitOK
