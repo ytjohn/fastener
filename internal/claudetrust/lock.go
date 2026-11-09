@@ -185,10 +185,22 @@ func (l *heldLock) release() error {
 // heldLocks is several locks taken in order and released in reverse.
 type heldLocks []*heldLock
 
+// SecondLockTimeout caps the wait for each lock after the first. While we
+// hold Claude's own lock, a running Claude is blocked on it with its own
+// retry budget; waiting the full timeout for a second lock could starve it
+// past that budget, so we give up on the second lock sooner and let go.
+const SecondLockTimeout = 2 * time.Second
+
+// acquireLocks takes paths in order: the first with timeout, the rest with
+// at most SecondLockTimeout each. On failure the ones taken are released.
 func acquireLocks(paths []string, timeout, stale time.Duration) (heldLocks, error) {
 	var ls heldLocks
-	for _, p := range paths {
-		l, err := acquireLock(p, timeout, stale)
+	for i, p := range paths {
+		t := timeout
+		if i > 0 && t > SecondLockTimeout {
+			t = SecondLockTimeout
+		}
+		l, err := acquireLock(p, t, stale)
 		if err != nil {
 			_ = ls.release()
 			return nil, err

@@ -79,6 +79,34 @@ type Result struct {
 	ConfigPath     string `json:"claude_config"`
 	AlreadyTrusted bool   `json:"already_trusted"`
 	Backup         string `json:"backup,omitempty"` // the backup written, if the file was changed
+	// Warning is set when the change succeeded but releasing the lock did
+	// not (it was compromised after the rename).
+	Warning string `json:"warning,omitempty"`
+}
+
+// afterWrite, if set (by tests), runs after a successful read-modify-write,
+// before the lock is released.
+var afterWrite func()
+
+// lockPaths are the locks to take for the config at cfg whose real path is
+// real: Claude's own "<cfg>.lock" on the unresolved path, then, only when
+// the file itself is a symlink, "<real>.lock" too. When only a parent
+// directory is a symlink (/home -> /var/home, /tmp -> /private/tmp, a
+// symlinked CLAUDE_CONFIG_DIR) both spellings name the same lock directory,
+// and taking it twice would deadlock on our own lock.
+func lockPaths(cfg, real string) []string {
+	paths := []string{cfg + ".lock"}
+	if real == filepath.Clean(cfg) {
+		return paths
+	}
+	if filepath.Base(real) == filepath.Base(cfg) {
+		a, err1 := os.Stat(filepath.Dir(cfg))
+		b, err2 := os.Stat(filepath.Dir(real))
+		if err1 == nil && err2 == nil && os.SameFile(a, b) {
+			return paths
+		}
+	}
+	return append(paths, real+".lock")
 }
 
 // Trust sets projects[key].hasTrustDialogAccepted = true in Claude's config
@@ -108,20 +136,21 @@ func Trust(key string, o Options) (res Result, err error) {
 	// it, not resolved through symlinks. When the config is a symlink, the
 	// lock on the real path (proper-lockfile's default) is taken too, after
 	// it, for other writers that lock there.
-	paths := []string{o.ConfigPath + ".lock"}
-	if real != filepath.Clean(o.ConfigPath) {
-		paths = append(paths, real+".lock")
-	}
-	locks, err := acquireLocks(paths, o.LockTimeout, o.LockStale)
+	locks, err := acquireLocks(lockPaths(o.ConfigPath, real), o.LockTimeout, o.LockStale)
 	if err != nil {
 		return res, err
 	}
 	defer func() { // runs on a panic too
 		if rerr := locks.release(); rerr != nil && err == nil {
-			err = fmt.Errorf("releasing the lock: %w", rerr)
+			// The file was written (or already trusted) and verified, so
+			// this is a success; the lock was taken over after the rename.
+			res.Warning = fmt.Sprintf("Claude's config is updated, but releasing the lock failed: %v", rerr)
 		}
 	}()
 	changed, backup, err := trustLocked(real, key, o.BackupDir, locks.check)
+	if err == nil && afterWrite != nil {
+		afterWrite()
+	}
 	res.AlreadyTrusted, res.Backup = !changed, backup
 	if err != nil {
 		return res, err

@@ -852,3 +852,116 @@ func TestConfigPathRefusesOtherFiles(t *testing.T) {
 		t.Fatalf("home legacy: %v", err)
 	}
 }
+
+// symlinkedParent returns a spelling of cfg through a symlinked parent dir
+// (as with /home -> /var/home or /tmp -> /private/tmp).
+func symlinkedParent(t *testing.T, cfg string) string {
+	t.Helper()
+	link := filepath.Join(filepath.Dir(filepath.Dir(cfg)), "claudelink")
+	if err := os.Symlink(filepath.Dir(cfg), link); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(link, filepath.Base(cfg))
+}
+
+func TestSymlinkedParentDirTakesOneLock(t *testing.T) {
+	cfg, fdir := isolate(t)
+	writeFixture(t, cfg, fixture, 0o600)
+	via := symlinkedParent(t, cfg)
+	if got := lockPaths(via, cfg); len(got) != 1 || got[0] != via+".lock" {
+		t.Fatalf("lock paths %v", got)
+	}
+	o := opts(via, fdir)
+	o.LockTimeout = 10 * time.Second
+	start := time.Now()
+	if _, err := Trust("/w", o); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("took %s: waited on our own lock", d)
+	}
+	if err := Verify(cfg, "/w"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Lstat(filepath.Dir(via)); fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("parent link replaced")
+	}
+}
+
+func TestSymlinkedFileTakesBothLocks(t *testing.T) {
+	cfg, _ := isolate(t)
+	target := filepath.Join(filepath.Dir(cfg), "real.json")
+	writeFixture(t, target, fixture, 0o600)
+	if err := os.Symlink(target, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := lockPaths(cfg, target); len(got) != 2 || got[0] != cfg+".lock" || got[1] != target+".lock" {
+		t.Fatalf("lock paths %v", got)
+	}
+	// Same-named target in another directory: still a different lock.
+	other := filepath.Join(filepath.Dir(filepath.Dir(cfg)), "home", ".claude.json")
+	if got := lockPaths(cfg, other); len(got) != 2 {
+		t.Fatalf("lock paths %v", got)
+	}
+}
+
+func TestSymlinkedParentHonoursOtherSpelling(t *testing.T) {
+	cfg, fdir := isolate(t)
+	writeFixture(t, cfg, fixture, 0o600)
+	via := symlinkedParent(t, cfg)
+	heldFresh(t, cfg+".lock") // Claude, spelling the path the other way
+	o := opts(via, fdir)
+	o.LockTimeout, o.LockStale = 600*time.Millisecond, 400*time.Millisecond
+	start := time.Now()
+	if _, err := Trust("/w", o); !errors.Is(err, ErrLockTimeout) || time.Since(start) < 600*time.Millisecond {
+		t.Fatalf("err %v after %s", err, time.Since(start))
+	}
+	if string(mustRead(t, cfg)) != fixture {
+		t.Fatal("file changed while the lock was held")
+	}
+}
+
+func TestSecondLockWaitIsCapped(t *testing.T) {
+	cfg, fdir := isolate(t)
+	target := filepath.Join(filepath.Dir(cfg), "real.json")
+	writeFixture(t, target, fixture, 0o600)
+	if err := os.Symlink(target, cfg); err != nil {
+		t.Fatal(err)
+	}
+	heldFresh(t, target+".lock")
+	o := opts(cfg, fdir)
+	o.LockTimeout = 10 * time.Second
+	start := time.Now()
+	_, err := Trust("/w", o)
+	d := time.Since(start)
+	if !errors.Is(err, ErrLockTimeout) || d < SecondLockTimeout || d > SecondLockTimeout+time.Second {
+		t.Fatalf("err %v after %s", err, d)
+	}
+	// The first lock was let go.
+	if _, err := os.Stat(cfg + ".lock"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("first lock not released")
+	}
+}
+
+func TestCompromisedAfterRenameIsAWarning(t *testing.T) {
+	cfg, fdir := isolate(t)
+	writeFixture(t, cfg, fixture, 0o600)
+	afterWrite = func() {
+		old := time.Now().Add(-time.Minute)
+		_ = os.Chtimes(cfg+".lock", old, old)
+	}
+	t.Cleanup(func() { afterWrite = nil })
+	res, err := Trust("/w", opts(cfg, fdir))
+	if err != nil {
+		t.Fatalf("err %v", err)
+	}
+	if !strings.Contains(res.Warning, "releasing the lock failed") || !strings.Contains(res.Warning, "compromised") {
+		t.Fatalf("warning %q", res.Warning)
+	}
+	if err := Verify(cfg, "/w"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cfg + ".lock"); err != nil {
+		t.Fatal("removed a lock that is no longer ours")
+	}
+}
