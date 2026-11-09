@@ -172,6 +172,25 @@ func TestRunRemoteWaitTimeout(t *testing.T) {
 	}
 }
 
+func TestRunRemoteUntrustedWorkspace(t *testing.T) {
+	h := newBridgeHarness(t)
+	dir := t.TempDir()
+	want := dir + " is not a trusted workspace for fakeagent bridge; authorize it with: fastener authorize fakebridge-folder-trust " + dir
+	_, errOut, code := h.cmd("run", "fakebridge", "--remote", "--cwd", dir, "--name", "br-untrusted", "--env", "FAKE_UNTRUSTED=1")
+	if code != 1 || strings.TrimSpace(errOut) != "fastener: "+want {
+		t.Errorf("exit %d, stderr %q; want exit 1 with %q", code, errOut, want)
+	}
+	h.ok("rm", "br-untrusted")
+	out, _, code := h.cmd("run", "fakebridge", "--remote", "--cwd", dir, "--name", "br-untrusted-json", "--json", "--env", "FAKE_UNTRUSTED=1")
+	var v remoteJSON
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if code != 1 || v.Reason != "untrusted_workspace" || v.Folder != dir || v.State != "exited" {
+		t.Errorf("exit %d, json %+v", code, v)
+	}
+}
+
 func TestRunRemoteEndsEarly(t *testing.T) {
 	h := newBridgeHarness(t)
 	// Not a bridge: the fake agent's headless mode exits at once.

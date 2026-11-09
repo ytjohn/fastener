@@ -41,7 +41,8 @@ type inspectOut struct {
 	// plan, a failed process scan, or a reload that failed after launch).
 	OrphanError string `json:"orphan_error,omitempty"`
 	// Reason and Folder are set only by `run --remote` when the bridge ended
-	// before reporting its URL.
+	// before reporting its URL: reason "untrusted_workspace" (with the folder)
+	// or "exited".
 	Reason string `json:"reason,omitempty"`
 	Folder string `json:"folder,omitempty"`
 }

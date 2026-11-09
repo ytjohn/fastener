@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -14,7 +16,8 @@ import (
 // Reasons `run --remote --json` reports when a bridge ends before it has
 // reported its URL.
 const (
-	reasonExited = "exited" // any other early end
+	reasonUntrusted = "untrusted_workspace" // the folder is not trusted by the backend
+	reasonExited    = "exited"              // any other early end
 )
 
 // remotePoll is how often `run --remote` re-reads the session while waiting
@@ -56,10 +59,17 @@ func waitRemoteURL(v *session.View, p *prepared, wait time.Duration) (*session.V
 	}
 }
 
-// explainEarlyEnd builds the failure for a bridge that ended: the way it
-// ended and the last line of stderr.
+// explainEarlyEnd builds the failure for a bridge that ended: an untrusted
+// folder when stderr.log matches the profile's untrusted_pattern, else the
+// way it ended and the last line of stderr.
 func explainEarlyEnd(v *session.View, p *prepared) error {
 	tail := readTail(v.Dir.StderrLog(), stderrTail)
+	cwd := v.Session.Cwd
+	if r := p.prof.Remote; r != nil && r.UntrustedPattern != "" && regexp.MustCompile(r.UntrustedPattern).Match(tail) {
+		return &remoteFailure{reason: reasonUntrusted, folder: cwd, msg: fmt.Sprintf(
+			"%s is not a trusted workspace for %s; authorize it with: fastener authorize %s-folder-trust %s",
+			cwd, bridgeCommand(p), p.prof.Name, cwd)}
+	}
 	how := []string{"state=" + v.State}
 	if s := v.Status; s.EndedBy != "" {
 		how = append(how, "ended_by="+s.EndedBy)
@@ -78,6 +88,16 @@ func explainEarlyEnd(v *session.View, p *prepared) error {
 		msg += "; stderr: " + line
 	}
 	return &remoteFailure{reason: reasonExited, msg: msg}
+}
+
+// bridgeCommand names the bridge as a user would type it, e.g.
+// "claude remote-control": the command's base name and the first argument.
+func bridgeCommand(p *prepared) string {
+	cmd := filepath.Base(p.prof.Command)
+	if r := p.prof.Remote; r != nil && len(r.Args) > 0 && !strings.Contains(r.Args[0], "{") {
+		cmd += " " + r.Args[0]
+	}
+	return cmd
 }
 
 // readTail returns up to n bytes from the end of path ("" if unreadable).
