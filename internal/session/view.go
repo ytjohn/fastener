@@ -157,6 +157,17 @@ func (v *View) FindOrphans() {
 	}
 }
 
+// planned is when the current generation was planned: the plan's planned_at
+// for a restored generation, else the session's creation time. A starting
+// session with no monitor record is given 2×handshake from then.
+func (v *View) planned() time.Time {
+	t := v.Session.CreatedAt
+	if p := v.Plan; p != nil && p.Generation == v.Generation() && p.PlannedAt.After(t) {
+		t = p.PlannedAt
+	}
+	return t
+}
+
 // Generation is the current generation (1 if status predates the field).
 func (v *View) Generation() int {
 	if v.Status.Generation > 0 {
@@ -239,7 +250,7 @@ func (v *View) resolve(handshake time.Duration, now time.Time,
 		return // still supervised (or liveness unknown: never declare lost on a read error)
 	case u != "" && unitMaybeAlive(u):
 		return // the unit is still up (or its state is unknown)
-	case !ok && u == "" && v.State == StateStarting && now.Sub(v.Session.CreatedAt) < 2*handshake:
+	case !ok && u == "" && v.State == StateStarting && now.Sub(v.planned()) < 2*handshake:
 		return // launcher record not written yet; give it time
 	}
 	if reload != nil {
