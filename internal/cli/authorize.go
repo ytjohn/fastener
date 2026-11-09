@@ -30,14 +30,20 @@ there without anyone accepting Claude's interactive trust dialog first.
 It edits Claude Code's own config file ($CLAUDE_CONFIG_DIR/.claude.json, else
 ~/.claude.json), setting projects[<key>].hasTrustDialogAccepted = true, which
 is what accepting the dialog does and what Claude's own messages name as the
-alternative to it. <key> is the root of the git repository <dir> is in, else
-<dir> itself, so trusting a folder inside a repository trusts the whole
-repository. The write takes Claude's lock (<config>.lock), re-reads the file
-under it, changes only that one field and replaces the file atomically; a
-backup goes to <fastener config>/backups (the last 5 are kept).
+alternative to it. <key> is computed as Claude computes it: the root of the
+git repository <dir> is in (for a linked worktree, the main repository's
+root), else <dir> itself, so trusting a folder inside a repository trusts the
+whole repository. The write takes Claude's lock (<config>.lock), re-reads the
+file under it, changes only that one field and replaces the file atomically
+(its mode is kept; the new file is owned by you); a backup goes to
+<fastener config>/backups (the last 5 are kept). If Claude would use another
+file (a non-empty legacy .config.json, or CLAUDE_CODE_CUSTOM_OAUTH_URL set),
+the command refuses and names it.
 
-The folder is also added to Fastener's allowlist (authorizations.json in the
-Fastener config directory). Nothing else in Fastener ever writes Claude's
+Running this command is the explicit decision to trust <dir>. It is recorded
+in Fastener's allowlist (authorizations.json in the Fastener config
+directory), which lists what you have authorized; the allowlist is a record,
+not a separate approval step. Nothing else in Fastener ever writes Claude's
 config. The home directory and / are refused.
 
 --list shows the allowlist: the recorded authorizations and config.toml's
@@ -70,6 +76,8 @@ type revokeOut struct {
 	InTrustDirs  bool   `json:"in_trust_dirs"`
 	Key          string `json:"key,omitempty"`
 	ClaudeConfig string `json:"claude_config,omitempty"`
+	// SameKey lists other recorded folders whose Claude key is the same.
+	SameKey []string `json:"same_key,omitempty"`
 }
 
 func cmdAuthorize(args []string, stdout, stderr io.Writer) int {
@@ -314,7 +322,17 @@ func authorizeRevoke(dir string, stdout, stderr io.Writer, asJSON bool) int {
 	for c := range cands {
 		inDirs = inDirs || cfg.InTrustDirs(c)
 	}
-	out := revokeOut{Folder: dir, Revoked: len(removed) > 0, InTrustDirs: inDirs}
+	var sharing []string // recorded folders that still use the same Claude key
+	if len(removed) > 0 {
+		if recs, err := config.LoadAuthorizations(); err == nil {
+			for _, r := range recs {
+				if r.Key == removed[0].Key {
+					sharing = append(sharing, r.Folder)
+				}
+			}
+		}
+	}
+	out := revokeOut{Folder: dir, Revoked: len(removed) > 0, InTrustDirs: inDirs, SameKey: sharing}
 	if len(removed) > 0 {
 		out.Folder, out.Key, out.ClaudeConfig = removed[0].Folder, removed[0].Key, removed[0].ClaudeConfig
 	}
@@ -336,6 +354,9 @@ func authorizeRevoke(dir string, stdout, stderr io.Writer, asJSON bool) int {
 		return exitOK
 	}
 	fmt.Fprintf(stdout, "revoked %s: removed from Fastener's allowlist and records\n", out.Folder)
+	if len(sharing) > 0 {
+		fmt.Fprintf(stdout, "still authorized with the same Claude key %s (removing that entry from Claude's config would untrust them too): %s\n", out.Key, strings.Join(sharing, ", "))
+	}
 	fmt.Fprintf(stdout, "Claude's config was not changed: %s still has projects[%q].%s; remove that entry yourself to make Claude ask again\n",
 		out.ClaudeConfig, out.Key, claudetrust.TrustField)
 	return exitOK

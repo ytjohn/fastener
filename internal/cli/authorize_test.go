@@ -307,3 +307,54 @@ func gitInit(t *testing.T, dir string) {
 		t.Fatalf("git init: %v %s", err, out)
 	}
 }
+
+func TestAuthorizeRevokeNamesSharedKey(t *testing.T) {
+	if _, err := lookGit(); err != nil {
+		t.Skip("no git")
+	}
+	h, cfg := authzHarness(t, false)
+	repo := newFolder(t)
+	a, b := filepath.Join(repo, "a"), filepath.Join(repo, "b")
+	_ = os.Mkdir(a, 0o755)
+	_ = os.Mkdir(b, 0o755)
+	gitInit(t, repo)
+	h.ok("authorize", "claude-folder-trust", a)
+	h.ok("authorize", "claude-folder-trust", b) // same key: already trusted
+	before := mustReadFile(t, cfg)
+	out := h.ok("authorize", "--revoke", a)
+	want := "still authorized with the same Claude key " + repo
+	if !strings.Contains(out, want) || !strings.Contains(out, b) {
+		t.Fatalf("revoke:\n%s", out)
+	}
+	if strings.Index(out, want) > strings.Index(out, "Claude's config was not changed") {
+		t.Fatal("shared-key note should come first")
+	}
+	if mustReadFile(t, cfg) != before {
+		t.Fatal("revoke changed Claude's config")
+	}
+}
+
+func TestAuthorizeRefusesOtherClaudeConfigs(t *testing.T) {
+	h, cfg := authzHarness(t, false)
+	before := mustReadFile(t, cfg)
+	h.extraEnv = append(h.extraEnv, "CLAUDE_CODE_CUSTOM_OAUTH_URL=https://example.invalid")
+	_, errOut, code := h.cmd("authorize", "claude-folder-trust", newFolder(t))
+	if code != 1 || !strings.Contains(errOut, ".claude-custom-oauth.json") {
+		t.Fatalf("custom oauth: %d %s", code, errOut)
+	}
+	h.extraEnv = h.extraEnv[:len(h.extraEnv)-1]
+	legacy := filepath.Join(filepath.Dir(cfg), ".config.json")
+	if err := os.WriteFile(legacy, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut, code = h.cmd("authorize", "claude-folder-trust", newFolder(t))
+	if code != 1 || !strings.Contains(errOut, legacy) {
+		t.Fatalf("legacy: %d %s", code, errOut)
+	}
+	if mustReadFile(t, cfg) != before || mustReadFile(t, legacy) != "{}" {
+		t.Fatal("a refused authorize wrote a config")
+	}
+	if _, err := os.Stat(filepath.Join(h.config, "authorizations.json")); !os.IsNotExist(err) {
+		t.Fatal("recorded despite the refusal")
+	}
+}

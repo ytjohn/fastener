@@ -114,18 +114,22 @@ fastener authorize --revoke ~/proj               # forget it (Claude's config is
 `authorize claude-folder-trust` records that acceptance without the dialog: it sets
 `projects[<key>].hasTrustDialogAccepted = true` in Claude Code's own config
 (`$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`), which is what the dialog
-does. `<key>` is the git repository root when the folder is inside a repository (so the
-whole repository is trusted; the output shows the key), else the folder. The home
+does. `<key>` is computed as Claude computes it: the git repository root when the folder is
+inside a repository (the main repository's root for a linked worktree; a submodule's own
+root), so the whole repository is trusted (the output shows the key), else the folder. The home
 directory and `/` are refused, and Claude must have run once so that its config exists.
+If Claude would use a different file (a non-empty legacy `~/.claude/.config.json`, or
+`CLAUDE_CODE_CUSTOM_OAUTH_URL` set), the command refuses and names it.
 
 The edit is made the way Claude makes its own: under Claude's lock (`.claude.json.lock`;
 it waits up to 10 s for a running Claude), re-reading the file, changing only that field
-and keeping every other value byte for byte, then an atomic rename. A copy of the
+and keeping every other value byte for byte, then an atomic rename (the mode is kept;
+the file ends up owned by whoever ran the command). A copy of the
 previous file goes to `~/.config/fastener/backups/` (the last 5 are kept). A folder that
 is already trusted is left alone.
 
-Running the command is the explicit decision: it also adds the folder to Fastener's
-allowlist (`authorizations.json` in the config directory; `trust_dirs = [...]` in
+Running the command is the explicit decision; Fastener's allowlist just records it
+(`authorizations.json` in the config directory; `trust_dirs = [...]` in
 `config.toml` is an extra, hand-maintained list). Nothing else in Fastener writes
 Claude's config, and `run --remote` never authorizes a folder by itself. `--revoke`
 only removes Fastener's record; to make Claude ask again, delete the folder's entry
