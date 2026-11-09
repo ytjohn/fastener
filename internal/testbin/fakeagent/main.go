@@ -17,9 +17,21 @@
 //	FAKE_REPLY_RLIMIT=1        reply with the soft RLIMIT_NOFILE the agent was started with
 //	FAKE_MODEL=id              report id as the init event's model and in an assistant
 //	                           event's message.model (both absent when unset)
+//
+// Remote bridge mode (a stand-in for `claude remote-control`; stdin is not read):
+//
+//	FAKE_UNTRUSTED=1           print Claude's workspace-trust error to stderr and exit 1
+//	FAKE_BRIDGE=1              redraw a status screen like Claude's until SIGTERM
+//	FAKE_BRIDGE_INTERVAL=dur   time between frames (default 50ms)
+//	FAKE_BRIDGE_URL_AFTER=dur  show the bridge URL only after this long (default 0)
+//	FAKE_BRIDGE_SESSION_AFTER=dur  add an OSC 8 session link after this long (default 300ms)
+//	FAKE_BRIDGE_FRAMES=n       print n frames as fast as possible, then keep redrawing
+//	                           at the interval
+//	FAKE_BRIDGE_EXIT_AFTER=dur exit 0 on its own after this long
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -55,6 +67,15 @@ func main() {
 		for {
 			time.Sleep(time.Hour)
 		}
+	}
+	if os.Getenv("FAKE_UNTRUSTED") == "1" {
+		dir, _ := os.Getwd()
+		fmt.Fprintf(os.Stderr, "Error: Workspace not trusted. Please run `claude` in %s first to review and accept the workspace trust dialog.\n", dir)
+		os.Exit(1)
+	}
+	if os.Getenv("FAKE_BRIDGE") == "1" {
+		bridge()
+		return
 	}
 	if os.Getenv("FAKE_IGNORE_TERM") == "1" {
 		signal.Ignore(syscall.SIGTERM)
@@ -117,4 +138,80 @@ func main() {
 	})
 	code, _ := strconv.Atoi(os.Getenv("FAKE_EXIT"))
 	os.Exit(code)
+}
+
+func envDur(name string, def time.Duration) time.Duration {
+	if v := os.Getenv(name); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
+
+// bridge mimics `claude remote-control`'s status screen (Claude Code
+// 2.1.319): every frame moves the cursor up over the previous one, erases,
+// and redraws; a session line is an OSC 8 hyperlink.
+func bridge() {
+	const env = "env_01FAKEBRIDGEFAKEBRIDGE01"
+	const sess = "session_01FAKEBRIDGESESSION01"
+	interval := envDur("FAKE_BRIDGE_INTERVAL", 50*time.Millisecond)
+	urlAfter := envDur("FAKE_BRIDGE_URL_AFTER", 0)
+	sessAfter := envDur("FAKE_BRIDGE_SESSION_AFTER", 300*time.Millisecond)
+	fast, _ := strconv.Atoi(os.Getenv("FAKE_BRIDGE_FRAMES"))
+	term := make(chan os.Signal, 1)
+	signal.Notify(term, syscall.SIGTERM)
+	w := bufio.NewWriter(os.Stdout)
+	start := time.Now()
+	prev := 0
+	frame := func() {
+		lines := []string{"\u00b7\u2714\ufe0e\u00b7 Connected \u00b7 example \u00b7 main"}
+		since := time.Since(start)
+		capacity := "0/32"
+		var link string
+		if since >= sessAfter {
+			capacity = "1/32"
+			link = "    \x1b]8;;https://claude.ai/code/" + sess + "?from=cli\x07Attached\x1b]8;;\x07"
+		}
+		lines = append(lines, "    Capacity: "+capacity+" \u00b7 New sessions will be created in the current directory")
+		if link != "" {
+			lines = append(lines, link)
+		}
+		lines = append(lines, "")
+		if since >= urlAfter {
+			lines = append(lines, "Continue coding in the Claude mobile app or https://claude.ai/code?environment="+env)
+		} else {
+			lines = append(lines, "Connecting\u2026")
+		}
+		lines = append(lines, "space to show QR code \u00b7 w to toggle spawn mode")
+		if prev > 0 {
+			fmt.Fprintf(w, "\x1b[%dA\x1b[J", prev)
+		}
+		for _, l := range lines {
+			fmt.Fprintln(w, l)
+		}
+		prev = len(lines)
+		w.Flush()
+	}
+	for i := 0; i < fast; i++ {
+		frame()
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	var exitAfter <-chan time.Time
+	if d := envDur("FAKE_BRIDGE_EXIT_AFTER", 0); d > 0 {
+		exitAfter = time.After(d)
+	}
+	for {
+		frame()
+		select {
+		case <-exitAfter:
+			return
+		case <-term:
+			fmt.Fprintln(w, "Environment preserved. Restart to reconnect existing sessions.")
+			w.Flush()
+			return
+		case <-t.C:
+		}
+	}
 }

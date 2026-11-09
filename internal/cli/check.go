@@ -162,7 +162,7 @@ func printCheck(w io.Writer, r checkReport) {
 func runCheck(o launchOptions, opts checkOpts, stderr io.Writer) (r checkReport) {
 	r = checkReport{Backend: o.Backend}
 
-	p, err := prepare(o, checkPrompt)
+	p, err := prepare(o, checkPrompt, "")
 	if err != nil {
 		step := "profile"
 		var se *stepError

@@ -69,6 +69,7 @@ type Profile struct {
 	Options            map[string][]string `toml:"options"`
 	Permissions        map[string][]string `toml:"permissions"`
 	Resume             *Resume             `toml:"resume"`
+	Remote             *Remote             `toml:"remote"`
 	Check              Check               `toml:"check"`
 
 	Source string `toml:"-"` // "builtin" or the file path
@@ -80,6 +81,32 @@ type Headless struct {
 	Prompt string   `toml:"prompt"` // "stdin" | "arg"
 	Parser string   `toml:"parser"`
 }
+
+// Remote describes a remote bridge (`run --remote`): a long-running process
+// that is driven from elsewhere, so it takes no prompt.
+type Remote struct {
+	// Args follow the command; {name} (at most once) is the session name.
+	Args []string `toml:"args"`
+	// Parser defaults to "claude-remote".
+	Parser string `toml:"parser"`
+	// Permissions overrides [permissions] per level, for a bridge command
+	// that rejects the headless flags. A level not listed here uses
+	// [permissions]; a level listed here must be defined there too.
+	Permissions map[string][]string `toml:"permissions"`
+	// UntrustedPattern is a regex matched against stderr.log of a bridge
+	// that exits before reporting its URL; a match means the folder is not a
+	// trusted workspace for the backend.
+	UntrustedPattern string `toml:"untrusted_pattern"`
+	// UntrustedHint, optional, tells the user how to trust the folder; {dir}
+	// is replaced by the folder. Without it the error names no command.
+	UntrustedHint string `toml:"untrusted_hint"`
+	// DedupeFrames makes the monitor drop redrawn status lines from
+	// output.log (they are still parsed).
+	DedupeFrames bool `toml:"dedupe_frames"`
+}
+
+// DefaultRemoteParser is [remote].parser when the profile names none.
+const DefaultRemoteParser = "claude-remote"
 
 type Resume struct {
 	Args []string `toml:"args"`
@@ -185,6 +212,9 @@ func (p *Profile) validate() error {
 	if err := p.validateTemplates(); err != nil {
 		return err
 	}
+	if err := p.validateRemote(); err != nil {
+		return err
+	}
 	for i, d := range p.Check.Diagnose {
 		if _, err := regexp.Compile(d.Match); err != nil {
 			return fmt.Errorf("check.diagnose[%d].match: %w", i, err)
@@ -258,6 +288,49 @@ func validateCommand(c string) error {
 	return fmt.Errorf("command %q must be a bare name or an absolute path", c)
 }
 
+const namePH = "{name}"
+
+func (p *Profile) validateRemote() error {
+	r := p.Remote
+	if r == nil {
+		return nil
+	}
+	if len(r.Args) == 0 {
+		return errors.New("remote.args must not be empty")
+	}
+	if countIn(r.Args, namePH) > 1 {
+		return fmt.Errorf("remote.args must contain %s at most once", namePH)
+	}
+	if _, ok := parser.Get(r.RemoteParser()); !ok {
+		return fmt.Errorf("remote.parser %q unknown (known: %s)", r.Parser, strings.Join(parser.Names(), ", "))
+	}
+	for lvl := range r.Permissions {
+		if !levels[lvl] {
+			return fmt.Errorf("remote.permissions.%s: unknown level (known: auto, skip)", lvl)
+		}
+		if _, ok := p.Permissions[lvl]; !ok {
+			return fmt.Errorf("remote.permissions.%s: level is not defined in [permissions]", lvl)
+		}
+	}
+	if r.UntrustedHint != "" && r.UntrustedPattern == "" {
+		return errors.New("remote.untrusted_hint needs remote.untrusted_pattern")
+	}
+	if r.UntrustedPattern != "" {
+		if _, err := regexp.Compile(r.UntrustedPattern); err != nil {
+			return fmt.Errorf("remote.untrusted_pattern: %w", err)
+		}
+	}
+	return nil
+}
+
+// RemoteParser is the parser a remote bridge uses.
+func (r *Remote) RemoteParser() string {
+	if r.Parser == "" {
+		return DefaultRemoteParser
+	}
+	return r.Parser
+}
+
 func countIn(args []string, tok string) int {
 	n := 0
 	for _, a := range args {
@@ -272,6 +345,27 @@ func (p *Profile) validateTemplates() error {
 	plain = append(plain, p.Headless.Args, p.Check.VersionArgs)
 	for _, a := range p.Permissions {
 		plain = append(plain, a)
+	}
+	if p.Remote != nil {
+		for _, a := range p.Remote.Permissions {
+			plain = append(plain, a)
+		}
+	}
+	// {name} is only allowed in [remote].args (see validateRemote).
+	noName := append([][]string{}, plain...)
+	for _, t := range p.Options {
+		noName = append(noName, t)
+	}
+	if p.Resume != nil {
+		noName = append(noName, p.Resume.Args)
+	}
+	for _, a := range noName {
+		if countIn(a, namePH) != 0 {
+			return fmt.Errorf("placeholder %s is only allowed in remote.args", namePH)
+		}
+	}
+	if p.Remote != nil {
+		plain = append(plain, p.Remote.Args)
 	}
 	for name, tmpl := range p.Options {
 		if len(tmpl) == 0 || countIn(tmpl, val) != 1 {

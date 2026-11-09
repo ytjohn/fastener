@@ -19,6 +19,12 @@ type Fields struct {
 	AgentError  *bool  `json:"agent_error,omitempty"`
 	Usage       *Usage `json:"usage,omitempty"`
 	ParseErrors int    `json:"parse_errors,omitempty"`
+	// RemoteURL is a remote bridge's URL (claude-remote: the latest
+	// https://claude.ai/code?environment=env_… seen).
+	RemoteURL string `json:"remote_url,omitempty"`
+	// RemoteSessions lists the session URLs a bridge has shown, de-duplicated,
+	// in the order first seen, without their query string.
+	RemoteSessions []string `json:"remote_sessions,omitempty"`
 }
 
 // Usage counts all tokens the backend reported for the run. The token fields
@@ -70,6 +76,7 @@ var registry = map[string]Parser{
 	"claude-stream-json": claudeStreamJSON{},
 	"pi-json":            piJSON{},
 	"codex-jsonl":        codexJSONL{},
+	"claude-remote":      claudeRemote{},
 }
 
 // Get returns the named parser.

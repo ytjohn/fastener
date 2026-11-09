@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -25,12 +26,13 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	fs.Var(&labels, "label", "KEY=VALUE label (repeatable)")
 	fs.BoolVar(&follow, "follow", false, "follow output after launch")
 	fs.BoolVar(&asJSON, "json", false, "print the session as JSON")
+	fs.BoolVar(&o.Remote, "remote", false, "start the backend's remote bridge ([remote] in its profile) instead of a headless run; takes no prompt")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return parseFail(err)
 	}
 	if len(pos) != 1 {
-		fmt.Fprintln(stderr, "usage: fastener run <backend> --cwd DIR (--prompt TEXT | --prompt-file F) [flags]")
+		fmt.Fprintln(stderr, "usage: fastener run <backend> --cwd DIR (--prompt TEXT | --prompt-file F | --remote) [flags]")
 		return exitUsage
 	}
 	o.Backend, o.Env = pos[0], env
@@ -40,19 +42,51 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	if o.Labels, err = parseLabels(labels); err != nil {
 		return fail(stderr, err)
 	}
+	if follow && o.Remote {
+		// A bridge runs until stopped, so --follow would never return.
+		fmt.Fprintln(stderr, "fastener: --follow cannot be used with --remote (a bridge runs until stopped); use fastener logs -f <name>")
+		return exitUsage
+	}
 	if follow && asJSON {
 		fmt.Fprintln(stderr, "fastener: --json and --follow cannot be combined")
 		return exitUsage
 	}
 	autoPrune()
-	v, err := launch(o, stderr)
+	v, p, err := launchPrepared(o, stderr)
 	if err != nil {
 		if v != nil && asJSON {
 			writeJSON(stdout, inspectOf(v))
 		}
 		return fail(stderr, err)
 	}
-	if asJSON {
+	if o.Remote {
+		// Wait for the bridge to report its URL; a bridge that ends first is
+		// a failure with its reason.
+		wait := p.cfg.RemoteWaitDuration()
+		v, err = waitRemoteURL(v, p, wait)
+		out := inspectOf(v)
+		var rf *remoteFailure
+		if errors.As(err, &rf) {
+			out.Reason, out.Folder = rf.reason, rf.folder
+		}
+		if asJSON {
+			writeJSON(stdout, out)
+		}
+		if err != nil {
+			return fail(stderr, err)
+		}
+		if !asJSON {
+			if u := v.Status.RemoteURL; u != "" {
+				fmt.Fprintf(stdout, "%s  %s\n", v.Session.Name, u)
+			} else {
+				fmt.Fprintln(stdout, v.Session.Name)
+			}
+		}
+		if v.Status.RemoteURL == "" {
+			fmt.Fprintf(stderr, "fastener: %s: no URL yet after %s; the bridge is still running (fastener inspect %s shows the URL once reported)\n",
+				v.Session.Name, wait, v.Session.Name)
+		}
+	} else if asJSON {
 		writeJSON(stdout, inspectOf(v))
 	} else {
 		fmt.Fprintln(stdout, v.Session.Name)

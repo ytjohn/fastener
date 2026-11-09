@@ -116,7 +116,7 @@ ${FASTENER_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/fastener}/
 
 - `schema_version`, `generation` (the first launch is 1)
 - `argv`: the fully resolved argument list. `argv[0]` is resolved to an absolute path at plan time, against the session's PATH; the monitor never does a PATH lookup.
-- `prompt_mode` (`stdin` | `arg`), `parser`: copied from the profile. (`url_pattern` and `conversation_finder` arrive with phase B.)
+- `prompt_mode` (`stdin` | `arg` | `none` for a remote bridge), `parser`, `dedupe_frames` (remote bridges, §8.1): copied from the profile. (`url_pattern` and `conversation_finder` arrive with phase B.)
 - **Profile provenance:** `profile_source` (`builtin` | the file path), `profile_sha256`
 - `marker`: `<name>:<generation>:<random nonce>` (see "Process identity" in §4)
 - `fastener_version`, `planned_at`
@@ -139,7 +139,7 @@ This is the record that lets the CLI judge whether a monitor is alive before the
   - `boot_id`
 - `started_at`, `ended_at`
 - **Exit facts:** `ended_by`, `exit_code` (absent when a signal killed the agent), `signal` (the signal name that terminated the agent, if any), `error`, `output_truncated` (true when the stdout drain timed out; see "Output drain" in §4)
-- **Parser fields** (each optional; omitted when unknown): `conversation_id`, `final_message` (capped at 64 KiB), `model` (the model the backend says it served; absent after an agent error), `model_source` (`server` or `client`), `agent_error`, `usage` {`input_tokens`, `output_tokens`, `cost_usd`} (present only when the backend reported usage), `parse_errors`; `remote_url` arrives with phase B
+- **Parser fields** (each optional; omitted when unknown): `conversation_id`, `final_message` (capped at 64 KiB), `model` (the model the backend says it served; absent after an agent error), `model_source` (`server` or `client`), `agent_error`, `usage` {`input_tokens`, `output_tokens`, `cost_usd`} (present only when the backend reported usage), `parse_errors`; for remote bridges `remote_url` and `remote_sessions` (§8.1)
 
 **The monitor writes its own identity first.** Right after it loads its plan, before it checks for a stop request, spawns anything or can fail in any other way, the monitor writes `status.json` once (state `starting`, with its `monitor` identity and `boot_id`). Each generation's status is built fresh; nothing is carried over from a previous generation. This shrinks the window in which no record identifies a live monitor.
 
@@ -327,6 +327,16 @@ diagnose = [
   { match = '(?i)not logged in|please run /login|invalid api key', hint = "auth: run `claude` interactively and log in" },
 ]
 
+[remote]                         # run --remote (§8.1); no prompt
+args              = ["remote-control", "--name", "{name}"]
+parser            = "claude-remote"
+untrusted_pattern = '(?i)workspace not trusted'
+untrusted_hint    = "fastener authorize claude-folder-trust {dir}"
+dedupe_frames     = true
+
+[remote.permissions]             # per-level override of [permissions]
+skip = ["--permission-mode", "bypassPermissions"]
+
 # Phase B: the [interactive] tables below are rejected by v0.1
 [interactive]
 args = []
@@ -344,7 +354,7 @@ url_pattern = 'https://claude\.ai/\S+'
   - `--model` values starting with `-` are rejected, as an injection guard.
   - `argv[0]` is resolved to an absolute path at plan time, against the session's PATH (the base environment plus env-file plus `--env`, not the caller's shell).
 - **Command validation.** `command` is a bare name (`[A-Za-z0-9._+][A-Za-z0-9._+-]*`) or an absolute path, with no whitespace. A relative path such as `./x` is rejected so the plan never depends on the launch directory.
-- **Template validation.** Every `[options]` template and `[resume].args` must be non-empty and contain its placeholder (`{value}`, `{conversation_id}`) exactly once; a placeholder anywhere else (headless args, permissions) is an error.
+- **Template validation.** Every `[options]` template and `[resume].args` must be non-empty and contain its placeholder (`{value}`, `{conversation_id}`) exactly once; a placeholder anywhere else (headless args, permissions) is an error. `[remote].args` must be non-empty and may contain `{name}` at most once. `{name}` is reserved: anywhere else (headless args, options, resume, permissions, `[remote.permissions]`, version args) it is rejected at load. This is a small compatibility change in v0.3: a user profile from v0.1 or v0.2 that passes a literal `{name}` there no longer loads, and `check --static` reports why.
 - **No silent fallback.**
   - A requested permission level, option, mode or `--remote` that the profile does not define is a hard error before anything is created.
   - The permission level comes from the `--permissions` flag if given, else the `default_permissions` config, else the profile's own optional `default_permissions`, else `auto`. This holds for both `run` and `check`, and the resolved level is recorded in `session.json`. A profile's `default_permissions` must name a level that profile defines (validated at load). An explicit `--permissions` must be a known level (`auto` or `skip`); anything else is a usage error (exit 2) for `run` and `check`.
@@ -352,7 +362,7 @@ url_pattern = 'https://claude\.ai/\S+'
 - **Resolution:** `~/.config/fastener/backends/<name>.toml` (`$XDG_CONFIG_HOME`) **replaces** the embedded built-in of the same name entirely. There is no merging.
 - **Validation:** an unknown key, a missing required section or an unknown parser or finder name is an error, both at load time and in `fastener check --static`.
 - **Built-ins** (`profiles/*.toml`, embedded with `go:embed`): `claude`, `codex`, `pi`. Every flag in a built-in profile is verified against the real CLI by `fastener check` (the opt-in smoke tests, §12) before release; all three passed on the development machine.
-  - **`claude`:** `-p --output-format stream-json --verbose`, prompt on stdin, parser `claude-stream-json`; `auto` is `--permission-mode auto`, `skip` is `--dangerously-skip-permissions`.
+  - **`claude`:** `-p --output-format stream-json --verbose`, prompt on stdin, parser `claude-stream-json`; `auto` is `--permission-mode auto`, `skip` is `--dangerously-skip-permissions`. `[remote]` runs `remote-control --name {name}` with parser `claude-remote`; there `skip` is `--permission-mode bypassPermissions` (§8.1).
   - **`codex`:** `exec --json --skip-git-repo-check`, prompt on stdin, parser `codex-jsonl`; `auto` is `--approve-for-me`, `skip` is `--dangerously-bypass-approvals-and-sandbox`. `--skip-git-repo-check` is there because Fastener sessions name their working directory explicitly and `check` runs in a temporary non-git directory.
   - **`pi`:** `-p --mode json`, prompt as an argument, parser `pi-json`. Pi has no permission system, so the profile defines only `skip` and sets `default_permissions = "skip"`: Pi sessions get `skip` without a flag (unless the config's `default_permissions` names another level). An explicit `--permissions auto` is still a hard error rather than a silent fallback. Pi exits 0 and only warns on stderr when a provider does not offer the requested model; a diagnose entry turns that warning into a hint.
 - **Adding a backend** means writing a TOML file. Adding a *built-in* backend is a PR containing the profile plus a recorded-output test fixture. If the backend needs a new output format, the PR also adds a parser.
@@ -415,7 +425,7 @@ Phase B adds `check --interactive [--remote]`. It launches with a pty, confirms 
 
 ## 7. Parsers
 
-Named Go functions selected by profile. v0.1 ships `claude-stream-json`, `pi-json`, `codex-jsonl` and `none`.
+Named Go functions selected by profile. v0.1 ships `claude-stream-json`, `pi-json`, `codex-jsonl` and `none`; v0.3 adds `claude-remote`.
 
 - **`claude-stream-json`** (`claude -p --output-format stream-json --verbose`): `conversation_id` from any event's `session_id`; `model` from the last top-level assistant event's `message.model` (events with a `parent_tool_use_id` are subagent turns, possibly on another model, and are skipped) (a bare model id the Anthropic API reports; `model_source` `server`; Claude Code's `<synthetic>` placeholder is ignored), falling back to the `system/init` event's `model` (the CLI's own setting; `model_source` `client`) until an assistant event arrives; an error `result` clears `model`; `final_message`, `agent_error` (`is_error`) and `usage` from the `result` event.
 - **`pi-json`** (`pi -p --mode json`): `conversation_id` from the `session` event's `id`. `model`, `model_source`, `final_message` and `agent_error` come from the last assistant `message_end`:
@@ -430,7 +440,9 @@ Named Go functions selected by profile. v0.1 ships `claude-stream-json`, `pi-jso
   - `usage` is summed over every `turn.completed`: `input_tokens` is Codex's own reported total and `output_tokens` its reported output. `cached_input_tokens` and `reasoning_output_tokens` are subsets in OpenAI semantics and are not added; `cache_write_input_tokens` is not added either because the captures cannot confirm it is excluded from `input_tokens`. Codex reports no cost, so `cost_usd` is omitted (not 0).
   - Codex does not report the served model in these events, so `model` and `model_source` are absent and `check`'s model step reports `skip` ("backend does not report its model"), the honest result.
 
-- Run inside the monitor, streaming, one line at a time, while raw output is written to `output.log` unchanged.
+- **`claude-remote`** (`claude remote-control`, Claude Code 2.1.319): the bridge's stdout is a status screen redrawn every few seconds, with ANSI cursor and erase sequences, and each session line is an OSC 8 hyperlink (`ESC]8;;URL BEL label ESC]8;; BEL`; ST is accepted as the terminator too). The parser strips terminal escapes (CSI, OSC, nF such as `ESC ( B`, two-byte escapes) and turns other C0 controls except tab into spaces, keeping an OSC 8 link's URL as text. It then records `remote_url`, the latest `https://claude.ai/code?environment=env_…` seen, and `remote_sessions`, every `https://claude.ai/code/session_…` seen, without its query, de-duplicated in the order first seen. IDs may contain letters, digits, `_` and `-`. The list keeps at most 64 entries: the oldest is evicted first, and a URL seen again after its eviction is added again at the end. Nothing on the screen is an error, so it never counts parse errors.
+
+- Run inside the monitor, streaming, one line at a time, while raw output is written to `output.log` unchanged. The one exception is a plan with `dedupe_frames` (§8.1): the monitor then also ends lines at a lone `\r`, holds each line until it ends, and drops it from `output.log` when it repeats the line at the same position in the previous redrawn frame; every line is still parsed, a written line keeps its raw bytes minus leading cursor-movement sequences, and a line longer than the 16 MB cap is written in full, never dropped.
 - **Extracted fields** (all optional, omitted when unknown):
   - `conversation_id`
   - `final_message`
@@ -457,12 +469,28 @@ Codex has its own server and remote-control model; supporting it is a separate l
 
 A remote bridge is a long-running headless session, so it reuses the v0.2 machinery (monitor, launchers, liveness, stop, prune) with no pty.
 
-- **Profile:** a new `[remote]` section, e.g. `args = ["remote-control", "--name", "{name}"]`, with no prompt. The permission level maps through `[permissions]` as for headless runs (`remote-control` takes `--permission-mode`). Running `--remote` against a profile without `[remote]` is a usage error (no silent fallback).
-- **CLI:** `fastener run <backend> --remote --cwd DIR [--name N]`, with no `--prompt` and no default time limit. `run` waits briefly (configurable, default 15 s) until the bridge reports its URL, then prints it; if the bridge exits first, `run` fails with its reason.
-- **What Claude prints** (observed): a status screen redrawn every few seconds, containing the bridge URL `https://claude.ai/code?environment=env_…` and one `https://claude.ai/code/session_…` link per session (wrapped in OSC 8 hyperlink escapes). A `claude-remote` parser strips terminal escapes and records `remote_url` (the bridge) and `remote_sessions` (session URLs seen) in `status.json`.
-- **Log growth:** because the status screen is redrawn continuously, the monitor de-duplicates identical consecutive frames before writing `output.log` (or rotates it), so a bridge left running for days does not fill the disk.
-- **Shutdown:** SIGTERM stops the bridge in about 3 s and its session children exit with it, so the existing stop path applies unchanged.
-- **Workspace trust:** `claude remote-control` refuses a folder whose trust dialog has not been accepted (`Workspace not trusted. Please run claude in <dir> first …`). Trust is stored in Claude's global config (`projects[<key>].hasTrustDialogAccepted`), keyed by the folder's git repository root (or its real path outside a repo), so a trusted parent folder does not cover a separate repository; the home directory is never persisted. There is no flag, setting or environment variable to trust a folder non-interactively; Claude's own messages point to setting that field instead (§8.3). In v0.3 an untrusted folder makes `run --remote` fail with a stable, machine-readable reason (`untrusted_workspace` in `--json`, plus the folder) and a hint naming the authorization command in §8.3, so a caller such as a dispatcher or assistant can ask the user to authorize it.
+- **Profile:** a `[remote]` section. It takes no prompt, and an unknown key is an error as everywhere else.
+  - `args`: the arguments after `command`. The placeholder `{name}` (at most once, and nowhere else in the profile) is replaced by the session name within its argument. Claude: `["remote-control", "--name", "{name}"]`.
+  - `parser`: default `claude-remote` (§7).
+  - **Permissions** map through `[permissions]` as for headless runs, appended after `args`. `[remote.permissions]` overrides individual levels when the bridge command rejects a headless flag; a level listed there must also be defined in `[permissions]`. `claude remote-control --help` (2.1.319) accepts `--permission-mode` with `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk` and `plan`, but not `--dangerously-skip-permissions`, so Claude's `auto` stays `--permission-mode auto` and `skip` is overridden to `--permission-mode bypassPermissions`.
+  - `untrusted_pattern`: a regex matched against `stderr.log` of a bridge that ends before reporting its URL (Claude: `(?i)workspace not trusted`).
+  - `untrusted_hint` (optional; requires `untrusted_pattern`): how to trust the folder, appended to the untrusted error; `{dir}` is replaced by the folder. Claude: `fastener authorize claude-folder-trust {dir}`. Without it the error names no command.
+  - `dedupe_frames`: the monitor drops redrawn status lines from `output.log` (below). Claude sets it.
+- **CLI:** `fastener run <backend> --remote --cwd DIR [--name N] [--permissions auto|skip]`. `--prompt`, `--prompt-file`, `--model` and `--follow` are usage errors (exit 2) with `--remote` (a bridge runs until stopped, so `--follow` would never return; use `logs -f`), and so is `--remote` against a profile without `[remote]` (no silent fallback; the message names the backend). There is no default time limit (`--max-runtime` still works). `session.json` records `kind = "remote"` and `remote = true`, no `prompt.txt` is written, and the plan's `prompt_mode` is `none` (stdin is `/dev/null`).
+- **Waiting for the URL:** after the handshake, `run --remote` re-reads the session every 100 ms for up to `remote_wait` (config, default 15 s; the monitor flushes parser fields about once a second):
+  - once `remote_url` is recorded it prints `<name>  <remote_url>` (two spaces), or the inspect view with `--json`, and exits 0;
+  - if the session ends first, it exits 1 with the reason: `untrusted_workspace` (below), or `exited` with how it ended and the last line of `stderr.log`; the message says `ended before reporting its URL`, or `ended after reporting <url>` when the bridge printed one before going away. `--json` prints the inspect view plus `reason` (and `folder` for `untrusted_workspace`);
+  - if the wait elapses while the bridge still runs, it prints the name, notes on stderr that there is no URL yet, and exits 0; the bridge keeps running and `inspect` shows the URL once reported.
+- **What Claude prints** (observed, 2.1.319): a status screen redrawn every few seconds. Each redraw moves the cursor up over the previous frame and erases it (`ESC[nA ESC[J`), then prints the folder and branch, the capacity, one OSC 8 hyperlink per session (`https://claude.ai/code/session_…?from=cli`), and the bridge URL `https://claude.ai/code?environment=env_…`. The `claude-remote` parser (§7) records `remote_url` and `remote_sessions` in `status.json`; `inspect` shows both and `ps --json` shows `remote_url`. stderr can carry harmless `[bridge] …` notices.
+- **Log growth:** with `dedupe_frames`, the monitor compares each redrawn frame with the previous one, position by position:
+  - **Line ends.** A line ends at `\n` or at a `\r` not followed by `\n` (a carriage-return redraw), and every line is parsed.
+  - **Frames.** A frame starts at a line that begins with a cursor-up sequence (`ESC[<n>A`, which Claude follows with `ESC[J`); the lines before the first marker form the first frame.
+  - **Repeats.** A line is not written when its text, with terminal escapes stripped, equals the line at the same position in the previous frame. So a screen that changes and changes back (Connected, Disconnected, Connected) logs every change, while a steady screen logs nothing after its first frame. If no frame marker is ever seen, a line is dropped only when it equals the line right before it.
+  - **What is written.** Lines are written with their raw bytes (colours and OSC 8 links included), minus leading cursor-movement and erase sequences (`ESC[<n>A`–`H`, `J`, `K`), so `logs` on a terminal does not erase earlier, unrelated lines. Lines over 64 KiB are always written and never compared, so the stripped copy hashed for each line stays small.
+  - **Memory.** Two frames of SHA-256 hashes (at most 1024 lines each). A line is held only as far as the parser already holds it, so the 16 MB line cap and its memory bound are unchanged; an overlong line is written in full.
+  - 10,000 identical frames add a few hundred bytes. `logs` shows the changes, not a faithful replay of the screen.
+- **Shutdown:** SIGTERM stops the bridge in about 3 s and its session children exit with it, so the existing stop path applies unchanged (`ended_by=stop`).
+- **Workspace trust:** `claude remote-control` refuses a folder whose trust dialog has not been accepted (`Workspace not trusted. Please run claude in <dir> first …`). Trust is stored in Claude's global config (`projects[<key>].hasTrustDialogAccepted`), keyed by the folder's git repository root (or its real path outside a repo), so a trusted parent folder does not cover a separate repository; the home directory is never persisted. There is no flag, setting or environment variable to trust a folder non-interactively; Claude's own messages point to setting that field instead (§8.3). In an untrusted folder Claude exits at once with ``Error: Workspace not trusted. Please run `claude` in <dir> first …`` on stderr. When `stderr.log` matches `untrusted_pattern`, `run --remote` exits 1 with `fastener: <dir> is not a trusted workspace for claude remote-control; authorize it with: fastener authorize claude-folder-trust <dir>` (the part after the semicolon is Claude's `untrusted_hint`) and, in `--json`, `"reason": "untrusted_workspace"` and `"folder": "<dir>"`, so a caller such as a dispatcher or assistant can ask the user to authorize it (§8.3). Claude's `[check].diagnose` has the same pattern.
 - **Restore after reboot:** `--restart=on-reboot`, `fastener restore` and `fastener install-restore` as in §8.4. Probed on 2026-11-09 (Claude Code 2.1.319): re-running `claude remote-control --name N` in the same folder gets the **same** `env_…` environment ID and re-spawns that environment's existing sessions on its own, so a bridge is restored by relaunching its original arguments, with no saved ID. `--session-id` takes a session ID (`cse_X` and `session_X` name the same session) and attaches that one session in single-session mode ("exits when complete"), so it is not used to restore a bridge; it is the reattach path for one listed session. `--session-id env_…` is rejected, and `--continue` only resumes the most recent session within about 4 hours.
 
 ### 8.2 Route B: interactive sessions with a pty (v0.4)
@@ -523,6 +551,7 @@ Codex's server and remote-control model is different enough to be planned separa
 fastener run <backend> [--name N] --cwd DIR (--prompt TEXT | --prompt-file F)
              [--permissions auto|skip] [--model M] [--max-runtime D] [--grace D]
              [--env-file F] [--env K=V]... [--label K=V]... [--follow] [--json]
+fastener run <backend> --remote [--name N] --cwd DIR [--permissions auto|skip] [--json] ...   # v0.3, §8.1
 fastener ps [--all] [--filter label=K[=V] | state=S | backend=B | name=GLOB]... [--json]
 fastener inspect <name> [--json]
 fastener logs <name> [-f] [--stderr] [--generation N]   # --generation: phase B
@@ -545,6 +574,7 @@ fastener install-restore
   - Detached by default; prints the session name, or the full status with `--json`.
   - `--follow` follows the logs after launch, then exits with the code `wait` would report for the session (the agent's exit code, 128+N for a signal, 125 for an abnormal end, including a session removed while following). (This is not `attach`, which is the phase B pty command.)
   - `--prompt` and `--prompt-file` are mutually exclusive. One is required for headless runs, and `--cwd` is required.
+  - `--remote` starts the profile's remote bridge (§8.1): no prompt, no `--model`, and it waits up to `remote_wait` for the bridge URL.
   - `--prompt-file -` reads the prompt from stdin. A prompt (from a file or stdin) larger than 4 MiB is a usage error (exit 2) naming the limit, and `--prompt-file` accepts regular files and pipes (a FIFO, or process substitution such as `<(cmd)`; reading blocks until a writer appears) but rejects devices such as `/dev/zero`, directories and sockets before opening them.
   - Labels are stored (`check` uses `fastener.check=true`) and can be filtered on with `ps --filter label=K=V`.
   - `--launcher auto|systemd|setsid` (default: config `launcher`, else `auto`; see §2).
@@ -599,6 +629,7 @@ fastener install-restore
   - `launcher` (`auto` | `systemd` | `setsid`)
   - `env_passthrough`
   - `detach_key`
+  - `remote_wait` (positive duration, default `15s`: how long `run --remote` waits for a bridge's URL)
 - **Environment overrides:** `FASTENER_STATE_DIR` and `FASTENER_CONFIG_DIR` override the state and config locations (§3).
 - **`--json` output** of `run`, `ps`, `inspect`, `backends`, `check` and `version` is a versioned, documented contract (`docs/json-schema.md`). Human-readable output is not a contract.
 

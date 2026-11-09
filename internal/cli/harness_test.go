@@ -66,6 +66,31 @@ diagnose = [
 ]
 `
 
+// fakeBridgeProfile is fakeagent with a [remote] section, standing in for
+// `claude remote-control` (run it with --env FAKE_BRIDGE=1).
+const fakeBridgeProfile = `schema_version = 1
+name    = "fakebridge"
+command = %q
+
+[headless]
+args   = []
+prompt = "stdin"
+parser = "claude-stream-json"
+
+[permissions]
+auto = ["--auto"]
+skip = ["--skip"]
+
+[remote]
+args              = ["bridge", "--name", "{name}"]
+untrusted_pattern = '(?i)workspace not trusted'
+untrusted_hint    = "trust-it {dir}"
+dedupe_frames     = true
+
+[remote.permissions]
+skip = ["--permission-mode", "bypassPermissions"]
+`
+
 type harness struct {
 	t                   *testing.T
 	state, config, work string
