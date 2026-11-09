@@ -463,7 +463,7 @@ A remote bridge is a long-running headless session, so it reuses the v0.2 machin
 - **Log growth:** because the status screen is redrawn continuously, the monitor de-duplicates identical consecutive frames before writing `output.log` (or rotates it), so a bridge left running for days does not fill the disk.
 - **Shutdown:** SIGTERM stops the bridge in about 3 s and its session children exit with it, so the existing stop path applies unchanged.
 - **Workspace trust:** `claude remote-control` refuses a folder whose trust dialog has not been accepted (`Workspace not trusted. Please run claude in <dir> first …`). Trust is stored in Claude's global config (`projects[<key>].hasTrustDialogAccepted`), keyed by the folder's git repository root (or its real path outside a repo), so a trusted parent folder does not cover a separate repository; the home directory is never persisted. There is no flag, setting or environment variable to trust a folder non-interactively; Claude's own messages point to setting that field instead (§8.3). In v0.3 an untrusted folder makes `run --remote` fail with a stable, machine-readable reason (`untrusted_workspace` in `--json`, plus the folder) and a hint naming the authorization command in §8.3, so a caller such as a dispatcher or assistant can ask the user to authorize it.
-- **Restore after reboot:** `--restart=on-reboot`, `fastener restore` and `fastener install-restore` as in §8.4. Reattaching to the same bridge needs `remote-control --session-id <id>`; `--continue` only works within about 4 hours. Which recorded ID it expects (the `env_…` bridge ID or a `cse_…` session ID) is still to be probed.
+- **Restore after reboot:** `--restart=on-reboot`, `fastener restore` and `fastener install-restore` as in §8.4. Probed on 2026-11-09 (Claude Code 2.1.319): re-running `claude remote-control --name N` in the same folder gets the **same** `env_…` environment ID and re-spawns that environment's existing sessions on its own, so a bridge is restored by relaunching its original arguments, with no saved ID. `--session-id` takes a session ID (`cse_X` and `session_X` name the same session) and attaches that one session in single-session mode ("exits when complete"), so it is not used to restore a bridge; it is the reattach path for one listed session. `--session-id env_…` is rejected, and `--continue` only resumes the most recent session within about 4 hours.
 
 ### 8.2 Route B: interactive sessions with a pty (v0.4)
 
@@ -494,13 +494,13 @@ Starting a bridge in a new folder should not require someone to open a terminal 
 - `fastener restore` relaunches every `lost` session with `on-reboot`:
   - same name;
   - the next `generation` number, with a new `generations/<n>.json`; the previous `output.log` is rotated to `output.<n>.log`;
-  - the profile's resume arguments with the recorded ID (`[resume]` with `conversation_id` for interactive sessions; the bridge's `--session-id` for remote bridges);
+  - for interactive sessions, the profile's `[resume]` arguments with the recorded `conversation_id`; for remote bridges, the original `[remote]` arguments unchanged (the environment is stable per folder, §8.1);
   - remote control re-enabled.
 
   The argument list is **re-rendered from the profile current at restore time** (so a fixed flag takes effect) using the intent in `session.json`. The new generation's plan and launcher files record the new argv, profile hash, marker, launcher and Fastener version. `session.json` stays unchanged.
 
   If the current profile no longer defines the session's permission level, its resume arguments or its remote section, the session becomes `restore-failed` with that reason. This is the same no-silent-fallback rule as for `run`.
-- If there is no recorded ID to resume, the session becomes `restore-failed` with a reason. **Never a fresh conversation.**
+- If an interactive session has no recorded `conversation_id`, it becomes `restore-failed` with a reason. **Never a fresh conversation.** (A bridge needs no ID.)
 - `fastener install-restore` installs the trigger: a one-shot `fastener-restore.service` user unit on systemd, a launchd agent on macOS, or prints a cron `@reboot` line otherwise. Without it nothing restarts.
 
 ### 8.5 Codex remote (later phase)
