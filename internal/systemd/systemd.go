@@ -45,7 +45,16 @@ func systemctl(timeout time.Duration, args ...string) (string, error) {
 // --user is-system-running` says running or degraded (it exits non-zero for
 // degraded, so the answer is read from stdout), and systemd-run is on PATH.
 // The error explains a false answer.
-func Available() (bool, error) {
+func Available() (bool, error) { return available(false) }
+
+// AvailableOrStarting is Available that also accepts a manager that is still
+// starting up (is-system-running prints "starting"). That is the state at boot
+// when fastener-restore.service runs, and the manager already accepts
+// transient units then (systemd-run queues the start job), so `restore` uses
+// this probe rather than waiting for the boot to finish.
+func AvailableOrStarting() (bool, error) { return available(true) }
+
+func available(starting bool) (bool, error) {
 	if _, err := exec.LookPath("systemd-run"); err != nil {
 		return false, err
 	}
@@ -53,6 +62,11 @@ func Available() (bool, error) {
 	switch state := strings.TrimSpace(out); state {
 	case "running", "degraded":
 		return true, nil
+	case "starting", "initializing":
+		if starting && state == "starting" {
+			return true, nil
+		}
+		return false, fmt.Errorf("user manager is %s", state)
 	case "":
 		if err == nil {
 			err = errors.New("systemctl --user is-system-running printed nothing")

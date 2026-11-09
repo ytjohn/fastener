@@ -31,6 +31,31 @@ type launchOptions struct {
 	MaxRuntime, Grace  time.Duration
 	// Remote starts the profile's [remote] bridge instead of a headless run.
 	Remote bool
+	// Restart is the restart policy recorded in session.json: "no" (or "")
+	// or "on-reboot" (remote bridges only, validated by validateRestart).
+	Restart string
+}
+
+// Restart policies (session.json "restart").
+const (
+	restartNo       = "no"
+	restartOnReboot = "on-reboot"
+)
+
+// validateRestart checks --restart. on-reboot is for remote bridges only in
+// v0.3: a headless prompt may have side effects, so it is never rerun, and
+// interactive sessions arrive in v0.4.
+func validateRestart(policy string, remote bool) error {
+	switch policy {
+	case "", restartNo:
+		return nil
+	case restartOnReboot:
+		if !remote {
+			return usagef("--restart on-reboot needs --remote: a headless session is never rerun after a reboot")
+		}
+		return nil
+	}
+	return usagef("unknown --restart %q (want no or on-reboot)", policy)
 }
 
 // stepError tags a pre-flight error with the `check` step it belongs to.
@@ -190,6 +215,13 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 	if err := validateEnv(o.Env); err != nil {
 		return nil, err
 	}
+	if err := validateRestart(o.Restart, o.Remote); err != nil {
+		return nil, err
+	}
+	restart := o.Restart
+	if restart == "" {
+		restart = restartNo
+	}
 	var prompt, source string
 	if o.Remote {
 		// A bridge is driven from elsewhere; it never takes a prompt.
@@ -251,7 +283,7 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 		SchemaVersion: session.SchemaVersion, Name: name, CreatedAt: now, Kind: kind, Remote: o.Remote,
 		Backend: o.Backend, Cwd: cwd, PromptSource: source, Permissions: p.perms, Model: o.Model,
 		MaxRuntime: session.Duration(o.MaxRuntime), Grace: session.Duration(o.Grace),
-		EnvBase: p.envBase, Env: o.Env, EnvFile: p.envFile, Labels: o.Labels, Restart: "no",
+		EnvBase: p.envBase, Env: o.Env, EnvFile: p.envFile, Labels: o.Labels, Restart: restart,
 	}
 	plan := session.Plan{
 		SchemaVersion: session.SchemaVersion, Generation: 1,
@@ -279,26 +311,38 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 			return nil, inStep("launch", err)
 		}
 	}
-	rec, err := l.Start(d, 1)
+	return startGeneration(d, name, 1, l, p.cfg.Handshake(), stderr)
+}
+
+// startGeneration starts generation gen's monitor through l (its plan and a
+// starting status.json are already written), records the launcher and runs
+// the handshake. If the monitor cannot be started the generation is finalized
+// as launch-failed; a first generation whose view then cannot be loaded is
+// removed, so no unreported directory is left behind (a restored session is
+// never removed).
+func startGeneration(d session.Dir, name string, gen int, l launcher.Launcher, hs time.Duration, stderr io.Writer) (*session.View, error) {
+	rec, err := l.Start(d, gen)
 	if err != nil {
 		_, _ = session.Finalize(d, func(s *session.Status) {
 			t := time.Now().UTC()
 			s.State, s.EndedBy, s.EndedAt, s.Error = session.StateExited, session.EndedByLaunchFailed, &t, "monitor: "+err.Error()
 		})
 		// Return the (finalized) view too, so `run --json` can print it.
-		nv, lerr := session.LoadFull(name, p.cfg.Handshake())
+		nv, lerr := session.LoadFull(name, hs)
 		if lerr != nil {
-			// No view to hand back: do not leave an unreported directory behind.
-			os.RemoveAll(string(d))
+			if gen == 1 {
+				// No view to hand back: do not leave an unreported directory behind.
+				os.RemoveAll(string(d))
+			}
 			nv = nil
 		}
 		return nv, inStep("launch", fmt.Errorf("session %s: start monitor: %w", name, err))
 	}
-	if err := session.WriteJSON(d.LauncherPath(1), rec); err != nil {
+	if err := session.WriteJSON(d.LauncherPath(gen), rec); err != nil {
 		// Not fatal: status.json carries the monitor identity once it starts.
 		fmt.Fprintf(stderr, "fastener: warning: session %s: cannot write launcher record: %v\n", name, err)
 	}
-	return handshake(name, p.cfg.Handshake())
+	return handshake(name, hs)
 }
 
 // handshakeLostAction decides what the handshake does with a session whose

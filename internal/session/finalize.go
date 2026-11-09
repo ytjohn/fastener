@@ -23,6 +23,12 @@ var ErrMonitorAlive = errors.New("monitor is still alive")
 // CLIs never finalize at once. The residual case, where nothing records the
 // monitor at all, is narrowed by the monitor writing its identity first (Task 9). It reports whether it wrote.
 func Finalize(d Dir, mutate func(*Status)) (bool, error) {
+	return finalize(d, false, mutate)
+}
+
+// finalize is Finalize; overwriteExited lets MarkRestoreFailed relabel an
+// exited record (a relaunched generation that ended at once) as restore-failed.
+func finalize(d Dir, overwriteExited bool, mutate func(*Status)) (bool, error) {
 	f, err := os.OpenFile(d.LockPath(), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -44,7 +50,7 @@ func Finalize(d Dir, mutate func(*Status)) (bool, error) {
 		}
 		st = Status{State: StateStarting} // half-created session
 	}
-	if st.State == StateExited {
+	if st.State == StateExited && !overwriteExited {
 		return false, nil
 	}
 	if st.Monitor != nil {

@@ -15,13 +15,17 @@ func cmdLogs(args []string, stdout, stderr io.Writer) int {
 	flags := newFlagSet("logs <name>", stderr)
 	follow := flags.Bool("f", false, "follow until the session ends")
 	useStderr := flags.Bool("stderr", false, "show the agent's stderr instead of stdout")
+	gen := flags.Int("generation", 0, "show generation N's log (a restored session keeps earlier ones; default: the current generation)")
 	pos, err := parseArgs(flags, args)
 	if err != nil {
 		return parseFail(err)
 	}
-	name, ok := oneName(pos, stderr, "logs <name> [-f] [--stderr]")
+	name, ok := oneName(pos, stderr, "logs <name> [-f] [--stderr] [--generation N]")
 	if !ok {
 		return exitUsage
+	}
+	if *gen < 0 {
+		return fail(stderr, usagef("--generation must be positive, got %d", *gen))
 	}
 	v, err := loadView(name)
 	if err != nil {
@@ -30,6 +34,18 @@ func cmdLogs(args []string, stdout, stderr io.Writer) int {
 	path := v.Dir.OutputLog()
 	if *useStderr {
 		path = v.Dir.StderrLog()
+	}
+	if cur := v.Generation(); *gen > 0 && *gen != cur {
+		if *gen > cur {
+			return fail(stderr, fmt.Errorf("session %s has no generation %d (the current one is %d)", name, *gen, cur))
+		}
+		if *follow {
+			return fail(stderr, usagef("-f follows the current generation only (%d)", cur))
+		}
+		path = v.Dir.OutputLogGen(*gen)
+		if *useStderr {
+			path = v.Dir.StderrLogGen(*gen)
+		}
 	}
 	if *follow {
 		code, _ := followLog(name, path, stdout, stderr)

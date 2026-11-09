@@ -142,6 +142,10 @@ type Status struct {
 	// OutputTruncated: the agent exited but its stdout was still held open
 	// after the drain timeout, so anything written later is not in output.log.
 	OutputTruncated bool `json:"output_truncated,omitempty"`
+	// RestoreReason is set with state restore-failed: why `fastener restore`
+	// could not relaunch the session (a code such as no_remote or
+	// untrusted_workspace; Error has the message).
+	RestoreReason string `json:"restore_reason,omitempty"`
 	parser.Fields
 	UpdatedAt time.Time `json:"updated_at"`
 }

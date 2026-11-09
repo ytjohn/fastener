@@ -1,0 +1,16 @@
+# Installed by "fastener install-restore"; "fastener install-restore --uninstall" removes it.
+[Unit]
+Description=Fastener: restore remote bridges after a reboot
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/fastener/bin/fastener restore
+Environment=FASTENER_CONFIG_DIR=$CONFIG
+Environment=FASTENER_STATE_DIR=$STATE
+# Monitors started with the setsid launcher must outlive this one-shot unit.
+KillMode=process
+
+[Install]
+WantedBy=default.target

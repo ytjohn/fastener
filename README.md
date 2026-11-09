@@ -24,7 +24,7 @@ fastener wait <name>; fastener inspect <name>
 session keeps running if your shell exits. Then:
 
 ```bash
-fastener logs <name> [-f] [--stderr]    # agent output (-f follows)
+fastener logs <name> [-f] [--stderr] [--generation N]   # agent output (-f follows; --generation: a restored session's earlier run)
 fastener stop <name> [--grace 10s]      # SIGTERM, then SIGKILL after the grace period; also cleans up leftover processes of an exited session
 fastener rm <name> [--force]            # remove a finished session (refuses if it has leftover processes; --force kills them)
 fastener prune [--older-than D] [--dry-run]   # remove old ended sessions (see Retention)
@@ -102,6 +102,34 @@ bridge left running for days does not fill the disk. `--permissions skip` maps t
 `--permission-mode bypassPermissions`. Other backends opt in with a `[remote]`
 profile section (design §8.1).
 
+### Keeping a bridge across reboots
+
+```bash
+fastener run claude --remote --restart on-reboot --cwd ~/proj --name proj
+fastener install-restore            # once: runs `fastener restore` at boot (or login)
+fastener install-restore --print    # show what it would install
+```
+
+A bridge started with `--restart on-reboot` is pinned (never pruned). After a reboot
+it reads `lost`; `fastener restore` relaunches every lost on-reboot bridge as the next
+generation, in the same folder with the same arguments (re-rendered from the current
+profile), so Claude reattaches the same `env_…` environment and its sessions. The
+previous generation's logs stay readable with `fastener logs <name> --generation 1`.
+If the profile no longer has `[remote]` or the session's permission level, the binary
+is gone, or the folder is no longer trusted, the session becomes `restore-failed` with a
+reason (`inspect` shows it; nothing falls back to something else); fix the cause and run
+`fastener restore <name>`. A bridge is relaunched with the launcher it last ran under. If
+processes of the old run are still alive, restore skips it: `fastener stop <name>`, then
+`fastener restore <name>`. `restore --dry-run` shows what it would do.
+
+`install-restore` installs a one-shot `fastener-restore.service` systemd user unit
+(warning if lingering is off, since the unit then runs only at login), or on macOS a
+LaunchAgent `~/Library/LaunchAgents/net.ytjohn.fastener.restore.plist` (it loads at
+login; the command prints the `launchctl bootstrap` line to load it now), or, with
+neither, prints a crontab `@reboot` line. The trigger records the state and config
+directories in use when you install it. `--uninstall` removes it. Headless sessions
+are never rerun.
+
 ### Trusting a folder for remote bridges
 
 ```bash
@@ -151,6 +179,14 @@ setsid mode keeps them running and tracks them** (`inspect` shows `orphans: N`,
 - **Logout without linger, or the runtime backstop:** systemd stops the session
   like an outside SIGTERM (`ended_by=signal`, with the normal grace) and then
   kills the leftovers; under setsid, logout does not touch the session.
+
+Only processes still in the agent's process group are tracked: a process the
+agent deliberately moved out of it (a daemonized tmux server, an ssh-agent, a dev
+server) is never counted, and `stop` and `rm --force` leave it alone, even after
+the monitor dies. The exception is a `--restart on-reboot` bridge that was lost (or
+stopped from lost) or whose restore failed: there every process carrying the
+session's marker counts, whatever its group, because `restore` will not relaunch
+beside it.
 
 Use `--launcher setsid` if an agent's background processes must keep running.
 

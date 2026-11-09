@@ -134,27 +134,108 @@ func LoadFull(name string, handshake time.Duration) (*View, error) {
 	return v, nil
 }
 
-// FindOrphans fills Orphans with marked processes still alive in a lost
-// session, or in an exited session whose agent left descendants behind (they
-// are tracked, never killed implicitly). It is a no-op for other states, and
-// for exited sessions that never spawned an agent.
+// FindOrphans fills Orphans with marked processes still alive. Which
+// processes count depends on the session:
+//   - restore-failed, and a restart=on-reboot session that is lost or that
+//     stop finalized from lost: every process carrying the current
+//     generation's marker in any process group (MarkedAnyGroup), the scan
+//     restore uses, so what stop cleans up is exactly what blocks a restore;
+//   - any other lost session, or an exited one whose agent was spawned: the
+//     marker in the recorded process group only. A process the agent
+//     deliberately moved out of its group (a daemonized tmux server, an
+//     ssh-agent, a dev server) is never counted, so stop and rm --force never
+//     kill it.
+//
+// It is a no-op for other states, and for exited sessions that never spawned
+// an agent.
 func (v *View) FindOrphans() {
 	v.OrphanErr = ""
-	scan := v.State == StateLost || (v.State == StateExited && v.Status.PGID > 0)
-	if !scan {
-		return
-	}
-	if v.Plan == nil {
-		if v.Status.PGID > 0 {
-			v.OrphanErr = "no readable plan for the current generation"
+	var ids []proc.Identity
+	var err error
+	onReboot := v.Session.Restart == "on-reboot"
+	switch {
+	case v.State == StateRestoreFailed,
+		onReboot && (v.State == StateLost || v.State == StateExited && v.FinalizedFromLost()):
+		ids, err = v.MarkedAnyGroup()
+	case v.State == StateLost, v.State == StateExited && v.Status.PGID > 0:
+		if v.Plan == nil {
+			if v.Status.PGID > 0 {
+				v.OrphanErr = "no readable plan for the current generation"
+			}
+			return
 		}
+		ids, err = proc.FindMarked(v.Status.PGID, v.Plan.Marker, v.Status.BootID)
+		if err != nil {
+			err = fmt.Errorf("process scan failed: %w", err)
+		}
+	default:
 		return
 	}
-	ids, err := proc.FindMarked(v.Status.PGID, v.Plan.Marker, v.Status.BootID)
 	v.Orphans = ids
 	if err != nil {
-		v.OrphanErr = "process scan failed: " + err.Error()
+		v.OrphanErr = err.Error()
 	}
+}
+
+// LostFinalizedBy starts the error a lost session is finalized with by stop
+// or rm ("monitor was lost; finalized by stop").
+const LostFinalizedBy = "monitor was lost; finalized by "
+
+// FinalizedFromLost reports whether an exited session was finalized by
+// `stop` from lost, rather than ending under its monitor.
+func (v *View) FinalizedFromLost() bool {
+	return v.State == StateExited && v.Status.EndedBy == EndedByStop && v.Status.Error == LostFinalizedBy+"stop"
+}
+
+// currentBoot is proc.BootID; replaced in tests.
+var currentBoot = proc.BootID
+
+// RecordedBoot is the boot the current generation ran in: status.json's
+// boot_id, else the launcher record's ("" if neither).
+func (v *View) RecordedBoot() string {
+	if v.Status.BootID != "" {
+		return v.Status.BootID
+	}
+	if v.Launcher != nil {
+		return v.Launcher.BootID
+	}
+	return ""
+}
+
+// MarkedAnyGroup returns the live processes, in any process group, that carry
+// the current generation's marker. When the generation recorded a previous
+// boot nothing is scanned: nothing survives a reboot. Without a readable plan
+// it is an error if the generation spawned anything, else nothing.
+func (v *View) MarkedAnyGroup() ([]proc.Identity, error) {
+	if v.Plan == nil || v.Plan.Marker == "" {
+		if v.Status.PGID > 0 || v.Status.Agent != nil {
+			return nil, errors.New("no readable plan for the current generation")
+		}
+		return nil, nil
+	}
+	cur, err := currentBoot()
+	if err != nil {
+		return nil, fmt.Errorf("cannot read the boot ID: %w", err)
+	}
+	if b := v.RecordedBoot(); b != "" && b != cur {
+		return nil, nil
+	}
+	ids, err := proc.FindMarkedAnyGroup(v.Plan.Marker)
+	if err != nil {
+		return ids, fmt.Errorf("process scan failed: %w", err)
+	}
+	return ids, nil
+}
+
+// planned is when the current generation was planned: the plan's planned_at
+// for a restored generation, else the session's creation time. A starting
+// session with no monitor record is given 2×handshake from then.
+func (v *View) planned() time.Time {
+	t := v.Session.CreatedAt
+	if p := v.Plan; p != nil && p.Generation == v.Generation() && p.PlannedAt.After(t) {
+		t = p.PlannedAt
+	}
+	return t
 }
 
 // Generation is the current generation (1 if status predates the field).
@@ -239,7 +320,7 @@ func (v *View) resolve(handshake time.Duration, now time.Time,
 		return // still supervised (or liveness unknown: never declare lost on a read error)
 	case u != "" && unitMaybeAlive(u):
 		return // the unit is still up (or its state is unknown)
-	case !ok && u == "" && v.State == StateStarting && now.Sub(v.Session.CreatedAt) < 2*handshake:
+	case !ok && u == "" && v.State == StateStarting && now.Sub(v.planned()) < 2*handshake:
 		return // launcher record not written yet; give it time
 	}
 	if reload != nil {

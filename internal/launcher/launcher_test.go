@@ -171,3 +171,30 @@ func TestUnitName(t *testing.T) {
 		t.Fatalf("%q %q", a, b)
 	}
 }
+
+// TestSelectRestoreManagerStarting: at boot the user manager is still
+// starting. Select refuses it (systemd) or falls back (auto); SelectRestore
+// uses it.
+func TestSelectRestoreManagerStarting(t *testing.T) {
+	stubManager(t, false, errors.New("user manager is starting"), true, nil)
+	stub(t, &availableBooting, func() (bool, error) { return true, nil })
+	var warn strings.Builder
+	if _, err := Select("systemd", &warn); err == nil {
+		t.Error("Select(systemd) accepted a starting manager")
+	}
+	if l, _ := Select("auto", &warn); l.Name() != "setsid" {
+		t.Errorf("Select(auto) = %s", l.Name())
+	}
+	for _, pref := range []string{"systemd", "auto", ""} {
+		if l, err := SelectRestore(pref, &warn); err != nil || l.Name() != "systemd" {
+			t.Errorf("SelectRestore(%q) = %v, %v; want systemd", pref, l, err)
+		}
+	}
+	if l, err := SelectRestore("setsid", &warn); err != nil || l.Name() != "setsid" {
+		t.Errorf("SelectRestore(setsid) = %v, %v", l, err)
+	}
+	stub(t, &availableBooting, func() (bool, error) { return false, errors.New("no manager") })
+	if _, err := SelectRestore("systemd", &warn); err == nil {
+		t.Error("SelectRestore(systemd) without a manager succeeded")
+	}
+}

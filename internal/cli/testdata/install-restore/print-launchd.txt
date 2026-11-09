@@ -1,0 +1,30 @@
+<!-- $HOME/Library/LaunchAgents/net.ytjohn.fastener.restore.plist -->
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Installed by "fastener install-restore"; "fastener install-restore --uninstall" removes it. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>net.ytjohn.fastener.restore</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/fastener/bin/fastener</string>
+		<string>restore</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>AbandonProcessGroup</key>
+	<true/>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>FASTENER_CONFIG_DIR</key>
+		<string>$CONFIG</string>
+		<key>FASTENER_STATE_DIR</key>
+		<string>$STATE</string>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>$STATE/restore.log</string>
+	<key>StandardErrorPath</key>
+	<string>$STATE/restore.log</string>
+</dict>
+</plist>

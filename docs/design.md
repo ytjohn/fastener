@@ -51,7 +51,7 @@ One binary, two roles:
   - **`LimitNOFILE`** carries the caller's open-file limit (`RLIMIT_NOFILE`, soft and hard), because the user manager's default soft limit (`DefaultLimitNOFILESoft`, usually 1024) is far below a typical shell's, and setsid would pass the caller's limit through. Go raises its own soft limit to hard-1 at startup and restores the original in its children, so when `getrlimit` shows that raise the CLI reads the original soft limit from a child (`/bin/sh -c 'ulimit -Sn'`).
   - The binary is invoked by its absolute path (`os.Executable()`), because the user manager's PATH differs from the shell's. `$` in the command is written as `$$`, because the manager expands both `$VAR` and `${VAR}` in it.
   - **A failed `systemd-run`.** The unit name is chosen before the call. If `systemd-run` fails or times out, the manager may still have accepted the job, so the CLI checks the unit: if it is alive (or its state is unknown) it is killed outright (`systemctl --user kill --signal=SIGKILL`, the whole cgroup, since nothing should be running yet) and `reset-failed`, and the launch fails naming the unit. If that kill fails, the launcher returns a unit-only record instead of an error, so the handshake and `stop` can still manage the unit.
-  - **Unit name.** Session names already match `[a-z0-9._-]`, all valid in unit names, so no escaping is needed. The generation keeps a future `restore` distinct, and a random suffix keeps two state directories (or a name reused while its old unit is still stopping) from colliding.
+  - **Unit name.** Session names already match `[a-z0-9._-]`, all valid in unit names, so no escaping is needed. The generation keeps a restored generation (§8.4) distinct, and a random suffix keeps two state directories (or a name reused while its old unit is still stopping) from colliding.
   - `Type=exec` makes `systemd-run` return only once the monitor has been executed. The CLI then reads the unit's `MainPID`, takes its identity (`proc.Of`) and reads `MainPID` again to rule out a reused pid; the launcher record holds both the unit and that monitor identity, so everything that works by monitor identity works the same in both modes. If the identity cannot be had, the record holds only the unit, which is judged by the unit's state (§4).
 - **setsid** (otherwise, including macOS): Go cannot fork without exec. The CLI therefore re-executes itself as `_monitor` with `SysProcAttr{Setsid: true}`, stdin from `/dev/null` and stdout/stderr to `monitor.log`, then releases the child without waiting for it. The CLI knows the monitor's pid immediately.
 
@@ -61,7 +61,7 @@ One binary, two roles:
 - `setsid` always uses setsid.
 systemd mode is the more robust of the two. It guarantees the whole process tree is cleaned up (§4) and is preferred when available. The launcher used is recorded per generation (§3).
 
-**Leftover processes: the one deliberate difference between the modes.** In systemd mode, whatever is still in the cgroup when the monitor is gone gets SIGKILL from systemd. In setsid mode it keeps running, and is tracked as `orphans` for `stop` or `rm` to clean up.
+**Leftover processes: the one deliberate difference between the modes.** In systemd mode, whatever is still in the cgroup when the monitor is gone gets SIGKILL from systemd. In setsid mode it keeps running, and is tracked as `orphans` for `stop` or `rm` to clean up. What counts as an orphan depends on the session (§4, "Group liveness"): for headless sessions, and any session without `restart = "on-reboot"`, only marked processes still in the agent's process group, so a process the agent deliberately moved out of it (a daemonized tmux server, an ssh-agent, a dev server, and shells later opened inside them) is never counted or killed; for a `restart = "on-reboot"` bridge that is lost (or that `stop` finalized from lost) and for a `restore-failed` session, every marked process in any group, because `restore` must not relaunch beside them.
 
 | Case | systemd | setsid |
 |---|---|---|
@@ -92,6 +92,7 @@ ${FASTENER_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/fastener}/
     output.<n>.log       # previous generations (restored sessions); likewise stderr.<n>.log
     monitor.log          # monitor diagnostics
     lock                 # flock target for CLI-side finalization
+    restore.lock         # flock target that serialises `restore` of this session (§8.4)
     attach.sock          # phase B
   .last-prune            # prune throttle stamp: empty until a prune completes, then its time; mtime is the throttle; also the prune flock target
 ```
@@ -139,6 +140,7 @@ This is the record that lets the CLI judge whether a monitor is alive before the
   - `boot_id`
 - `started_at`, `ended_at`
 - **Exit facts:** `ended_by`, `exit_code` (absent when a signal killed the agent), `signal` (the signal name that terminated the agent, if any), `error`, `output_truncated` (true when the stdout drain timed out; see "Output drain" in §4)
+- `restore_reason` (with state `restore-failed`, §8.4): why `restore` could not relaunch the session; `error` has the message
 - **Parser fields** (each optional; omitted when unknown): `conversation_id`, `final_message` (capped at 64 KiB), `model` (the model the backend says it served; absent after an agent error), `model_source` (`server` or `client`), `agent_error`, `usage` {`input_tokens`, `output_tokens`, `cost_usd`} (present only when the backend reported usage), `parse_errors`; for remote bridges `remote_url` and `remote_sessions` (§8.1)
 
 **The monitor writes its own identity first.** Right after it loads its plan, before it checks for a stop request, spawns anything or can fail in any other way, the monitor writes `status.json` once (state `starting`, with its `monitor` identity and `boot_id`). Each generation's status is built fresh; nothing is carried over from a previous generation. This shrinks the window in which no record identifies a live monitor.
@@ -159,7 +161,7 @@ A monitor ignores a request whose `generation` is not its own. `restore` deletes
 | `running` | Agent spawned and alive | Monitor |
 | `exited` | Ended; see `ended_by` below | Monitor (or the CLI finalizing a dead monitor) |
 | `lost` | Not `exited`, and the monitor is not alive | **Inferred** by the CLI on read; never written by the monitor |
-| `restore-failed` | `restore` could not resume (phase B) | CLI |
+| `restore-failed` | `restore` could not relaunch the session (§8.4); `restore_reason` says why | CLI |
 
 **What `ended_by` means:**
 
@@ -179,7 +181,9 @@ A monitor ignores a request whose `generation` is not its own. `restore` deletes
 
 A process that cleared its environment is not counted, and is never signalled. The check fails safe: Fastener may miss one of its own orphans, but it never kills a stranger.
 
-**Group liveness for `lost` sessions.** `inspect` reports `orphans: N`: the number of processes that pass the identity check above. `stop` and `rm` signal those pids individually (SIGTERM, wait for the grace period, then SIGKILL), not the pgid as a whole, so a reused pgid can never redirect a signal. Each pid's identity is verified before it is signalled; on Linux it is pinned with a pidfd before the check and both signals go through that pidfd (see Liveness). The orphan scan costs a pass over every process, so it runs only where it matters: `inspect`, `wait`, `stop`, `rm` and the launch handshake scan (`session.LoadFull`); `ps` loads sessions cheaply (`session.Load`) and reports no orphan counts. If an orphan survives SIGKILL, `stop` does not finalize the session and `rm` does not remove it.
+**Group liveness for `lost` sessions.** `inspect` reports `orphans: N`: the number of processes that pass the identity check above. Which processes are scanned depends on the session:
+- **Headless sessions, and any session without `restart = "on-reboot"`** (`lost`, or `exited` after spawning an agent): the marker **in the recorded process group only**, as in v0.1. A process the agent moved out of its group on purpose (`setsid`, daemonizing: a tmux server, an ssh-agent, a dev server, and anything the user later runs inside them) is never counted, and `stop` and `rm --force` never signal it, even after a monitor crash.
+- **`restart = "on-reboot"` sessions that are `lost`, or `exited` because `stop` finalized them from `lost`, and every `restore-failed` session:** the marker **in any process group**, the same scan `restore` uses (§8.4), so `stop` clears exactly what blocks a restore and a retry never dead-ends. A recorded boot other than the current one needs no scan. For a process found outside the recorded group the process-group condition above is replaced by the marker and boot checks alone. `stop` and `rm` signal those pids individually (SIGTERM, wait for the grace period, then SIGKILL), not the pgid as a whole, so a reused pgid can never redirect a signal. Each pid's identity is verified before it is signalled; on Linux it is pinned with a pidfd before the check and both signals go through that pidfd (see Liveness). The orphan scan costs a pass over every process, so it runs only where it matters: `inspect`, `wait`, `stop`, `rm` and the launch handshake scan (`session.LoadFull`); `ps` loads sessions cheaply (`session.Load`) and reports no orphan counts. If an orphan survives SIGKILL, `stop` does not finalize the session and `rm` does not remove it.
 
 ### Launch handshake
 
@@ -270,7 +274,7 @@ A parser panic is recovered: it is logged, counted in `parse_errors`, and never 
 ### Reboot
 
 - Headless sessions running at reboot become `lost`. They are **never** rerun automatically, because a headless prompt may have side effects.
-- Interactive sessions with `--restart=on-reboot` are handled by `restore` (§8).
+- Remote bridges started with `--restart on-reboot` are relaunched by `restore` (§8.4); interactive sessions follow in v0.4.
 
 ### Upgrades
 
@@ -527,19 +531,25 @@ Starting a bridge in a new folder should not require someone to open a terminal 
 
 ### 8.4 Restart policy and restore (v0.3 for bridges, v0.4 for interactive)
 
-- `--restart=no|on-reboot`, default `no`. `on-reboot` is refused for headless sessions.
-- A session with a restart policy is pinned and never pruned.
-- `fastener restore` relaunches every `lost` session with `on-reboot`:
-  - same name;
-  - the next `generation` number, with a new `generations/<n>.json`; the previous `output.log` is rotated to `output.<n>.log`;
-  - for interactive sessions, the profile's `[resume]` arguments with the recorded `conversation_id`; for remote bridges, the original `[remote]` arguments unchanged (the environment is stable per folder, §8.1);
-  - remote control re-enabled.
-
-  The argument list is **re-rendered from the profile current at restore time** (so a fixed flag takes effect) using the intent in `session.json`. The new generation's plan and launcher files record the new argv, profile hash, marker, launcher and Fastener version. `session.json` stays unchanged.
-
-  If the current profile no longer defines the session's permission level, its resume arguments or its remote section, the session becomes `restore-failed` with that reason. This is the same no-silent-fallback rule as for `run`.
-- If an interactive session has no recorded `conversation_id`, it becomes `restore-failed` with a reason. **Never a fresh conversation.** (A bridge needs no ID.)
-- `fastener install-restore` installs the trigger: a one-shot `fastener-restore.service` user unit on systemd, a launchd agent on macOS, or prints a cron `@reboot` line otherwise. Without it nothing restarts.
+- **`--restart no|on-reboot`**, default `no`, recorded in `session.json`. In v0.3 `on-reboot` needs `--remote`; with a headless run it is a usage error (exit 2), because a headless prompt may have side effects and is never rerun. Interactive sessions get it in v0.4.
+- **Pinned.** A session with `restart = "on-reboot"` is never pruned, whatever its state (`prune --json` reports it as kept, `pinned`; a `lost` one is kept as `lost` anyway).
+- **`fastener restore [--dry-run] [--json] [name...]`.** With no names it considers every session whose effective state is `lost` and whose `restart` is `on-reboot`, and lists only those. Named sessions are always reported, and may also be `restore-failed` (so a failure can be retried once its cause is fixed). For each candidate:
+  1. **Eligibility.** It must be a remote bridge (`kind = "remote"`) with `restart = "on-reboot"`, and `lost` or `restore-failed`; a **named** session may also be one that `stop` finalized from `lost` (`exited`, `ended_by=stop`, error `monitor was lost; finalized by stop`), which is where the `orphans` skip below leads. Otherwise it is skipped: `not_on_reboot`, `not_remote` (a headless session is never restored, even one whose `session.json` claims `on-reboot`), `running` (or starting), `not_lost` (it ended under its monitor, for example a normal `stop`).
+  2. **Lock.** An exclusive `flock` on `restore.lock` in the session directory, polled for up to 2×handshake + `remote_wait` + 30 s (then skipped, `restore_in_progress`). `rm` (with or without `--force`) tries the same lock without waiting and refuses with `a restore is in progress` while it is held. It is a separate file from `lock`, which `Finalize` takes, because the relaunch itself finalizes (a launch failure, a `restore-failed` record). Under the lock the session is read again, so a second, concurrent `restore` finds the first one's relaunch `running` and skips it: two restores relaunch exactly once.
+  3. **Nothing of the old generation alive.** The view must not be alive (a `lost` monitor is confirmed dead: unknown liveness is never dead, §4). Then every process carrying the current generation's marker is looked for **in any process group**, the scan `stop` also uses for a lost on-reboot or `restore-failed` session (§4); a recorded boot ID other than the current one needs no scan, because nothing survives a reboot. Any such process skips the session with `orphans` and the message `stop it first (fastener stop <name>), then fastener restore <name>`: `stop` kills them and finalizes the session, and the named restore then relaunches it; a scan that cannot be done (no readable plan for a generation that spawned something, a failed process scan) skips it with `orphans_unknown`.
+  4. **Re-render.** The argv is rendered from the profile as it is **now**, using the intent in `session.json`: backend, permission level, name (for `{name}`), environment (`env_base`, the env-file re-read, `--env`) and so the session PATH for the binary. A bridge gets its original `[remote]` arguments: the environment ID is stable per folder and the bridge re-spawns its sessions itself (§8.1), so no ID is saved or passed. No fallback: a profile that no longer loads (`profile`), has no `[remote]` (`no_remote`), no longer defines the session's level (`no_permission_level`), an env-file that cannot be read (`env_file`), or a binary that cannot be found on the session PATH (`binary_not_found`) makes the session `restore-failed` with that reason, and nothing else is changed (no plan, no rotation).
+  5. **Next generation.** `output.log` and `stderr.log` are renamed to `output.<old>.log` and `stderr.<old>.log` (appended to, if one somehow exists); a leftover `stop-request.json` is deleted; `generations/<n+1>.json` is written with the new argv, profile hash, a new marker and the Fastener version, then a `starting` `status.json` for generation n+1. The monitor is started with the **launcher the previous generation used** (the kind in `generations/<old>.launcher.json`), so a bridge keeps its supervision whatever the config says now; only when there is no record does it use `launcher` from config, else `auto` (§2), with a note on stderr. At boot `fastener-restore.service` runs while `systemctl --user is-system-running` still prints `starting`; restore's probe accepts that state as usable (the manager accepts transient units while starting, and `systemd-run` queues the start job), so a systemd bridge is not refused and `auto` does not fall back to setsid. `run` keeps requiring `running` or `degraded`. `generations/<n+1>.launcher.json` is written and the normal handshake runs. A starting session with no monitor record yet is given 2×handshake from the plan's `planned_at`, not from `created_at`.
+  6. **URL.** Like `run --remote`, it then waits up to `remote_wait` for `remote_url`. A bridge still running without one is `restored` (with a note on stderr).
+  7. **`session.json` is never written.**
+- **When the relaunch does not come up.** If the new generation ends at once, it is recorded `restore-failed` (the generation's exit facts are kept; `restore_reason` and `error` are added): `untrusted_workspace` when `stderr.log` matches the profile's `untrusted_pattern` (the folder is no longer trusted; the message carries the profile's `untrusted_hint`, e.g. `fastener authorize claude-folder-trust <dir>`), `exited` for any other end before the URL, `launch_failed` when the monitor could not start or the agent could not be spawned. A new generation that ended with `ended_by=stop` (someone ran `stop` while restore waited for the URL) is left `exited` and reported `skipped`, reason `stopped`. If the new monitor died instead (`lost`), the session is left `lost` (reason `lost` in the output), so `stop` and `rm` can still find what it left. `restore-failed` is written like `Finalize`: under the session `lock`, refusing while a recorded monitor may be alive; unlike `Finalize` it also relabels an `exited` record, and it clears `remote_url` and `remote_sessions`, which would otherwise describe a bridge that is not running (a new generation's status starts empty anyway). `ps` and `inspect` show the state, and `inspect` the reason. A `restore-failed` generation that left marked processes behind shows them as `orphans`: plain `rm` refuses it, `stop` and `rm --force` kill them as for an exited session with orphans.
+- **Output.** One line per reported session: `<name>  <result>[  generation N][  <url>][: <message>]`. `--json` is an array of `{name, result, reason?, message?, generation?, remote_url?}` (docs/json-schema.md). `result` is `restored`, `skipped` or `failed`; with `--dry-run`, which changes nothing and takes no lock (it does the eligibility, orphan and re-render checks), `would-restore` or `would-fail` (and `skipped`).
+- **Exit codes.** 0 when every candidate was restored or skipped (or there was nothing to restore); 1 when any failed (`would-fail` under `--dry-run`, and an unknown name, `not_found`); 2 for usage errors.
+- **`logs <name> --generation N`** reads `output.<N>.log` (with `--stderr`, `stderr.<N>.log`), or the current log when N is the current generation; N beyond the current one is an error, and `-f` follows only the current generation.
+- For interactive sessions (v0.4) restore will use the profile's `[resume]` arguments with the recorded `conversation_id`, and a session without one becomes `restore-failed`: **never a fresh conversation.**
+- **`fastener install-restore [--uninstall] [--print]`** installs the trigger. Without it nothing restarts. The binary is `os.Executable()` with symlinks resolved; a binary in the temp directory or a Go build cache (`go run`) gets a warning, since the trigger runs that path at boot. The resolved, absolute state root and config directory are always written into the trigger as `FASTENER_STATE_DIR` and `FASTENER_CONFIG_DIR` (whether or not the caller set them), so the boot-time restore looks exactly where the installing shell did, whatever environment the user manager, launchd or cron provides. `--print` shows what would be installed (or removed) and writes nothing; re-running updates the file; `--uninstall` removes it.
+  - **systemd user manager available** (Linux; the same probe as the launcher, §2): writes `fastener-restore.service` to `$XDG_CONFIG_HOME/systemd/user/` (else `~/.config/systemd/user/`) with `Type=oneshot`, `ExecStart=<fastener> restore`, `Wants=` and `After=network-online.target` (in a user manager that target is usually absent, so this orders nothing there but does no harm), `Environment=` lines, `KillMode=process` (so monitors restore started with the setsid launcher outlive the one-shot unit; systemd-launched ones are their own units anyway) and `WantedBy=default.target`, then runs `systemctl --user daemon-reload` and `enable` (never `start`). Without lingering it warns: the user manager, and so the unit, starts only at login. `--uninstall` runs `disable`, deletes the file and reloads.
+  - **macOS:** writes the LaunchAgent `~/Library/LaunchAgents/net.ytjohn.fastener.restore.plist` (label `net.ytjohn.fastener.restore`): `ProgramArguments` `[<fastener>, restore]`, `RunAtLoad`, `AbandonProcessGroup` (launchd must not kill what restore started), `EnvironmentVariables` and `StandardOutPath`/`StandardErrorPath` `<state dir>/restore.log`. It does **not** run `launchctl`: an agent in that folder is loaded at the next login by itself, and a CLI run over ssh may have no GUI domain. It prints `launchctl bootstrap gui/<uid> <plist>` to load it now, and `--uninstall` prints the `launchctl bootout` command. A LaunchAgent runs at login, not at boot.
+  - **Neither:** prints a crontab `@reboot FASTENER_CONFIG_DIR=… FASTENER_STATE_DIR=… <fastener> restore` line (shell-quoted, `%` written as `\%` since cron turns a bare `%` into a newline; with a note on stderr), changes nothing and exits 0.
 
 ### 8.5 Codex remote (later phase)
 
@@ -561,10 +571,12 @@ Codex's server and remote-control model is different enough to be planned separa
 fastener run <backend> [--name N] --cwd DIR (--prompt TEXT | --prompt-file F)
              [--permissions auto|skip] [--model M] [--max-runtime D] [--grace D]
              [--env-file F] [--env K=V]... [--label K=V]... [--follow] [--json]
-fastener run <backend> --remote [--name N] --cwd DIR [--permissions auto|skip] [--json] ...   # v0.3, §8.1
+fastener run <backend> --remote [--name N] --cwd DIR [--permissions auto|skip] [--restart no|on-reboot] [--json] ...   # v0.3, §8.1
+fastener restore [--dry-run] [--json] [name...]          # v0.3, §8.4
+fastener install-restore [--uninstall] [--print]         # v0.3, §8.4
 fastener ps [--all] [--filter label=K[=V] | state=S | backend=B | name=GLOB]... [--json]
 fastener inspect <name> [--json]
-fastener logs <name> [-f] [--stderr] [--generation N]   # --generation: phase B
+fastener logs <name> [-f] [--stderr] [--generation N]
 fastener wait <name> [--timeout D]
 fastener stop <name> [--grace D]      # clamped to the session's grace in systemd mode with --max-runtime
 fastener rm <name> [--force]
@@ -577,8 +589,6 @@ fastener authorize --list [--json] | --revoke <dir> [--json]
 # phase B
 fastener run <backend> --interactive [--remote] [--restart no|on-reboot] ...
 fastener attach <name>
-fastener restore
-fastener install-restore
 ```
 
 - **`run`:**
@@ -610,14 +620,15 @@ fastener install-restore
   - Exits 127 for a session name that never existed.
 
   A caller can therefore tell "timed out" from "lost" without a follow-up `inspect`. As with Podman, 124, 125 and 127 can collide with real agent exit codes. The documentation names `inspect --json` as the authoritative answer.
-- **`logs`:** prints `output.log`; `--stderr` prints `stderr.log`; `-f` follows until the session ends.
-- **`rm`:** refuses a session that is alive, or has orphans (including descendants an exited agent left behind), unless `--force` (which stops it first). `--force` also removes a corrupt session that cannot be loaded, after killing whatever marked processes it can still identify. Orphans that survive SIGKILL block removal.
+- **`logs`:** prints `output.log`; `--stderr` prints `stderr.log`; `-f` follows until the session ends; `--generation N` prints a restored session's earlier generation (`output.<N>.log`, §8.4).
+- **`restore`** and **`install-restore`:** §8.4. `--restart on-reboot` needs `--remote` in v0.3.
+- **`rm`:** refuses a session that is alive, or has orphans (including descendants an exited agent or a failed restore left behind), or that a `restore` is relaunching (even with `--force`), unless `--force` (which stops it first). `--force` also removes a corrupt session that cannot be loaded, after killing whatever marked processes it can still identify. Orphans that survive SIGKILL block removal.
 - **Retention:**
   - A session is pruned when all of these hold:
     - its effective state is `exited` or `restore-failed` (never `starting`, `running` or `lost`);
     - the later of its `ended_at` and `created_at` (zero values ignored; a session with neither is never pruned) is older than the retention period (default 168h; config `retention`, or `prune --older-than`, which must be positive). Prune never acts on less than 1h from config: a smaller `retention` still loads (v0.1 accepted any positive value) but is clamped to 1h, with a stderr warning ("retention 30m is below the 1h minimum; using 1h") from `prune` and, once per actual run, from the opportunistic prune. `--older-than` is explicit and has no floor, but warns below 1h;
     - it has no orphans (the same scan `rm` uses; a grandchild left by a normal exit blocks pruning until it is stopped), and the scan was possible: an exited session that recorded a process group but has no readable plan, or whose process scan failed, is kept with reason `unknown` (fail closed; `rm` refuses it without `--force`, and `rm --force` warns and removes it);
-    - it is not pinned (`restart=on-reboot`; v0.1 never sets it).
+    - it is not pinned (`restart=on-reboot`, which only remote bridges can set; §8.4).
   - `lost` sessions are never pruned, because they may hold the only record of live processes. `prune` reports old ones as kept.
   - `prune [--older-than D] [--dry-run] [--json]` runs on demand and prints the names removed (or, with `--dry-run`, that would be). It exits 0, or 1 if any removal failed. `--json` is `{"removed": [...], "kept": [{"name", "reason"}]}`, where `kept` lists only sessions old enough to prune that were kept (`lost`, `orphans`, `pinned` or `unknown`). If a removal fails, a `failed` array of `{name, error}` is added and the exit code is 1.
   - `run` and `ps` prune opportunistically, at most once per hour:
@@ -644,7 +655,7 @@ fastener install-restore
   - `remote_wait` (positive duration, default `15s`: how long `run --remote` waits for a bridge's URL)
   - `trust_dirs` (array of absolute folders: a user-maintained allowlist for `authorize claude-folder-trust`, §8.3; Fastener never writes this file, and keeps its own records in `authorizations.json`)
 - **Environment overrides:** `FASTENER_STATE_DIR` and `FASTENER_CONFIG_DIR` override the state and config locations (§3).
-- **`--json` output** of `run`, `ps`, `inspect`, `prune`, `backends`, `check`, `authorize` and `version` is a versioned, documented contract (`docs/json-schema.md`). Human-readable output is not a contract.
+- **`--json` output** of `run`, `ps`, `inspect`, `prune`, `restore`, `backends`, `check`, `authorize` and `version` is a versioned, documented contract (`docs/json-schema.md`). Human-readable output is not a contract.
 
 ## 11. Code layout
 
