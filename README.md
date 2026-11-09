@@ -118,13 +118,16 @@ previous generation's logs stay readable with `fastener logs <name> --generation
 If the profile no longer has `[remote]` or the session's permission level, the binary
 is gone, or the folder is no longer trusted, the session becomes `restore-failed` with a
 reason (`inspect` shows it; nothing falls back to something else); fix the cause and run
+`fastener restore <name>`. A bridge is relaunched with the launcher it last ran under. If
+processes of the old run are still alive, restore skips it: `fastener stop <name>`, then
 `fastener restore <name>`. `restore --dry-run` shows what it would do.
 
 `install-restore` installs a one-shot `fastener-restore.service` systemd user unit
 (warning if lingering is off, since the unit then runs only at login), or on macOS a
 LaunchAgent `~/Library/LaunchAgents/net.ytjohn.fastener.restore.plist` (it loads at
 login; the command prints the `launchctl bootstrap` line to load it now), or, with
-neither, prints a crontab `@reboot` line. `--uninstall` removes it. Headless sessions
+neither, prints a crontab `@reboot` line. The trigger records the state and config
+directories in use when you install it. `--uninstall` removes it. Headless sessions
 are never rerun.
 
 ### Trusting a folder for remote bridges

@@ -14,7 +14,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 | `schema_version` | 1 |
 | `name`, `backend` | Session name and backend |
 | `state` | Effective state: `starting`, `running`, `exited`, `lost` (inferred: not exited and the monitor is not alive), `restore-failed` |
-| `orphans` | Number of live processes still carrying this session's marker. Always present; non-zero only for `lost` sessions and for `exited` sessions whose agent left descendants running. |
+| `orphans` | Number of live processes still carrying this session's marker. Always present; non-zero only for `lost` sessions (counted in any process group), `exited` sessions whose agent left descendants running, and `restore-failed` sessions whose relaunch left some. |
 | `session` | Contents of `session.json` (intent; see below) |
 | `status` | Contents of `status.json` (runtime facts; see below) |
 | `plan` | The current generation's launch plan. Omitted if unreadable. |
@@ -51,7 +51,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 - `started_at`, `ended_at`
 - `ended_by`: `exit` | `limit` | `stop` | `signal` | `launch-failed`
 - `exit_code` (absent when the agent was killed by a signal), `signal` (a name, e.g. `SIGKILL`), `error`
-- `restore_reason`: with state `restore-failed`, why `restore` could not relaunch the session (see `restore --json` below for the values); `error` then holds the message. Omitted otherwise.
+- `restore_reason`: with state `restore-failed`, why `restore` could not relaunch the session (see `restore --json` below for the values); `error` then holds the message, and `remote_url` and `remote_sessions` are cleared (they would describe a bridge that is not running). Omitted otherwise.
 - `output_truncated`: `true` when a descendant still held the agent's stdout open 2 s after the agent exited. The monitor stopped reading, so anything written to stdout after that is not in `output.log`. Omitted otherwise.
 - parser fields, each present only when known:
   - `conversation_id`
@@ -81,11 +81,11 @@ An array (never null) of `{name, backend, state, created_at, ended_at?, ended_by
 An array (never null) with one entry per session reported (in name order, or in argument order for named sessions): `{name, result, reason?, message?, generation?, remote_url?}`. Without names only lost `on-reboot` sessions are reported (`[]` when there are none); named sessions are always reported.
 - `result`: `restored`, `skipped` or `failed`; with `--dry-run`, `would-restore`, `would-fail` or `skipped`.
 - `reason`, present unless restored:
-  - skipped: `not_on_reboot`, `not_remote` (headless sessions are never restored), `running`, `not_lost` (it ended rather than being lost), `orphans` (processes of the old generation are alive; `message` names `fastener stop <name>`), `orphans_unknown`, `restore_in_progress`;
+  - skipped: `not_on_reboot`, `not_remote` (headless sessions are never restored), `running`, `not_lost` (it ended rather than being lost; a named session that `stop` finalized from lost is accepted), `orphans` (processes of the old generation are alive; `message` says to run `fastener stop <name>`, then `fastener restore <name>`), `orphans_unknown`, `restore_in_progress`, `stopped` (the relaunched generation was stopped with `fastener stop` before it reported its URL; it is left `exited`);
   - failed (recorded as state `restore-failed` with `status.restore_reason`): `config`, `profile`, `no_remote`, `no_permission_level`, `env_file`, `binary_not_found`, `launch_failed`, `untrusted_workspace` (the folder is no longer trusted; `message` names the command that trusts it), `exited` (the relaunched bridge ended before reporting its URL), `error` (an I/O error while relaunching);
   - failed, not recorded: `not_found` (no such session), `lost` (the relaunched monitor died; the session is left `lost` for `stop`/`rm`).
 - `message`: a human-readable explanation, present unless restored.
-- `generation`: the generation launched (or, with `--dry-run`, that would be); present for `restored`, `would-restore` and for failures after the new generation was planned.
+- `generation`: the new generation's number. Present for `restored` and `would-restore` (the generation that would be launched), and for any result reached after restore began writing the new generation (it rotates the logs first): a `failed` result with reason `launch_failed`, `untrusted_workspace`, `exited`, `lost` or an `error` while rotating or writing, and `skipped` with reason `stopped`. Absent otherwise, including failures found before anything was written (`config`, `profile`, `no_remote`, `no_permission_level`, `env_file`, `binary_not_found`) and a `launch_failed` from choosing the launcher.
 - `remote_url`: the bridge's URL, once the relaunched bridge reported it within `remote_wait` (the same `env_…` URL as before for Claude).
 
 Exit code 0 when nothing failed, 1 when any entry is `failed` or `would-fail`, 2 for usage errors.
