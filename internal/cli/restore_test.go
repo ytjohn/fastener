@@ -670,3 +670,41 @@ func TestLostHeadlessKeepsDaemonizedChild(t *testing.T) {
 		t.Error("rm killed it")
 	}
 }
+
+// TestRestoreSessionRemovedWhileWaiting: a restore that waited for the lock
+// and finds the session gone reports skipped/not_found and exits 0.
+func TestRestoreSessionRemovedWhileWaiting(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.startOnReboot("br-gone")
+	h.simulateReboot("br-gone")
+	f, err := os.OpenFile(filepath.Join(h.sessDir("br-gone"), "restore.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	type res struct {
+		out  string
+		code int
+	}
+	done := make(chan res, 1)
+	go func() {
+		out, _, code := h.run("restore", "--json", "br-gone")
+		done <- res{out, code}
+	}()
+	time.Sleep(700 * time.Millisecond) // restore has opened the lock and is waiting
+	if err := os.RemoveAll(h.sessDir("br-gone")); err != nil {
+		t.Fatal(err)
+	}
+	syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	r := <-done
+	var rs []restoreJSON
+	if err := json.Unmarshal([]byte(r.out), &rs); err != nil {
+		t.Fatalf("%v: %q", err, r.out)
+	}
+	if r.code != 0 || len(rs) != 1 || rs[0].Result != "skipped" || rs[0].Reason != "not_found" {
+		t.Errorf("exit %d, %+v", r.code, rs)
+	}
+}

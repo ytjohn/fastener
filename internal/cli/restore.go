@@ -160,13 +160,19 @@ func restoreOne(name string, explicit, dry bool, stderr io.Writer) (r restoreOut
 	if errors.Is(err, session.ErrRestoreBusy) {
 		return skip(rsBusy, err.Error())
 	}
+	if errors.Is(err, session.ErrNotFound) {
+		return skip(rsNotFound, "the session was removed while restore was waiting for it")
+	}
 	if err != nil {
 		r.Result, r.Reason, r.Message = restoreFailed, rsError, err.Error()
 		return r, true
 	}
 	defer unlock()
 	// Under the lock, look again: another restore may have relaunched it.
-	if v, err = session.LoadFull(name, hs); err != nil {
+	if v, err = session.LoadFull(name, hs); errors.Is(err, session.ErrNotFound) {
+		// Removed (rm) while this restore waited for the lock: nothing to do.
+		return skip(rsNotFound, "the session was removed while restore was waiting for it")
+	} else if err != nil {
 		r.Result, r.Reason, r.Message = restoreFailed, rsError, err.Error()
 		return r, true
 	}
