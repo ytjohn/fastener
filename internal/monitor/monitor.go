@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -215,6 +216,7 @@ func cloneStatus(s session.Status) session.Status {
 	c.EndedAt = clonePtr(s.EndedAt)
 	c.ExitCode = clonePtr(s.ExitCode)
 	c.AgentError = clonePtr(s.AgentError)
+	c.RemoteSessions = slices.Clone(s.RemoteSessions)
 	if s.Usage != nil {
 		u := *s.Usage
 		u.InputTokens = clonePtr(s.Usage.InputTokens)

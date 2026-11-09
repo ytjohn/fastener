@@ -57,6 +57,8 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
   - `agent_error`
   - `usage`: `{input_tokens, output_tokens, cost_usd}`, present only when the backend reported usage or a cost. `cost_usd` is omitted when the backend reported no cost (Pi without pricing, Codex), never emitted as 0. `input_tokens` and `output_tokens` are omitted when the backend reported no token counts (for example a Claude result with `total_cost_usd` but no `usage` block, which yields `{"cost_usd": x}`)
   - `parse_errors`
+  - `remote_url` (remote bridges, parser `claude-remote`): the bridge's URL, `https://claude.ai/code?environment=env_…`, the latest one the bridge printed
+  - `remote_sessions` (remote bridges): array of the session URLs the bridge has shown, `https://claude.ai/code/session_…` without their query string, de-duplicated, in the order first seen; at most the 64 most recent
   - `usage.input_tokens` counts *all* input tokens for the run, including cache reads and writes. This differs from Anthropic's own `usage.input_tokens`, which excludes cache tokens.
 - `updated_at`
 
@@ -64,7 +66,7 @@ While a session runs, parser fields are flushed about once a second and always a
 
 ## `ps --json`
 
-An array (never null) of `{name, backend, state, created_at, ended_at?, ended_by?, exit_code?, labels?}`, newest first. Without `--all`, `ps` lists running, starting and lost sessions plus those that ended in the last 24 hours. `ps` does not scan for orphans (too costly across many sessions) and has no orphans field; use `inspect` for that. `--filter KEY=VALUE` (repeatable, ANDed; see design §10) keeps only matching rows after the window is applied; the shape is unchanged and no match gives `[]`. A session that cannot be read is skipped with a warning on stderr. A session whose files have a newer `schema_version` than this fastener understands is listed, with one `fastener: warning: <name>: …` line on stderr (the same text as `inspect`'s `warnings`).
+An array (never null) of `{name, backend, state, created_at, ended_at?, ended_by?, exit_code?, labels?, remote_url?}`, newest first. `remote_url` is a remote bridge's URL (`status.remote_url`), once it has reported one. Without `--all`, `ps` lists running, starting and lost sessions plus those that ended in the last 24 hours. `ps` does not scan for orphans (too costly across many sessions) and has no orphans field; use `inspect` for that. `--filter KEY=VALUE` (repeatable, ANDed; see design §10) keeps only matching rows after the window is applied; the shape is unchanged and no match gives `[]`. A session that cannot be read is skipped with a warning on stderr. A session whose files have a newer `schema_version` than this fastener understands is listed, with one `fastener: warning: <name>: …` line on stderr (the same text as `inspect`'s `warnings`).
 
 ## `prune --json`
 

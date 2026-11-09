@@ -60,6 +60,8 @@ type psRow struct {
 	EndedBy   string            `json:"ended_by,omitempty"`
 	ExitCode  *int              `json:"exit_code,omitempty"`
 	Labels    map[string]string `json:"labels,omitempty"`
+	// RemoteURL is a remote bridge's URL, once it has reported one.
+	RemoteURL string `json:"remote_url,omitempty"`
 }
 
 func handshakeTimeout() time.Duration {
@@ -144,6 +146,10 @@ func renderInspect(stdout io.Writer, v *session.View, out inspectOut) {
 	if s.AgentError != nil {
 		row("agent_error", fmt.Sprint(*s.AgentError))
 	}
+	row("remote_url", s.RemoteURL)
+	for _, u := range s.RemoteSessions {
+		row("remote_session", u)
+	}
 	if len(v.Orphans) > 0 {
 		row("orphans", fmt.Sprint(len(v.Orphans)))
 	}
@@ -201,7 +207,7 @@ func cmdPs(args []string, stdout, stderr io.Writer) int {
 		row := psRow{
 			Name: n, Backend: v.Session.Backend, State: v.State, CreatedAt: v.Session.CreatedAt,
 			EndedAt: v.Status.EndedAt, EndedBy: v.Status.EndedBy, ExitCode: v.Status.ExitCode,
-			Labels: v.Session.Labels,
+			Labels: v.Session.Labels, RemoteURL: v.Status.RemoteURL,
 		}
 		if matchAll(filters, row) {
 			rows = append(rows, row)

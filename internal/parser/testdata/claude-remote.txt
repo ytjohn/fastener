@@ -1,0 +1,71 @@
+
+·|· Connecting · example · main
+[1A[J·✔︎· Connected · example · main
+    Capacity: 0/32 · New sessions will be created in the current directory
+
+Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01FAKEFAKEFAKEFAKEFAKEFAKE
+Or ask Claude to work in this folder from your projects on claude.ai
+space to show QR code · w to toggle spawn mode
+[7A[J·✔︎· Connected · example · main
+    Capacity: 0/32 · New sessions will be created in the current directory
+
+Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01FAKEFAKEFAKEFAKEFAKEFAKE
+Or ask Claude to work in this folder from your projects on claude.ai
+space to show QR code · w to toggle spawn mode
+[7A[J·✔︎· Connected · example · main
+    Capacity: 1/32 · New sessions will be created in the current directory
+    ]8;;https://claude.ai/code/session_01FAKEFAKEFAKEFAKEFAKE01?from=cliAttached]8;;
+
+Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01FAKEFAKEFAKEFAKEFAKEFAKE
+Or ask Claude to work in this folder from your projects on claude.ai
+space to show QR code · w to toggle spawn mode
+[8A[J·✔︎· Connected · example · main
+    Capacity: 1/32 · New sessions will be created in the current directory
+    ]8;;https://claude.ai/code/session_01FAKEFAKEFAKEFAKEFAKE01?from=cliAttached]8;;
+
+Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01FAKEFAKEFAKEFAKEFAKEFAKE
+Or ask Claude to work in this folder from your projects on claude.ai
+space to show QR code · w to toggle spawn mode
+[8A[J·✔︎· Connected · example · main
+    Capacity: 1/32 · New sessions will be created in the current directory
+    ]8;;https://claude.ai/code/session_01FAKEFAKEFAKEFAKEFAKE01?from=cliexample-session]8;;
+
+Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01FAKEFAKEFAKEFAKEFAKEFAKE
+Or ask Claude to work in this folder from your projects on claude.ai
+space to show QR code · w to toggle spawn mode
+[8A[J·✔︎· Connected · example · main
+    Capacity: 1/32 · New sessions will be created in the current directory
+    ]8;;https://claude.ai/code/session_01FAKEFAKEFAKEFAKEFAKE01?from=cliexample-session]8;;
+
+Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01FAKEFAKEFAKEFAKEFAKEFAKE
+Or ask Claude to work in this folder from your projects on claude.ai
+space to show QR code · w to toggle spawn mode
+[8A[J·✔︎· Connected · example · main
+    Capacity: 1/32 · New sessions will be created in the current directory
+    ]8;;https://claude.ai/code/session_01FAKEFAKEFAKEFAKEFAKE01?from=cliexample-session]8;;
+
+Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01FAKEFAKEFAKEFAKEFAKEFAKE
+Or ask Claude to work in this folder from your projects on claude.ai
+space to show QR code · w to toggle spawn mode
+[8A[J·✔︎· Connected · example · main
+    Capacity: 1/32 · New sessions will be created in the current directory
+    ]8;;https://claude.ai/code/session_01FAKEFAKEFAKEFAKEFAKE01?from=cliexample-session]8;;
+
+Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01FAKEFAKEFAKEFAKEFAKEFAKE
+Or ask Claude to work in this folder from your projects on claude.ai
+space to show QR code · w to toggle spawn mode
+[8A[J[07:40:44] Shutting down 1 active session(s)…
+·✔︎· Connected · example · main
+    Capacity: 1/32 · New sessions will be created in the current directory
+    ]8;;https://claude.ai/code/session_01FAKEFAKEFAKEFAKEFAKE01?from=cliexample-session]8;;
+
+Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01FAKEFAKEFAKEFAKEFAKEFAKE
+Or ask Claude to work in this folder from your projects on claude.ai
+space to show QR code · w to toggle spawn mode
+[8A[J[07:40:47] Environment preserved. Restart `claude remote-control` to reconnect existing sessions.
+·✔︎· Connected · example · main
+    Capacity: 1/32 · New sessions will be created in the current directory
+
+Continue coding in the Claude mobile app or https://claude.ai/code?environment=env_01FAKEFAKEFAKEFAKEFAKEFAKE
+Or ask Claude to work in this folder from your projects on claude.ai
+space to show QR code · w to toggle spawn mode

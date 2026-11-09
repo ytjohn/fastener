@@ -139,7 +139,7 @@ This is the record that lets the CLI judge whether a monitor is alive before the
   - `boot_id`
 - `started_at`, `ended_at`
 - **Exit facts:** `ended_by`, `exit_code` (absent when a signal killed the agent), `signal` (the signal name that terminated the agent, if any), `error`, `output_truncated` (true when the stdout drain timed out; see "Output drain" in §4)
-- **Parser fields** (each optional; omitted when unknown): `conversation_id`, `final_message` (capped at 64 KiB), `model` (the model the backend says it served; absent after an agent error), `model_source` (`server` or `client`), `agent_error`, `usage` {`input_tokens`, `output_tokens`, `cost_usd`} (present only when the backend reported usage), `parse_errors`; `remote_url` arrives with phase B
+- **Parser fields** (each optional; omitted when unknown): `conversation_id`, `final_message` (capped at 64 KiB), `model` (the model the backend says it served; absent after an agent error), `model_source` (`server` or `client`), `agent_error`, `usage` {`input_tokens`, `output_tokens`, `cost_usd`} (present only when the backend reported usage), `parse_errors`; for remote bridges `remote_url` and `remote_sessions` (§8.1)
 
 **The monitor writes its own identity first.** Right after it loads its plan, before it checks for a stop request, spawns anything or can fail in any other way, the monitor writes `status.json` once (state `starting`, with its `monitor` identity and `boot_id`). Each generation's status is built fresh; nothing is carried over from a previous generation. This shrinks the window in which no record identifies a live monitor.
 
@@ -415,7 +415,7 @@ Phase B adds `check --interactive [--remote]`. It launches with a pty, confirms 
 
 ## 7. Parsers
 
-Named Go functions selected by profile. v0.1 ships `claude-stream-json`, `pi-json`, `codex-jsonl` and `none`.
+Named Go functions selected by profile. v0.1 ships `claude-stream-json`, `pi-json`, `codex-jsonl` and `none`; v0.3 adds `claude-remote`.
 
 - **`claude-stream-json`** (`claude -p --output-format stream-json --verbose`): `conversation_id` from any event's `session_id`; `model` from the last top-level assistant event's `message.model` (events with a `parent_tool_use_id` are subagent turns, possibly on another model, and are skipped) (a bare model id the Anthropic API reports; `model_source` `server`; Claude Code's `<synthetic>` placeholder is ignored), falling back to the `system/init` event's `model` (the CLI's own setting; `model_source` `client`) until an assistant event arrives; an error `result` clears `model`; `final_message`, `agent_error` (`is_error`) and `usage` from the `result` event.
 - **`pi-json`** (`pi -p --mode json`): `conversation_id` from the `session` event's `id`. `model`, `model_source`, `final_message` and `agent_error` come from the last assistant `message_end`:
@@ -429,6 +429,8 @@ Named Go functions selected by profile. v0.1 ships `claude-stream-json`, `pi-jso
   - `agent_error` is set by a `turn.failed` or a top-level `error` event; `final_message` is then the message of the last such event (`turn.failed`'s `error.message` or the top-level `message`). An `item.completed` `error` item alone records nothing: it is a warning (for example "Model metadata not found") that precedes the real failure.
   - `usage` is summed over every `turn.completed`: `input_tokens` is Codex's own reported total and `output_tokens` its reported output. `cached_input_tokens` and `reasoning_output_tokens` are subsets in OpenAI semantics and are not added; `cache_write_input_tokens` is not added either because the captures cannot confirm it is excluded from `input_tokens`. Codex reports no cost, so `cost_usd` is omitted (not 0).
   - Codex does not report the served model in these events, so `model` and `model_source` are absent and `check`'s model step reports `skip` ("backend does not report its model"), the honest result.
+
+- **`claude-remote`** (`claude remote-control`, Claude Code 2.1.319): the bridge's stdout is a status screen redrawn every few seconds, with ANSI cursor and erase sequences, and each session line is an OSC 8 hyperlink (`ESC]8;;URL BEL label ESC]8;; BEL`; ST is accepted as the terminator too). The parser strips terminal escapes, keeping an OSC 8 link's URL as text, then records `remote_url`, the latest `https://claude.ai/code?environment=env_…` seen, and `remote_sessions`, every `https://claude.ai/code/session_…` seen, without its query, de-duplicated in the order first seen (the 64 most recent are kept). Nothing on the screen is an error, so it never counts parse errors.
 
 - Run inside the monitor, streaming, one line at a time, while raw output is written to `output.log` unchanged.
 - **Extracted fields** (all optional, omitted when unknown):
