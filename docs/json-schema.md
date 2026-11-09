@@ -1,6 +1,6 @@
 # Fastener `--json` output (schema_version 1)
 
-The `--json` output of `run`, `inspect`, `ps`, `backends`, `check` and `version` is
+The `--json` output of `run`, `inspect`, `ps`, `prune`, `backends`, `check`, `authorize` and `version` is
 a stable contract. Human-readable output is not. Within a schema version, fields are
 only added, never removed or repurposed. Absent optional fields are omitted, not null.
 Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
@@ -87,6 +87,12 @@ An array, one entry per backend checked: `{backend, passed, session?, skipped?, 
 ## `backends --json`
 
 An array of `{name, source, sha256, command, parser, permissions, default_permissions?}`, or `{name, error}` for a profile that fails to load. `source` is `builtin` or the file path; `permissions` lists the defined levels; `default_permissions` is the profile's own default level, present only when the profile sets one (the config's `default_permissions` and `--permissions` still take precedence).
+
+## `authorize --json`
+
+- **`authorize claude-folder-trust <dir> --json`:** `{folder, key, key_is_repo_root, claude_config, already_trusted, backup?, claude_version?}`. `folder` is the resolved folder; `key` is the `projects` key set in Claude's config (the git repository root when `key_is_repo_root`, else the folder); `claude_config` is the file written; `already_trusted` is true when the field was already `true` and nothing was written; `backup` is the backup of the previous file, present only when it was changed; `claude_version` is `claude --version`, when it ran.
+- **`authorize --list --json`:** `{schema_version, authorizations, trust_dirs}`. `authorizations` is an array (never null) of `{folder, key, claude_config, authorized_at, verified_at?, claude_version?}`, the contents of `authorizations.json` in the config directory, in the order added; a record without `verified_at` was added to the allowlist but Claude's config was not confirmed (re-run the command). `trust_dirs` is an array (never null) of the folders listed in `config.toml`'s `trust_dirs`, as written there.
+- **`authorize --revoke <dir> --json`:** `{folder, revoked, in_trust_dirs, key?, claude_config?}`. `revoked` is whether a record was removed (exit 0; exit 1 when there was none); `in_trust_dirs` is whether `config.toml` still lists the folder, which keeps it on the allowlist. `key` and `claude_config` name the Claude entry that is left unchanged.
 
 ## `version --json`
 

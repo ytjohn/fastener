@@ -507,13 +507,18 @@ Needed for `claude --remote-control`, for local attach to any backend, and for P
 
 Starting a bridge in a new folder should not require someone to open a terminal there, but trust is a security decision and is never granted implicitly.
 
-- **`fastener authorize claude-folder-trust <dir>`** is an explicit, one-off command the user runs (or approves). It adds the folder to Fastener's trust allowlist (`trust_dirs` in config) and records Claude's trust for it. Fastener only ever does this for folders on the allowlist; a caller that hits `untrusted_workspace` (§8.1) asks the user to confirm and then runs the command, never on its own.
-- **How trust is recorded.** Claude Code stores it in its global config (`$CLAUDE_CONFIG_DIR/.claude.json`, default `~/.claude.json`) as `projects[<key>].hasTrustDialogAccepted = true`, and its own messages name setting that field as the alternative to the interactive dialog. Fastener writes it the way Claude does (verified against Claude Code 2.1.319, which saves with a `proper-lockfile` lock and re-reads the file under the lock before applying a change, so a running Claude does not overwrite an edit made under the same lock):
-  1. **Key.** The trust key is the folder's git repository root if it is inside one, else its normalized real path; forward slashes. The home directory is refused (Claude never persists its trust).
-  2. **Lock.** Take Claude's lock by creating the directory `<config>.lock`; retry with backoff; never remove a lock that is not stale.
-  3. **Write.** Back up the file, re-read it under the lock, change only `projects[<key>].hasTrustDialogAccepted` (keeping every other value and exact numbers), write to a temp file and rename it into place, then release the lock.
-  4. **Verify.** Re-read the file and confirm the field; optionally run a short bridge start in the folder. A failure here (for example after Claude moves trust out of this file) is reported with a `diagnose` hint rather than retried.
-- Each authorization is recorded (folder, key, time, Claude version) so it can be listed and revoked (`fastener authorize --list`; `--revoke <dir>` removes it from the allowlist and does not change Claude's own record).
+- **`fastener authorize claude-folder-trust <dir> [--json]`** is an explicit, one-off command the user runs (or approves). Running it is the act that puts the folder on Fastener's trust allowlist; it then records Claude's trust for it. Nothing else in Fastener writes Claude's config (`run --remote` only reports `untrusted_workspace`, §8.1); a caller that hits `untrusted_workspace` asks the user to confirm and then runs the command, never on its own. `fastener authorize -h` says that the command edits Claude Code's own config file, the documented alternative to the interactive trust dialog.
+- **The allowlist and records** live in `<config dir>/authorizations.json` (`$FASTENER_CONFIG_DIR`, else the XDG default), a machine-written file kept apart from the hand-edited `config.toml`, so Fastener never rewrites the user's TOML (and its comments). It is `{"schema_version": 1, "authorizations": [{folder, key, claude_config, authorized_at, verified_at?, claude_version?}]}`, written atomically (temp file and rename, mode 0600) under an exclusive `flock` on `authorizations.json.lock`, so concurrent commands keep each other's records. `config.toml` may also hold `trust_dirs`, an array of absolute folders: a user-maintained allowlist, read but never written. A folder is allowlisted if it has a record or is listed in `trust_dirs`, and Claude's config is written only for an allowlisted folder.
+- **How trust is recorded.** Claude Code stores it in its global config (`$CLAUDE_CONFIG_DIR/.claude.json` when `CLAUDE_CONFIG_DIR` is set, else `~/.claude.json`) as `projects[<key>].hasTrustDialogAccepted = true`, and its own messages name setting that field as the alternative to the interactive dialog. Fastener writes it the way Claude does (verified against Claude Code 2.1.319, which saves with a `proper-lockfile` lock and re-reads the file under the lock before applying a change, so a running Claude does not overwrite an edit made under the same lock):
+  1. **Folder.** `<dir>` is made absolute with symlinks resolved; it must exist and be a directory. The home directory (Claude never persists its trust) and `/` are refused.
+  2. **Key.** The trust key is the root of the git repository the folder is in (`git -C <dir> rev-parse --show-toplevel`, symlinks resolved; `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and `GIT_COMMON_DIR` are dropped from git's environment; a missing git or any git failure means no repository), else the folder itself; forward slashes. The key can therefore be a parent repository root, which trusts the whole repository; the output says which key was used. A key that is the home directory (a dotfiles repository) or `/` is refused.
+  3. **Config file.** If it does not exist the command fails ("run claude once first") and creates nothing. A symlinked config is resolved first: proper-lockfile locks the real path, and the write replaces the real file, not the link.
+  4. **Lock.** Claude's lock is the **directory** `<real config path>.lock`, created with `mkdir` (success means it is held) and released with `rmdir`. On `EEXIST` the command retries with backoff (20 ms doubling to 500 ms) for up to 10 s, then fails cleanly without touching the file. A lock whose mtime is older than proper-lockfile's default stale time (10 s; a live holder refreshes it every 5 s) is removed with `rmdir` and the `mkdir` retried; a fresh lock is never removed. While held, Fastener refreshes the lock's mtime every 5 s as proper-lockfile does.
+  5. **Write, under the lock.** Re-read and parse the file, keeping everything: object key order, and every string, number, boolean and null as its exact source bytes (so `1794150081977`, long floats and string escapes are untouched). Set `projects[<key>].hasTrustDialogAccepted = true`, creating `projects` or the entry if missing (appended last, as JavaScript does) and touching no other field. If it is already `true`, nothing is written ("already trusted") and no backup is made. Otherwise the document is serialised as Claude does (`JSON.stringify(config, null, 2)`: two-space indent, no trailing newline unless the file had one), so an unchanged file re-encodes byte for byte and the diff is the one field. A second, independent parse with `encoding/json` (`UseNumber`) checks that the result equals the original with only that field set; if not, nothing is written. The original bytes are backed up to `<fastener config dir>/backups/claude.json.<UTC timestamp>` (mode 0600; the newest 5 are kept), then the new content goes to a temp file in the same directory, is fsynced and renamed over the file with its mode preserved. Then the lock is released.
+  6. **Verify.** Re-read the file and confirm the field is `true`; print the folder, the key (and whether it is a repository root), the config path and the backup. A failure here (for example after Claude moves trust out of this file) is reported, not retried. The command does not start a bridge; `run --remote` in the folder is the end-to-end check.
+  7. **Record.** The folder is recorded (with its key, config path and `authorized_at`) before Claude's config is written, since it is the allowlist entry; after the verify the record gains `verified_at` and `claude_version` (`claude --version`, if it runs). If the write fails, the folder stays on the allowlist without `verified_at`, and running the command again retries.
+- **`fastener authorize --list [--json]`** prints the records and `trust_dirs` (JSON in `docs/json-schema.md`). **`fastener authorize --revoke <dir> [--json]`** removes the folder's record (matching both its resolved and its plain absolute path, so a deleted folder can be revoked). It does **not** change Claude's config, and says so: Claude keeps trusting the folder until its `projects[<key>]` entry is removed there. A folder still listed in `trust_dirs` stays allowlisted, with a warning; revoking a folder that has no record exits 1.
+- **Exit codes:** 0 on success (including "already trusted"), 1 on a failure, 2 on a usage error.
 
 ### 8.4 Restart policy and restore (v0.3 for bridges, v0.4 for interactive)
 
@@ -562,6 +567,8 @@ fastener prune [--older-than D] [--dry-run] [--json]
 fastener backends [--json]
 fastener check <backend> | --all [--static] [--keep] [--expect-model M] [run options] [--json]
 fastener version [--json]
+fastener authorize claude-folder-trust <dir> [--json]    # v0.3, §8.3
+fastener authorize --list [--json] | --revoke <dir> [--json]
 # phase B
 fastener run <backend> --interactive [--remote] [--restart no|on-reboot] ...
 fastener attach <name>
@@ -630,8 +637,9 @@ fastener install-restore
   - `env_passthrough`
   - `detach_key`
   - `remote_wait` (positive duration, default `15s`: how long `run --remote` waits for a bridge's URL)
+  - `trust_dirs` (array of absolute folders: a user-maintained allowlist for `authorize claude-folder-trust`, §8.3; Fastener never writes this file, and keeps its own records in `authorizations.json`)
 - **Environment overrides:** `FASTENER_STATE_DIR` and `FASTENER_CONFIG_DIR` override the state and config locations (§3).
-- **`--json` output** of `run`, `ps`, `inspect`, `backends`, `check` and `version` is a versioned, documented contract (`docs/json-schema.md`). Human-readable output is not a contract.
+- **`--json` output** of `run`, `ps`, `inspect`, `prune`, `backends`, `check`, `authorize` and `version` is a versioned, documented contract (`docs/json-schema.md`). Human-readable output is not a contract.
 
 ## 11. Code layout
 
@@ -642,7 +650,8 @@ internal/session/      state dir, schema types, read/write, liveness, prune, lab
 internal/monitor/      _monitor: spawn, log, parser feed, limits, signals; (B) pty, attach
 internal/launcher/     setsid and systemd launchers, selection
 internal/systemd/      systemctl/loginctl calls: availability, linger, unit state, MainPID, kill, reset-failed
-internal/config/       config.toml and config/state locations
+internal/config/       config.toml, config/state locations, authorizations.json
+internal/claudetrust/  Claude's trust key, proper-lockfile lock, order- and byte-preserving JSON edit (§8.3)
 internal/runenv/       base environment, env-file parsing, PATH lookup
 internal/profile/      TOML load, validate, render; embedded profiles/*.toml
 internal/parser/       claude-stream-json, codex-jsonl, none; testdata/
