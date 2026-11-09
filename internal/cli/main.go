@@ -37,6 +37,7 @@ commands:
   backends           list backend profiles
   authorize          trust a folder for Claude remote bridges (edits Claude's config)
   restore [name...]  relaunch lost --restart on-reboot bridges (after a reboot)
+  install-restore    install the boot-time trigger that runs restore
   version            print the version
 
 Run "fastener <command> -h" for a command's flags.
@@ -77,6 +78,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return cmdAuthorize(rest, stdout, stderr)
 	case "restore":
 		return cmdRestore(rest, stdout, stderr)
+	case "install-restore":
+		return cmdInstallRestore(rest, stdout, stderr)
 	case "version":
 		return cmdVersion(rest, stdout, stderr)
 	case "help", "-h", "--help":
