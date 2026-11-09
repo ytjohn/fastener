@@ -35,6 +35,7 @@ commands:
   prune              remove old ended sessions
   check <backend>    prove a backend works end to end
   backends           list backend profiles
+  authorize          trust a folder for Claude remote bridges (edits Claude's config)
   version            print the version
 
 Run "fastener <command> -h" for a command's flags.
@@ -71,6 +72,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return cmdCheck(rest, stdout, stderr)
 	case "backends":
 		return cmdBackends(rest, stdout, stderr)
+	case "authorize":
+		return cmdAuthorize(rest, stdout, stderr)
 	case "version":
 		return cmdVersion(rest, stdout, stderr)
 	case "help", "-h", "--help":

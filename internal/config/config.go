@@ -24,6 +24,10 @@ type Config struct {
 	DetachKey          string   `toml:"detach_key"` // used from v0.3
 	// RemoteWait is how long `run --remote` waits for a bridge's URL.
 	RemoteWait string `toml:"remote_wait"`
+	// TrustDirs is a user-maintained allowlist of folders that
+	// `fastener authorize claude-folder-trust` may trust, in addition to the
+	// folders it has recorded itself in authorizations.json. Absolute paths.
+	TrustDirs []string `toml:"trust_dirs"`
 }
 
 // Dir is $FASTENER_CONFIG_DIR, else $XDG_CONFIG_HOME/fastener, else ~/.config/fastener.
@@ -99,6 +103,11 @@ func Load() (Config, error) {
 		}
 		if dur <= 0 {
 			return c, fmt.Errorf("%s: %s must be positive, got %q", path, d.name, d.v)
+		}
+	}
+	for _, d := range c.TrustDirs {
+		if !filepath.IsAbs(d) {
+			return c, fmt.Errorf("%s: trust_dirs: %q is not an absolute path", path, d)
 		}
 	}
 	switch c.Launcher {

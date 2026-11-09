@@ -49,7 +49,7 @@ exits, the monitor reads its stdout for at most 2 s more: if a process the agent
 started keeps the pipe open, later output is not recorded, and `inspect --json`
 shows `"output_truncated": true` in `status`.
 
-Add `--json` to `run`, `inspect`, `ps`, `backends`, `check` and `version` for
+Add `--json` to `run`, `inspect`, `ps`, `prune`, `backends`, `check`, `authorize` and `version` for
 machine-readable output (see `docs/json-schema.md`). `wait` exits with the
 agent's exit code: 124 on `--timeout`; 125 if the session was lost, failed to
 launch or was removed while waiting, or if the agent exited 0 but reported an
@@ -96,11 +96,44 @@ It takes no prompt and has no default time limit. `run` waits up to `remote_wait
 shows `remote_url` and the `remote_sessions` opened so far, and `stop` ends the
 bridge and its sessions. Claude refuses a folder whose trust dialog was never
 accepted: `run --remote` then exits 1 with `<dir> is not a trusted workspace`
-(`"reason": "untrusted_workspace"` with `--json`); run `claude` in that folder once
-and accept the dialog. Redrawn status lines are dropped from `output.log`, so a
+(`"reason": "untrusted_workspace"` with `--json`) and names the command that trusts
+it (below). Redrawn status lines are dropped from `output.log`, so a
 bridge left running for days does not fill the disk. `--permissions skip` maps to
 `--permission-mode bypassPermissions`. Other backends opt in with a `[remote]`
 profile section (design §8.1).
+
+### Trusting a folder for remote bridges
+
+```bash
+fastener authorize claude-folder-trust ~/proj   # explicit, one-off; edits Claude's config
+fastener authorize --list [--json]               # what Fastener has authorized
+fastener authorize --revoke ~/proj               # forget it (Claude's config is left as is)
+```
+
+`claude remote-control` only runs in a folder whose trust dialog was accepted.
+`authorize claude-folder-trust` records that acceptance without the dialog: it sets
+`projects[<key>].hasTrustDialogAccepted = true` in Claude Code's own config
+(`$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`), which is what the dialog
+does. `<key>` is computed as Claude computes it: the git repository root when the folder is
+inside a repository (the main repository's root for a linked worktree; a submodule's own
+root), so the whole repository is trusted (the output shows the key), else the folder. The home
+directory and `/` are refused, and Claude must have run once so that its config exists.
+If Claude would use a different file (a non-empty legacy `~/.claude/.config.json`, or
+`CLAUDE_CODE_CUSTOM_OAUTH_URL` set), the command refuses and names it.
+
+The edit is made the way Claude makes its own: under Claude's lock (`.claude.json.lock`;
+it waits up to 10 s for a running Claude), re-reading the file, changing only that field
+and keeping every other value byte for byte, then an atomic rename (the mode is kept;
+the file ends up owned by whoever ran the command). A copy of the
+previous file goes to `~/.config/fastener/backups/` (the last 5 are kept). A folder that
+is already trusted is left alone.
+
+Running the command is the explicit decision; Fastener's allowlist just records it
+(`authorizations.json` in the config directory; `trust_dirs = [...]` in
+`config.toml` is an extra, hand-maintained list). Nothing else in Fastener writes
+Claude's config, and `run --remote` never authorizes a folder by itself. `--revoke`
+only removes Fastener's record; to make Claude ask again, delete the folder's entry
+under `projects` in Claude's config.
 
 ### Leftover processes
 
