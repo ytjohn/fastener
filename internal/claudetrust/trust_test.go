@@ -405,18 +405,180 @@ func TestLockRefreshedWhileHeld(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := time.Now().Add(-time.Hour)
-	_ = os.Chtimes(lock, old, old)
-	time.Sleep(300 * time.Millisecond)
+	fi0, _ := os.Stat(lock)
+	time.Sleep(350 * time.Millisecond)
 	fi, _ := os.Stat(lock)
-	if time.Since(fi.ModTime()) > 250*time.Millisecond {
+	if !fi.ModTime().After(fi0.ModTime()) {
 		t.Fatal("lock mtime not refreshed")
+	}
+	if err := l.check(); err != nil {
+		t.Fatalf("own refreshed lock reads as compromised: %v", err)
 	}
 	if err := l.release(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(lock); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("not released")
+	}
+}
+
+func TestLockCompromisedIsDetected(t *testing.T) {
+	dir := t.TempDir()
+	lock := filepath.Join(dir, "x.lock")
+	l, err := acquireLock(lock, time.Second, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Minute)
+	_ = os.Chtimes(lock, old, old) // someone else touched it
+	if err := l.check(); !errors.Is(err, ErrLockCompromised) {
+		t.Fatalf("check: %v", err)
+	}
+	if err := l.release(); !errors.Is(err, ErrLockCompromised) {
+		t.Fatalf("release: %v", err)
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatal("release removed a lock that is no longer ours")
+	}
+	// A refresh failure is recorded and seen by check.
+	lock2 := filepath.Join(dir, "y.lock")
+	l2, err := acquireLock(lock2, time.Second, 100*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(lock2)
+	time.Sleep(150 * time.Millisecond)
+	l2.mu.Lock()
+	rerr := l2.refreshErr
+	l2.mu.Unlock()
+	if rerr == nil || !errors.Is(l2.check(), ErrLockCompromised) {
+		t.Fatalf("refresh failure not recorded: %v", rerr)
+	}
+	_ = l2.release()
+}
+
+func TestCompromisedLockAbortsWrite(t *testing.T) {
+	cfg, fdir := isolate(t)
+	writeFixture(t, cfg, fixture, 0o600)
+	_, _, err := trustLocked(cfg, "/w", filepath.Join(fdir, "backups"), func() error { return ErrLockCompromised })
+	if !errors.Is(err, ErrLockCompromised) {
+		t.Fatalf("err %v", err)
+	}
+	if string(mustRead(t, cfg)) != fixture {
+		t.Fatal("file replaced under a compromised lock")
+	}
+	assertNoTemps(t, filepath.Dir(cfg))
+}
+
+func TestLockPathNotADirectory(t *testing.T) {
+	cfg, fdir := isolate(t)
+	writeFixture(t, cfg, fixture, 0o600)
+	lock := cfg + ".lock"
+	if err := os.WriteFile(lock, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	_ = os.Chtimes(lock, old, old) // "stale", but a file: never unlinked
+	if _, err := Trust("/w", opts(cfg, fdir)); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("err %v", err)
+	}
+	if b, err := os.ReadFile(lock); err != nil || string(b) != "x" {
+		t.Fatal("lock file removed")
+	}
+	if string(mustRead(t, cfg)) != fixture {
+		t.Fatal("file changed")
+	}
+}
+
+// heldFresh holds lock as Claude would (a mkdir'd directory whose mtime is
+// refreshed) until the test ends.
+func heldFresh(t *testing.T, lock string) {
+	t.Helper()
+	if err := os.Mkdir(lock, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	t.Cleanup(func() { close(stop); <-done })
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(50 * time.Millisecond):
+				now := time.Now()
+				_ = os.Chtimes(lock, now, now)
+			}
+		}
+	}()
+}
+
+// Claude locks "<config path>.lock" on the unresolved path, so with a
+// symlinked config that is the lock that must exclude Fastener.
+func TestSymlinkedConfigHonoursUnresolvedLock(t *testing.T) {
+	for _, which := range []string{"symlink", "target"} {
+		t.Run(which, func(t *testing.T) {
+			cfg, fdir := isolate(t)
+			target := filepath.Join(filepath.Dir(cfg), "real.json")
+			writeFixture(t, target, fixture, 0o600)
+			if err := os.Symlink(target, cfg); err != nil {
+				t.Fatal(err)
+			}
+			lock := cfg + ".lock"
+			if which == "target" {
+				lock = target + ".lock"
+			}
+			heldFresh(t, lock)
+			o := opts(cfg, fdir)
+			o.LockTimeout, o.LockStale = 600*time.Millisecond, 400*time.Millisecond
+			start := time.Now()
+			_, err := Trust("/w", o)
+			if !errors.Is(err, ErrLockTimeout) || time.Since(start) < 600*time.Millisecond {
+				t.Fatalf("err %v after %s", err, time.Since(start))
+			}
+			if string(mustRead(t, target)) != fixture {
+				t.Fatal("file changed while Claude held its lock")
+			}
+			// Neither lock of ours is left behind.
+			for _, p := range []string{cfg + ".lock", target + ".lock"} {
+				if p != lock {
+					if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("%s left behind", p)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestLoneSurrogateKeysRoundTrip(t *testing.T) {
+	doc := "{\n  \"a\\ud800\": 1,\n  \"a\\udbff\": 2,\n  \"dup\": 1,\n  \"dup\": 2,\n  \"bad\xff\": 3\n}"
+	v, err := decodeOrdered([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := encodeStringify(v); string(got) != doc {
+		t.Fatalf("not verbatim:\n%s", got)
+	}
+	cfg, fdir := isolate(t)
+	writeFixture(t, cfg, doc, 0o600)
+	if _, err := Trust("/w", opts(cfg, fdir)); err != nil {
+		t.Fatal(err)
+	}
+	got := string(mustRead(t, cfg))
+	want := strings.TrimSuffix(doc, "\n}") + ",\n  \"projects\": {\n    \"/w\": {\n      \"hasTrustDialogAccepted\": true\n    }\n  }\n}"
+	if got != want {
+		t.Fatalf("got:\n%s", got)
+	}
+}
+
+func TestGuardCatchesMergedKeys(t *testing.T) {
+	orig := []byte(`{"a\ud800": 1, "a\udbff": 1}`)
+	merged := []byte(`{"a\ufffd": 1, "projects": {"/w": {"hasTrustDialogAccepted": true}}}`)
+	added := []string{`"projects"`, `"/w"`, `"hasTrustDialogAccepted"`}
+	if err := checkOnlyTrustChanged(orig, merged, "/w", added); err == nil {
+		t.Fatal("guard missed merged keys")
 	}
 }
 
@@ -549,7 +711,33 @@ func TestKeys(t *testing.T) {
 	}
 }
 
-func TestKeyGitRepo(t *testing.T) {
+func git(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "protocol.file.allow=always", "-c", "init.defaultBranch=main"}, args...)...)
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GIT_") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func mustKey(t *testing.T, dir string) (string, bool) {
+	t.Helper()
+	f, err := ResolveFolder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, inRepo, err := Key(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k, inRepo
+}
+
+func TestKeyGitLayouts(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("no git")
 	}
@@ -560,22 +748,71 @@ func TestKeyGitRepo(t *testing.T) {
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v %s", err, out)
-	}
-	t.Setenv("GIT_DIR", "/nonexistent") // must not redirect the lookup
+	git(t, base, "init", "-q", repo)
+	git(t, repo, "commit", "-q", "--allow-empty", "-m", "init")
+	t.Setenv("GIT_DIR", "/nonexistent") // Claude runs no git; neither does Key
+
+	// A normal repository: the root, from the root or a subfolder.
 	for _, dir := range []string{repo, sub} {
-		k, inRepo, err := Key(dir)
-		if err != nil || !inRepo || k != repo {
-			t.Fatalf("%s: %q %v %v", dir, k, inRepo, err)
+		if k, inRepo := mustKey(t, dir); !inRepo || k != repo {
+			t.Fatalf("%s: %q %v", dir, k, inRepo)
 		}
 	}
-	// Reached through a symlink, the key is still the real repo root.
+	// Reached through a symlink, the key is still the real root.
 	link := filepath.Join(base, "repolink")
 	_ = os.Symlink(repo, link)
-	f, _ := ResolveFolder(filepath.Join(link, "a"))
-	if k, _, _ := Key(f); k != repo {
+	if k, _ := mustKey(t, filepath.Join(link, "a")); k != repo {
 		t.Fatalf("via symlink: %q", k)
+	}
+
+	// A linked worktree keys to the main repository's root.
+	wt := filepath.Join(base, "wt")
+	git(t, repo, "worktree", "add", "-q", wt)
+	_ = os.MkdirAll(filepath.Join(wt, "deep"), 0o755)
+	for _, dir := range []string{wt, filepath.Join(wt, "deep")} {
+		if k, inRepo := mustKey(t, dir); !inRepo || k != repo {
+			t.Fatalf("worktree %s: %q %v", dir, k, inRepo)
+		}
+	}
+	// A worktree whose back-pointer does not lead back keeps its own root.
+	adm := filepath.Join(repo, ".git", "worktrees", "wt")
+	if err := os.WriteFile(filepath.Join(adm, "gitdir"), []byte(filepath.Join(base, "elsewhere", ".git")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if k, _ := mustKey(t, wt); k != wt {
+		t.Fatalf("tampered worktree: %q", k)
+	}
+
+	// A submodule's .git file names <super>/.git/modules/<name>, which has
+	// no commondir, so it keys to its own root (as Claude's walk does).
+	lib := filepath.Join(base, "lib")
+	git(t, base, "init", "-q", lib)
+	git(t, lib, "commit", "-q", "--allow-empty", "-m", "lib")
+	git(t, repo, "submodule", "add", "-q", lib, "vendor/lib")
+	smod := filepath.Join(repo, "vendor", "lib")
+	if fi, err := os.Lstat(filepath.Join(smod, ".git")); err != nil || !fi.Mode().IsRegular() {
+		t.Fatalf("expected a .git file in the submodule: %v", err)
+	}
+	if k, inRepo := mustKey(t, smod); !inRepo || k != smod {
+		t.Fatalf("submodule: %q %v", k, inRepo)
+	}
+	// The superproject folder holding the submodule keys to the superproject.
+	if k, _ := mustKey(t, filepath.Join(repo, "vendor")); k != repo {
+		t.Fatalf("vendor: %q", k)
+	}
+
+	// A .git symlink to a directory counts; a dangling one does not.
+	sl := filepath.Join(base, "symgit")
+	_ = os.MkdirAll(filepath.Join(sl, "x"), 0o755)
+	_ = os.Symlink(filepath.Join(repo, ".git"), filepath.Join(sl, ".git"))
+	if k, _ := mustKey(t, filepath.Join(sl, "x")); k != sl {
+		t.Fatalf(".git symlink: %q", k)
+	}
+	dang := filepath.Join(base, "dangling")
+	_ = os.MkdirAll(dang, 0o755)
+	_ = os.Symlink(filepath.Join(base, "nowhere"), filepath.Join(dang, ".git"))
+	if k, inRepo := mustKey(t, dang); inRepo || k != dang {
+		t.Fatalf("dangling .git: %q %v", k, inRepo)
 	}
 
 	// A home directory that is a git repository (dotfiles): a folder
@@ -583,5 +820,35 @@ func TestKeyGitRepo(t *testing.T) {
 	t.Setenv("HOME", repo)
 	if _, _, err := Key(sub); err == nil || !strings.Contains(err.Error(), "home directory") {
 		t.Fatalf("home repo key: %v", err)
+	}
+}
+
+func TestConfigPathRefusesOtherFiles(t *testing.T) {
+	cfg, _ := isolate(t)
+	claudeDir := filepath.Dir(cfg)
+	if p, err := ConfigPath(); err != nil || p != cfg {
+		t.Fatalf("%q %v", p, err)
+	}
+	t.Setenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", "https://example.invalid")
+	if _, err := ConfigPath(); !errors.Is(err, ErrUnsupportedConfig) || !strings.Contains(err.Error(), filepath.Join(claudeDir, ".claude-custom-oauth.json")) {
+		t.Fatalf("custom oauth: %v", err)
+	}
+	t.Setenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", "")
+	legacy := filepath.Join(claudeDir, ".config.json")
+	writeFixture(t, legacy, "", 0o600)
+	if _, err := ConfigPath(); err != nil {
+		t.Fatalf("empty legacy file: %v", err)
+	}
+	writeFixture(t, legacy, "{}", 0o600)
+	if _, err := ConfigPath(); !errors.Is(err, ErrUnsupportedConfig) || !strings.Contains(err.Error(), legacy) {
+		t.Fatalf("legacy: %v", err)
+	}
+	// Without CLAUDE_CONFIG_DIR the legacy file is ~/.claude/.config.json.
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	home := os.Getenv("HOME")
+	_ = os.MkdirAll(filepath.Join(home, ".claude"), 0o700)
+	writeFixture(t, filepath.Join(home, ".claude", ".config.json"), "{}", 0o600)
+	if _, err := ConfigPath(); !errors.Is(err, ErrUnsupportedConfig) {
+		t.Fatalf("home legacy: %v", err)
 	}
 }

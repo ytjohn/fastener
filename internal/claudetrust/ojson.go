@@ -6,30 +6,60 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
+	"unicode/utf8"
 )
 
 // Claude's config is read and rewritten without losing anything: objects keep
-// their key order and every leaf (string, number, bool, null) keeps its exact
-// original bytes, so large integers, floats and string escapes are untouched.
-// Writing follows JSON.stringify(value, null, 2), which is how Claude Code
-// writes the file, so an unchanged document re-encodes to the same bytes.
+// their members in order, every object key keeps its exact source bytes (so
+// a key with a lone-surrogate escape or invalid UTF-8 is not turned into
+// U+FFFD, and duplicate keys stay as they were), and every leaf (string,
+// number, bool, null) keeps its exact source bytes, so large integers, floats
+// and string escapes are untouched. Writing follows JSON.stringify(value,
+// null, 2), which is how Claude Code writes the file, so an unchanged
+// document re-encodes to the same bytes.
 
-// object is a JSON object with its key order.
-type object struct {
-	keys []string
-	vals map[string]any // *object, []any or json.RawMessage
+// member is one object member: its key as decoded, the key's source bytes
+// (with quotes), and its value.
+type member struct {
+	key   string
+	raw   []byte
+	value any // *object, []any or json.RawMessage
 }
 
-func newObject() *object { return &object{vals: map[string]any{}} }
+// object is a JSON object with its members in source order.
+type object struct{ members []member }
 
-func (o *object) get(k string) (any, bool) { v, ok := o.vals[k]; return v, ok }
+func newObject() *object { return &object{} }
 
-// set replaces k's value in place, or appends k (as JavaScript does).
-func (o *object) set(k string, v any) {
-	if _, ok := o.vals[k]; !ok {
-		o.keys = append(o.keys, k)
+// lossless reports whether a decoded key is known to be exact: the decoder
+// turns a lone surrogate or invalid UTF-8 into U+FFFD, so a key containing
+// U+FFFD is never matched by name (it can still be written back verbatim).
+func lossless(k string) bool { return !strings.ContainsRune(k, utf8.RuneError) }
+
+// get returns the value of the last member named k, the one JSON.parse
+// would keep.
+func (o *object) get(k string) (any, bool) {
+	for i := len(o.members) - 1; i >= 0; i-- {
+		if m := o.members[i]; m.key == k && lossless(m.key) {
+			return m.value, true
+		}
 	}
-	o.vals[k] = v
+	return nil, false
+}
+
+// set replaces the value of the last member named k, or appends a member
+// (as assigning a new property does in JavaScript). k must be lossless.
+func (o *object) set(k string, v any) {
+	for i := len(o.members) - 1; i >= 0; i-- {
+		if m := &o.members[i]; m.key == k && lossless(m.key) {
+			m.value = v
+			return
+		}
+	}
+	var b bytes.Buffer
+	writeString(&b, k)
+	o.members = append(o.members, member{key: k, raw: b.Bytes(), value: v})
 }
 
 // decodeOrdered parses one JSON value from b.
@@ -46,6 +76,13 @@ func decodeOrdered(b []byte) (any, error) {
 	return v, nil
 }
 
+// rawToken is the source of the token that ended at the decoder's offset and
+// started after start: between two tokens there can only be whitespace and
+// a ':' or ','.
+func rawToken(dec *json.Decoder, b []byte, start int64) []byte {
+	return bytes.Clone(bytes.TrimLeft(b[start:dec.InputOffset()], " \t\r\n:,"))
+}
+
 func decodeValue(dec *json.Decoder, b []byte) (any, error) {
 	start := dec.InputOffset()
 	tok, err := dec.Token()
@@ -58,6 +95,7 @@ func decodeValue(dec *json.Decoder, b []byte) (any, error) {
 		case '{':
 			o := newObject()
 			for dec.More() {
+				ks := dec.InputOffset()
 				kt, err := dec.Token()
 				if err != nil {
 					return nil, err
@@ -66,11 +104,12 @@ func decodeValue(dec *json.Decoder, b []byte) (any, error) {
 				if !ok {
 					return nil, fmt.Errorf("object key is %T", kt)
 				}
+				raw := rawToken(dec, b, ks)
 				v, err := decodeValue(dec, b)
 				if err != nil {
 					return nil, err
 				}
-				o.set(k, v) // a duplicate key keeps its first position and the last value, like JSON.parse
+				o.members = append(o.members, member{key: k, raw: raw, value: v})
 			}
 			if _, err := dec.Token(); err != nil { // '}'
 				return nil, err
@@ -92,10 +131,7 @@ func decodeValue(dec *json.Decoder, b []byte) (any, error) {
 		}
 		return nil, fmt.Errorf("unexpected %v", t)
 	default:
-		// A leaf: keep its source bytes. Between the previous token and this
-		// one there can only be whitespace and a ':' or ','.
-		raw := bytes.TrimLeft(b[start:dec.InputOffset()], " \t\r\n:,")
-		return json.RawMessage(bytes.Clone(raw)), nil
+		return json.RawMessage(rawToken(dec, b, start)), nil
 	}
 }
 
@@ -116,19 +152,19 @@ func writeIndent(buf *bytes.Buffer, depth int) {
 func writeValue(buf *bytes.Buffer, v any, depth int) {
 	switch t := v.(type) {
 	case *object:
-		if len(t.keys) == 0 {
+		if len(t.members) == 0 {
 			buf.WriteString("{}")
 			return
 		}
 		buf.WriteByte('{')
-		for i, k := range t.keys {
+		for i, m := range t.members {
 			if i > 0 {
 				buf.WriteByte(',')
 			}
 			writeIndent(buf, depth+1)
-			writeString(buf, k)
+			buf.Write(m.raw)
 			buf.WriteString(": ")
-			writeValue(buf, t.vals[k], depth+1)
+			writeValue(buf, m.value, depth+1)
 		}
 		writeIndent(buf, depth)
 		buf.WriteByte('}')
