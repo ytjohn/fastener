@@ -280,9 +280,15 @@ func heapPeak(f func()) uint64 {
 	res := make(chan uint64)
 	go func() {
 		var peak uint64
-		t := time.NewTicker(2 * time.Millisecond)
+		// Sample the live heap: collect first, so garbage the pump has
+		// already dropped (the parser's per-line regex copies) does not
+		// count. A held 16 MB line would still be live at some sample.
+		// HeapAlloc without a collection depends on GC timing and failed
+		// on CI's runner while passing locally.
+		t := time.NewTicker(20 * time.Millisecond)
 		defer t.Stop()
 		for {
+			runtime.GC()
 			var ms runtime.MemStats
 			runtime.ReadMemStats(&ms)
 			if ms.HeapAlloc > base && ms.HeapAlloc-base > peak {
