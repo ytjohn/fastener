@@ -7,7 +7,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 
 ## `inspect <name> --json` and `run --json`
 
-`run --json` prints the same object as `inspect --json`, taken right after the launch handshake.
+`run --json` prints the same object as `inspect --json`, taken right after the launch handshake. `run --remote --json` takes it once the bridge has reported its URL (`status.remote_url`), once `remote_wait` (config, default 15 s) has elapsed while the bridge still runs (exit 0; `remote_url` is then absent), or once the bridge has ended before reporting its URL (exit 1, with `reason`).
 
 | Field | Meaning |
 |---|---|
@@ -22,19 +22,20 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 | `paths` | `dir`, `output_log`, `stderr_log`, `monitor_log` (absolute paths) |
 | `liveness_error` | String, omitted when empty. Present only while `state` is `starting` or `running` and the check on the monitor process failed (for example a permission error reading `/proc`). Fastener then assumes the monitor is alive rather than declaring the session `lost`, so a session can look `running` for as long as the error persists. |
 | `orphan_error` | String, omitted when empty. Why `orphans` cannot be trusted: no readable plan for the current generation, a failed process scan, or (after a failed `run`) a reload that failed twice, so the true count may be higher than reported. |
+| `reason` | String, `run --remote` only, omitted otherwise. Why the bridge ended before reporting its URL: `exited` (any early end; the error on stderr names how it ended and the last line of `stderr.log`). |
 | `warnings` | Array of strings, omitted when empty. One entry per state file whose `schema_version` is newer than this fastener understands, e.g. `status.json has schema_version 2; this fastener understands up to 1, so some fields may be ignored`. The file is still read; unknown fields are ignored. |
 
 `session` fields:
-- `schema_version`, `name`, `created_at`, `kind` (`headless`), `backend`, `cwd` (absolute)
-- `prompt_source`: `inline`, `stdin` (for `--prompt-file -`), or the absolute `--prompt-file` path. The text itself is not in the JSON.
+- `schema_version`, `name`, `created_at`, `kind` (`headless` | `remote`), `backend`, `cwd` (absolute)
+- `prompt_source`: `inline`, `stdin` (for `--prompt-file -`), or the absolute `--prompt-file` path; `""` for a remote bridge, which takes no prompt. The text itself is not in the JSON.
 - `permissions`, `model`, `max_runtime`, `grace`
 - `env_base`: environment values captured from the caller (the passthrough list); `env`: the `--env` values; `env_file`: the path only. Precedence is base, then env-file, then `--env`.
-- `labels`, `restart` (`no`), `remote` (false)
+- `labels`, `restart` (`no`), `remote` (true for `run --remote`)
 
 `plan` fields:
 - `schema_version`, `generation`
 - `argv`: the fully resolved argument list; `argv[0]` is an absolute path. For `prompt = "arg"` backends it contains the prompt text itself
-- `prompt_mode` (`stdin` | `arg`), `parser`
+- `prompt_mode` (`stdin` | `arg` | `none`: a remote bridge, whose stdin is `/dev/null`), `parser`
 - `profile_source` (`builtin` or the file path), `profile_sha256`
 - `marker`: the value of `FASTENER_SESSION` in the agent's environment
 - `fastener_version`, `planned_at`

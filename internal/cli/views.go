@@ -40,6 +40,10 @@ type inspectOut struct {
 	// OrphanError is set when the orphan count cannot be trusted (no readable
 	// plan, a failed process scan, or a reload that failed after launch).
 	OrphanError string `json:"orphan_error,omitempty"`
+	// Reason and Folder are set only by `run --remote` when the bridge ended
+	// before reporting its URL.
+	Reason string `json:"reason,omitempty"`
+	Folder string `json:"folder,omitempty"`
 }
 
 func inspectOf(v *session.View) inspectOut {

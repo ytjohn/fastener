@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -46,14 +47,41 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	autoPrune()
-	v, err := launch(o, stderr)
+	v, p, err := launchPrepared(o, stderr)
 	if err != nil {
 		if v != nil && asJSON {
 			writeJSON(stdout, inspectOf(v))
 		}
 		return fail(stderr, err)
 	}
-	if asJSON {
+	if o.Remote {
+		// Wait for the bridge to report its URL; a bridge that ends first is
+		// a failure with its reason.
+		wait := p.cfg.RemoteWaitDuration()
+		v, err = waitRemoteURL(v, p, wait)
+		out := inspectOf(v)
+		var rf *remoteFailure
+		if errors.As(err, &rf) {
+			out.Reason, out.Folder = rf.reason, rf.folder
+		}
+		if asJSON {
+			writeJSON(stdout, out)
+		}
+		if err != nil {
+			return fail(stderr, err)
+		}
+		if !asJSON {
+			if u := v.Status.RemoteURL; u != "" {
+				fmt.Fprintf(stdout, "%s  %s\n", v.Session.Name, u)
+			} else {
+				fmt.Fprintln(stdout, v.Session.Name)
+			}
+		}
+		if v.Status.RemoteURL == "" {
+			fmt.Fprintf(stderr, "fastener: %s: no URL yet after %s; the bridge is still running (fastener inspect %s shows the URL once reported)\n",
+				v.Session.Name, wait, v.Session.Name)
+		}
+	} else if asJSON {
 		writeJSON(stdout, inspectOf(v))
 	} else {
 		fmt.Fprintln(stdout, v.Session.Name)

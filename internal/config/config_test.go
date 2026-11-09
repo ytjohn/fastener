@@ -62,7 +62,7 @@ func TestPartialFileKeepsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Launcher != "setsid" || c.Handshake() != 5*time.Second || c.Retention != "168h" || len(c.EnvPassthrough) == 0 || c.DetachKey != "ctrl-]" {
+	if c.Launcher != "setsid" || c.Handshake() != 5*time.Second || c.Retention != "168h" || len(c.EnvPassthrough) == 0 || c.DetachKey != "ctrl-]" || c.RemoteWaitDuration() != 15*time.Second {
 		t.Fatalf("defaults lost: %+v", c)
 	}
 }
@@ -90,6 +90,8 @@ func TestRejectsBadValues(t *testing.T) {
 		"retention = \"-1h\"\n",
 		"launcher = \"sytemd\"\n",
 		"auto_prune = \"no\"\n",
+		"remote_wait = \"0s\"\n",
+		"remote_wait = \"soon\"\n",
 	} {
 		writeCfg(t, dir, body)
 		if _, err := Load(); err == nil {
@@ -149,5 +151,15 @@ func TestShortRetentionAcceptedAndClamped(t *testing.T) {
 	}
 	if c.ClampWarning() != "retention 30m is below the 1h minimum; using 1h" {
 		t.Fatal(c.ClampWarning())
+	}
+}
+
+func TestRemoteWait(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FASTENER_CONFIG_DIR", dir)
+	writeCfg(t, dir, "remote_wait = \"40s\"\n")
+	c, err := Load()
+	if err != nil || c.RemoteWaitDuration() != 40*time.Second {
+		t.Fatalf("remote_wait = %v, %v", c.RemoteWaitDuration(), err)
 	}
 }

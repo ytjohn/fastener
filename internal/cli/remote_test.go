@@ -100,3 +100,90 @@ func TestRunRemoteSessionRecord(t *testing.T) {
 		t.Errorf("ended_by = %q, want stop", v.Status.EndedBy)
 	}
 }
+
+func TestRunRemotePrintsURL(t *testing.T) {
+	h := newBridgeHarness(t)
+	const url = "https://claude.ai/code?environment=env_01FAKEBRIDGEFAKEBRIDGE01"
+	const sess = "https://claude.ai/code/session_01FAKEBRIDGESESSION01"
+	out := h.ok("run", "fakebridge", "--remote", "--cwd", h.work, "--name", "br-url",
+		"--env", "FAKE_BRIDGE=1", "--env", "FAKE_BRIDGE_SESSION_AFTER=0s")
+	if out != "br-url  "+url {
+		t.Errorf("run printed %q, want %q", out, "br-url  "+url)
+	}
+	// The session link appears in a later frame, flushed within about 1s.
+	deadline := time.Now().Add(5 * time.Second)
+	var v remoteJSON
+	for {
+		v = h.remoteInspect("br-url")
+		if len(v.Status.RemoteSessions) > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if v.State != "running" || v.Status.RemoteURL != url || len(v.Status.RemoteSessions) != 1 || v.Status.RemoteSessions[0] != sess {
+		t.Errorf("inspect = %+v", v)
+	}
+	human := h.ok("inspect", "br-url")
+	for _, want := range []string{"remote_url", url, "remote_session", sess} {
+		if !strings.Contains(human, want) {
+			t.Errorf("inspect output lacks %q:\n%s", want, human)
+		}
+	}
+	var rows []struct {
+		Name      string `json:"name"`
+		RemoteURL string `json:"remote_url"`
+	}
+	if err := json.Unmarshal([]byte(h.ok("ps", "--json")), &rows); err != nil || len(rows) != 1 || rows[0].RemoteURL != url {
+		t.Errorf("ps --json = %+v, %v", rows, err)
+	}
+	h.ok("stop", "br-url")
+	if v := h.waitState("br-url", "exited", 10*time.Second); v.Status.EndedBy != "stop" {
+		t.Errorf("ended_by = %q, want stop", v.Status.EndedBy)
+	}
+}
+
+func TestRunRemoteJSON(t *testing.T) {
+	h := newBridgeHarness(t)
+	out := h.ok("run", "fakebridge", "--remote", "--cwd", h.work, "--name", "br-json", "--json", "--env", "FAKE_BRIDGE=1")
+	var v remoteJSON
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if v.Name != "br-json" || v.State != "running" || v.Reason != "" ||
+		v.Status.RemoteURL != "https://claude.ai/code?environment=env_01FAKEBRIDGEFAKEBRIDGE01" {
+		t.Errorf("run --json = %+v", v)
+	}
+}
+
+func TestRunRemoteWaitTimeout(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.writeConfig("remote_wait = \"700ms\"\n")
+	start := time.Now()
+	out, errOut, code := h.cmd("run", "fakebridge", "--remote", "--cwd", h.work, "--name", "br-slow",
+		"--env", "FAKE_BRIDGE=1", "--env", "FAKE_BRIDGE_URL_AFTER=1h")
+	if code != 0 || strings.TrimSpace(out) != "br-slow" || !strings.Contains(errOut, "no URL yet after 700ms") {
+		t.Errorf("exit %d, stdout %q, stderr %q", code, out, errOut)
+	}
+	if el := time.Since(start); el < 700*time.Millisecond || el > 8*time.Second {
+		t.Errorf("run took %s", el)
+	}
+	if v := h.remoteInspect("br-slow"); v.State != "running" || v.Status.RemoteURL != "" {
+		t.Errorf("inspect = %+v", v)
+	}
+}
+
+func TestRunRemoteEndsEarly(t *testing.T) {
+	h := newBridgeHarness(t)
+	// Not a bridge: the fake agent's headless mode exits at once.
+	out, errOut, code := h.cmd("run", "fakebridge", "--remote", "--cwd", h.work, "--name", "br-exit", "--json",
+		"--env", "FAKE_EXIT=3", "--env", "FAKE_STDERR=boom: no bridge here")
+	var v remoteJSON
+	if err := json.Unmarshal([]byte(out), &v); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if code != 1 || v.Reason != "exited" || v.Folder != "" ||
+		!strings.Contains(errOut, "ended before reporting its URL (state=exited, ended_by=exit, exit_code=3)") ||
+		!strings.Contains(errOut, "stderr: boom: no bridge here") {
+		t.Errorf("exit %d, reason %q, stderr %q", code, v.Reason, errOut)
+	}
+}

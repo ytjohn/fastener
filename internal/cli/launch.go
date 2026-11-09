@@ -171,6 +171,19 @@ func readPromptFile(path string, stdin io.Reader) (text, source string, err erro
 // launch creates a session and starts its monitor. On a handshake failure it
 // returns the view (if one exists) together with the error.
 func launch(o launchOptions, stderr io.Writer) (*session.View, error) {
+	v, _, err := launchPrepared(o, stderr)
+	return v, err
+}
+
+// launchPrepared is launch that also returns what prepare resolved (nil if
+// launch failed before that), for callers that need the profile or config.
+func launchPrepared(o launchOptions, stderr io.Writer) (*session.View, *prepared, error) {
+	var p *prepared
+	v, err := launchWith(o, stderr, &p)
+	return v, p, err
+}
+
+func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.View, error) {
 	if err := validateDurations(o.Grace, o.MaxRuntime); err != nil {
 		return nil, err
 	}
@@ -220,6 +233,7 @@ func launch(o launchOptions, stderr io.Writer) (*session.View, error) {
 	if err != nil {
 		return nil, err
 	}
+	*out = p
 	l, err := p.selectLauncher(o, stderr)
 	if err != nil {
 		return nil, err

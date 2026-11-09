@@ -22,6 +22,8 @@ type Config struct {
 	Launcher           string   `toml:"launcher"`
 	EnvPassthrough     []string `toml:"env_passthrough"`
 	DetachKey          string   `toml:"detach_key"` // used from v0.3
+	// RemoteWait is how long `run --remote` waits for a bridge's URL.
+	RemoteWait string `toml:"remote_wait"`
 }
 
 // Dir is $FASTENER_CONFIG_DIR, else $XDG_CONFIG_HOME/fastener, else ~/.config/fastener.
@@ -61,6 +63,7 @@ func defaults() Config {
 		Launcher:         "auto",
 		EnvPassthrough:   append([]string(nil), runenv.DefaultPassthrough...),
 		DetachKey:        "ctrl-]",
+		RemoteWait:       "15s",
 	}
 }
 
@@ -89,7 +92,7 @@ func Load() (Config, error) {
 		}
 		return c, fmt.Errorf("%s: unknown keys: %s", path, strings.Join(keys, ", "))
 	}
-	for _, d := range []struct{ name, v string }{{"handshake_timeout", c.HandshakeTimeout}, {"retention", c.Retention}} {
+	for _, d := range []struct{ name, v string }{{"handshake_timeout", c.HandshakeTimeout}, {"retention", c.Retention}, {"remote_wait", c.RemoteWait}} {
 		dur, err := time.ParseDuration(d.v)
 		if err != nil {
 			return c, fmt.Errorf("%s: %s: %w", path, d.name, err)
@@ -111,6 +114,16 @@ func (c Config) Handshake() time.Duration {
 	d, err := time.ParseDuration(c.HandshakeTimeout)
 	if err != nil || d <= 0 {
 		return 5 * time.Second
+	}
+	return d
+}
+
+// RemoteWaitDuration returns how long `run --remote` waits for a bridge's
+// URL (validated by Load).
+func (c Config) RemoteWaitDuration() time.Duration {
+	d, err := time.ParseDuration(c.RemoteWait)
+	if err != nil || d <= 0 {
+		return 15 * time.Second
 	}
 	return d
 }
