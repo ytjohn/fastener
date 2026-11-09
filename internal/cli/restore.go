@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ytjohn/fastener/internal/config"
+	"github.com/ytjohn/fastener/internal/launcher"
 	"github.com/ytjohn/fastener/internal/proc"
 	"github.com/ytjohn/fastener/internal/profile"
 	"github.com/ytjohn/fastener/internal/runenv"
@@ -238,6 +239,28 @@ func restoreOrphans(v *session.View) (reason, msg string) {
 	return "", ""
 }
 
+// restoreSelect picks the launcher for a relaunch (launcher.SelectRestore,
+// which accepts a user manager that is still starting at boot). A variable so
+// tests in this package can substitute one.
+var restoreSelect = launcher.SelectRestore
+
+// restoreLauncherPref is the launcher a relaunch uses: the kind the previous
+// generation's launcher record names, so a bridge keeps the supervision it
+// was started with whatever the config says now. Without a record (or one
+// naming an unknown kind) it is the config's launcher, else auto, with a note.
+func restoreLauncherPref(v *session.View, cfg config.Config, stderr io.Writer) string {
+	if l := v.Launcher; l != nil && (l.Launcher == "setsid" || l.Launcher == "systemd") {
+		return l.Launcher
+	}
+	pref := cfg.Launcher
+	if pref == "" {
+		pref = "auto"
+	}
+	fmt.Fprintf(stderr, "fastener: note: %s: generation %d has no launcher record; using launcher %s (config, else auto)\n",
+		v.Session.Name, v.Generation(), pref)
+	return pref
+}
+
 // restoreFailure is a reason and message for a restore that could not be done.
 type restoreFailure struct{ reason, msg string }
 
@@ -312,7 +335,7 @@ func relaunch(v *session.View, stderr io.Writer) restoreOut {
 	if f != nil {
 		return failed(f.reason, f.msg, true)
 	}
-	l, err := selectFunc(p.cfg.Launcher, stderr)
+	l, err := restoreSelect(restoreLauncherPref(v, p.cfg, stderr), stderr)
 	if err != nil {
 		return failed(rsLaunch, err.Error(), true)
 	}

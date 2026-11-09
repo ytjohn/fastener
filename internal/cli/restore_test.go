@@ -399,3 +399,56 @@ func TestRestoreDryRun(t *testing.T) {
 		t.Error("dry run acted")
 	}
 }
+
+type launcherKind struct {
+	Launcher struct {
+		Launcher string `json:"launcher"`
+	} `json:"launcher"`
+}
+
+func (h *harness) launcherKind(name string) string {
+	h.t.Helper()
+	var v launcherKind
+	if err := json.Unmarshal([]byte(h.ok("inspect", name, "--json")), &v); err != nil {
+		h.t.Fatal(err)
+	}
+	return v.Launcher.Launcher
+}
+
+// TestRestoreKeepsSetsidLauncher: a bridge started with setsid is relaunched
+// with setsid, although the config now says systemd.
+func TestRestoreKeepsSetsidLauncher(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.startOnReboot("br-setsid")
+	h.simulateReboot("br-setsid")
+	h.launcher = "systemd"
+	h.writeConfig("")
+	if rs := h.restore(0); len(rs) != 1 || rs[0].Result != "restored" {
+		t.Fatalf("restore = %+v", rs)
+	}
+	if k := h.launcherKind("br-setsid"); k != "setsid" {
+		t.Errorf("generation 2 launcher = %s, want setsid", k)
+	}
+}
+
+// TestRestoreKeepsSystemdLauncher: the reverse, against the real user
+// manager (skipped without one).
+func TestRestoreKeepsSystemdLauncher(t *testing.T) {
+	h := newSystemdHarness(t, "systemd")
+	h.writeProfile("fakebridge", fmt.Sprintf(fakeBridgeProfile, fakeBin))
+	h.startOnReboot("br-sysd")
+	if k := h.launcherKind("br-sysd"); k != "systemd" {
+		t.Fatalf("generation 1 launcher = %s", k)
+	}
+	h.simulateReboot("br-sysd")
+	h.launcher = "setsid"
+	h.writeConfig("")
+	if rs := h.restore(0); len(rs) != 1 || rs[0].Result != "restored" || rs[0].Generation != 2 {
+		t.Fatalf("restore = %+v", rs)
+	}
+	if k := h.launcherKind("br-sysd"); k != "systemd" {
+		t.Errorf("generation 2 launcher = %s, want systemd", k)
+	}
+	h.ok("stop", "br-sysd")
+	h.waitState("br-sysd", "exited", 15*time.Second)
+}
