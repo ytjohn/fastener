@@ -24,7 +24,7 @@ fastener wait <name>; fastener inspect <name>
 session keeps running if your shell exits. Then:
 
 ```bash
-fastener logs <name> [-f] [--stderr]    # agent output (-f follows)
+fastener logs <name> [-f] [--stderr] [--generation N]   # agent output (-f follows; --generation: a restored session's earlier run)
 fastener stop <name> [--grace 10s]      # SIGTERM, then SIGKILL after the grace period; also cleans up leftover processes of an exited session
 fastener rm <name> [--force]            # remove a finished session (refuses if it has leftover processes; --force kills them)
 fastener prune [--older-than D] [--dry-run]   # remove old ended sessions (see Retention)
@@ -101,6 +101,31 @@ it (below). Redrawn status lines are dropped from `output.log`, so a
 bridge left running for days does not fill the disk. `--permissions skip` maps to
 `--permission-mode bypassPermissions`. Other backends opt in with a `[remote]`
 profile section (design §8.1).
+
+### Keeping a bridge across reboots
+
+```bash
+fastener run claude --remote --restart on-reboot --cwd ~/proj --name proj
+fastener install-restore            # once: runs `fastener restore` at boot (or login)
+fastener install-restore --print    # show what it would install
+```
+
+A bridge started with `--restart on-reboot` is pinned (never pruned). After a reboot
+it reads `lost`; `fastener restore` relaunches every lost on-reboot bridge as the next
+generation, in the same folder with the same arguments (re-rendered from the current
+profile), so Claude reattaches the same `env_…` environment and its sessions. The
+previous generation's logs stay readable with `fastener logs <name> --generation 1`.
+If the profile no longer has `[remote]` or the session's permission level, the binary
+is gone, or the folder is no longer trusted, the session becomes `restore-failed` with a
+reason (`inspect` shows it; nothing falls back to something else); fix the cause and run
+`fastener restore <name>`. `restore --dry-run` shows what it would do.
+
+`install-restore` installs a one-shot `fastener-restore.service` systemd user unit
+(warning if lingering is off, since the unit then runs only at login), or on macOS a
+LaunchAgent `~/Library/LaunchAgents/net.ytjohn.fastener.restore.plist` (it loads at
+login; the command prints the `launchctl bootstrap` line to load it now), or, with
+neither, prints a crontab `@reboot` line. `--uninstall` removes it. Headless sessions
+are never rerun.
 
 ### Trusting a folder for remote bridges
 
