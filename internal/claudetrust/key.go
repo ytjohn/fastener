@@ -5,14 +5,12 @@
 package claudetrust
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
+	"unicode/utf8"
 )
 
 // ResolveFolder returns dir as an absolute, symlink-free path. It must exist
@@ -66,16 +64,28 @@ func isHome(p string) bool {
 	return err == nil && real == p
 }
 
-// Key is Claude Code's trust key for a resolved folder: the root of the git
-// repository the folder is in (`git rev-parse --show-toplevel`, symlinks
-// resolved), else the folder itself; with forward slashes. inRepo reports
-// whether the key is a repository root. A key that is the home directory or
-// the root is refused. When git is missing or the folder is not in a
-// repository (or git fails for any other reason), the folder is the key.
+// Key is Claude Code's trust key for a resolved folder, computed as Claude
+// Code 2.1.319 does (it runs no git command for this):
+//
+//   - Walk up from the folder to the nearest directory holding a ".git"
+//     entry that is a directory or a regular file (a symlink counts if it
+//     leads to one). That directory is the repository root.
+//   - If ".git" is a file that names a linked worktree ("gitdir: <dir>",
+//     where <dir>/commondir points at the main repository's git directory,
+//     <dir> sits in that directory's "worktrees", and <dir>/gitdir points
+//     back at this ".git"), the key is the main repository's root (the
+//     parent of its ".git"; for a common dir not named ".git", the common
+//     dir itself). Any check failing keeps the worktree's own root. A
+//     submodule's ".git" file names a directory without commondir, so a
+//     submodule keys to its own root.
+//   - Outside a repository, the key is the folder itself.
+//
+// Forward slashes. inRepo reports whether the key came from a repository. A
+// key that is the home directory or the filesystem root is refused.
 func Key(folder string) (key string, inRepo bool, err error) {
 	key = folder
-	if top, ok := gitToplevel(folder); ok {
-		key, inRepo = top, true
+	if root, ok := findGitRoot(folder); ok {
+		key, inRepo = canonicalGitRoot(root), true
 	}
 	if err := refuse(key, "trust key"); err != nil {
 		if inRepo {
@@ -83,37 +93,97 @@ func Key(folder string) (key string, inRepo bool, err error) {
 		}
 		return "", false, err
 	}
+	if !utf8.ValidString(key) || strings.ContainsRune(key, utf8.RuneError) {
+		return "", false, fmt.Errorf("trust key %q is not valid UTF-8", key)
+	}
 	return filepath.ToSlash(key), inRepo, nil
 }
 
-func gitToplevel(folder string) (string, bool) {
-	git, err := exec.LookPath("git")
-	if err != nil {
-		return "", false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, git, "-C", folder, "rev-parse", "--show-toplevel")
-	// Variables that would point git somewhere other than the folder itself.
-	for _, kv := range os.Environ() {
-		k, _, _ := strings.Cut(kv, "=")
-		switch k {
-		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR":
-			continue
+// findGitRoot walks up from dir (inclusive) to the nearest directory with a
+// usable ".git" entry.
+func findGitRoot(dir string) (string, bool) {
+	r := filepath.Clean(dir)
+	for {
+		if gitEntryOK(filepath.Join(r, ".git")) {
+			return r, true
 		}
-		cmd.Env = append(cmd.Env, kv)
+		parent := filepath.Dir(r)
+		if parent == r {
+			return "", false
+		}
+		r = parent
 	}
-	out, err := cmd.Output()
-	if err != nil {
+}
+
+// gitEntryOK: a directory or regular file, or a symlink that leads to one.
+func gitEntryOK(p string) bool {
+	fi, err := os.Stat(p) // follows a symlink
+	return err == nil && (fi.IsDir() || fi.Mode().IsRegular())
+}
+
+// regularFile: exists and is a regular file, not a symlink.
+func regularFile(p string) bool {
+	fi, err := os.Lstat(p)
+	return err == nil && fi.Mode().IsRegular()
+}
+
+// readTrimmed reads a small administrative file, trimmed like JS trim().
+func readTrimmed(p string) (string, bool) {
+	b, err := os.ReadFile(p)
+	if err != nil || len(b) > 64<<10 {
 		return "", false
 	}
-	top := strings.TrimRight(string(out), "\r\n")
-	if top == "" {
-		return "", false
+	return strings.TrimSpace(string(b)), true
+}
+
+func resolveFrom(base, p string) string {
+	if filepath.IsAbs(p) {
+		return filepath.Clean(p)
 	}
-	real, err := filepath.EvalSymlinks(top)
-	if err != nil {
-		return "", false
+	return filepath.Join(base, p)
+}
+
+// canonicalGitRoot maps a linked worktree's root to its main repository's
+// root; anything else (a normal repository, a submodule, a malformed or
+// tampered worktree) keeps root.
+func canonicalGitRoot(root string) string {
+	content, ok := readTrimmed(filepath.Join(root, ".git")) // fails for a .git directory
+	if !ok || !strings.HasPrefix(content, "gitdir:") {
+		return root
 	}
-	return filepath.Clean(real), true
+	gitdirRef := strings.TrimSpace(strings.TrimPrefix(content, "gitdir:"))
+	if gitdirRef == "" {
+		return root
+	}
+	adm := resolveFrom(root, gitdirRef) // the worktree's administrative dir
+	if !regularFile(filepath.Join(adm, "commondir")) {
+		return root // a submodule, or not a linked worktree
+	}
+	commonRef, ok := readTrimmed(filepath.Join(adm, "commondir"))
+	if !ok || commonRef == "" {
+		return root
+	}
+	common := resolveFrom(adm, commonRef)
+	if filepath.Dir(adm) != filepath.Join(common, "worktrees") {
+		return root
+	}
+	if !regularFile(filepath.Join(adm, "gitdir")) {
+		return root
+	}
+	back, ok := readTrimmed(filepath.Join(adm, "gitdir"))
+	if !ok || back == "" {
+		return root
+	}
+	backReal, err1 := filepath.EvalSymlinks(resolveFrom(adm, back))
+	rootReal, err2 := filepath.EvalSymlinks(root)
+	if err1 != nil || err2 != nil || backReal != filepath.Join(rootReal, ".git") {
+		return root
+	}
+	if filepath.Base(common) != ".git" {
+		if gitEntryOK(filepath.Join(common, ".git")) {
+			return root
+		}
+		return common
+	}
+	return filepath.Dir(common)
 }
