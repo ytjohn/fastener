@@ -61,7 +61,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
   - `usage`: `{input_tokens, output_tokens, cost_usd}`, present only when the backend reported usage or a cost. `cost_usd` is omitted when the backend reported no cost (Pi without pricing, Codex), never emitted as 0. `input_tokens` and `output_tokens` are omitted when the backend reported no token counts (for example a Claude result with `total_cost_usd` but no `usage` block, which yields `{"cost_usd": x}`)
   - `parse_errors`
   - `remote_url` (remote bridges, parser `claude-remote`): the bridge's URL, `https://claude.ai/code?environment=env_…`, the latest one the bridge printed
-  - `remote_sessions` (remote bridges): array of the session URLs the bridge has shown, `https://claude.ai/code/session_…` without their query string, de-duplicated, in the order first seen; at most the 64 most recent
+  - `remote_sessions` (remote bridges): array of the session URLs the bridge has shown, `https://claude.ai/code/session_…` without their query string, de-duplicated, in the order first seen; at most 64 entries, the oldest evicted first (a URL seen again after its eviction is added again at the end)
   - `usage.input_tokens` counts *all* input tokens for the run, including cache reads and writes. This differs from Anthropic's own `usage.input_tokens`, which excludes cache tokens.
 - `updated_at`
 

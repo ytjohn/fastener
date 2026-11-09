@@ -14,7 +14,9 @@ import (
 // It records the bridge URL (https://claude.ai/code?environment=env_…) as
 // RemoteURL, the latest one seen, and every session URL
 // (https://claude.ai/code/session_…, without its query) in RemoteSessions, in
-// the order first seen. Nothing on the screen is an error, so the parser never
+// the order first seen. The list is capped (maxRemoteSessions): the oldest
+// entry is evicted first, and a URL seen again after its eviction is added
+// again, at the end. Nothing on the screen is an error, so the parser never
 // counts parse errors.
 type claudeRemote struct{}
 
@@ -27,17 +29,23 @@ var (
 	// osc8RE matches an OSC 8 hyperlink opener or closer and captures its URI.
 	// The terminator is BEL or ST (ESC \).
 	osc8RE = regexp.MustCompile("\x1b\\]8;[^;\x07\x1b]*;([^\x07\x1b]*)(?:\x07|\x1b\\\\)")
-	// escRE matches every other escape: other OSC strings, CSI sequences and
-	// two-byte escapes.
-	escRE = regexp.MustCompile("\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)|\x1b\\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\\\-_]")
+	// escRE matches every other escape: other OSC strings, CSI sequences,
+	// nF escapes (ESC, intermediates 0x20-0x2F, a final byte; e.g. ESC ( B,
+	// which selects a character set) and two-byte escapes.
+	escRE = regexp.MustCompile("\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)|\x1b\\[[0-?]*[ -/]*[@-~]|\x1b[ -/]+[0-~]|\x1b[@-Z\\\\-_]")
+	// ctlRE matches the C0 controls left after escapes are removed (a stray
+	// ESC, BEL, backspace, CR, …), except tab. Each becomes a space, so a
+	// control right after a URL cannot join the URL to the next word.
+	ctlRE = regexp.MustCompile("[\x00-\x08\x0a-\x1f]")
 
-	bridgeURLRE  = regexp.MustCompile(`https://claude\.ai/code\?environment=env_[A-Za-z0-9]+`)
-	sessionURLRE = regexp.MustCompile(`https://claude\.ai/code/session_[A-Za-z0-9]+`)
+	bridgeURLRE  = regexp.MustCompile(`https://claude\.ai/code\?environment=env_[A-Za-z0-9_-]+`)
+	sessionURLRE = regexp.MustCompile(`https://claude\.ai/code/session_[A-Za-z0-9_-]+`)
 )
 
-// StripTerminal removes ANSI and OSC escape sequences from line. The URI of an
-// OSC 8 hyperlink is kept, followed by a space, so links stay visible in plain
-// text.
+// StripTerminal removes ANSI, OSC and nF escape sequences from line and
+// turns the remaining C0 controls other than tab into spaces. The URI of an
+// OSC 8 hyperlink is kept, followed by a space, so links stay visible in
+// plain text.
 func StripTerminal(line []byte) []byte {
 	line = osc8RE.ReplaceAllFunc(line, func(m []byte) []byte {
 		sub := osc8RE.FindSubmatch(m)
@@ -46,7 +54,7 @@ func StripTerminal(line []byte) []byte {
 		}
 		return append(append([]byte{}, sub[1]...), ' ')
 	})
-	return escRE.ReplaceAll(line, nil)
+	return ctlRE.ReplaceAll(escRE.ReplaceAll(line, nil), []byte(" "))
 }
 
 func (claudeRemote) Line(line []byte, f *Fields) bool {

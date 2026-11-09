@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 )
@@ -78,5 +79,40 @@ func TestStripTerminal(t *testing.T) {
 	in := "\x1b[8A\x1b[J\x1b[1;32mok\x1b[0m \x1b]8;;https://x/y\x07label\x1b]8;;\x07 \x1b]0;title\x07end"
 	if got, want := string(StripTerminal([]byte(in))), "ok https://x/y label end"; got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestStripTerminalNFAndControls(t *testing.T) {
+	in := "\x1b(Bplain\x1b)0 x\x1b\tt\x08b\x07end"
+	if got, want := string(StripTerminal([]byte(in))), "plain x \tt b end"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestClaudeRemoteIDCharacters(t *testing.T) {
+	p, _ := Get("claude-remote")
+	var f Fields
+	p.Line([]byte("x https://claude.ai/code?environment=env_01a_b-c y"), &f)
+	p.Line([]byte("\x1b]8;;https://claude.ai/code/session_01x-y_z?from=cli\x07s\x1b]8;;\x07"), &f)
+	if f.RemoteURL != "https://claude.ai/code?environment=env_01a_b-c" ||
+		!slices.Equal(f.RemoteSessions, []string{"https://claude.ai/code/session_01x-y_z"}) {
+		t.Errorf("got %q %q", f.RemoteURL, f.RemoteSessions)
+	}
+}
+
+// TestClaudeRemoteEvictedReadded: a URL evicted by the cap is added again,
+// at the end, when it is seen again.
+func TestClaudeRemoteEvictedReadded(t *testing.T) {
+	p, _ := Get("claude-remote")
+	var f Fields
+	url := func(i int) string { return fmt.Sprintf("https://claude.ai/code/session_%03d", i) }
+	for i := 0; i <= maxRemoteSessions; i++ {
+		p.Line([]byte(url(i)), &f)
+	}
+	if f.RemoteSessions[0] != url(1) {
+		t.Fatalf("oldest = %q, want %q", f.RemoteSessions[0], url(1))
+	}
+	if !p.Line([]byte(url(0)), &f) || f.RemoteSessions[len(f.RemoteSessions)-1] != url(0) || f.RemoteSessions[0] != url(2) {
+		t.Errorf("evicted URL not re-added at the end: first %q last %q", f.RemoteSessions[0], f.RemoteSessions[len(f.RemoteSessions)-1])
 	}
 }
