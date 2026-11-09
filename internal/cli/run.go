@@ -27,6 +27,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&follow, "follow", false, "follow output after launch")
 	fs.BoolVar(&asJSON, "json", false, "print the session as JSON")
 	fs.BoolVar(&o.Remote, "remote", false, "start the backend's remote bridge ([remote] in its profile) instead of a headless run; takes no prompt")
+	fs.StringVar(&o.Restart, "restart", restartNo, "restart policy: no|on-reboot (on-reboot needs --remote; `fastener restore` relaunches it after a reboot)")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return parseFail(err)
@@ -40,6 +41,9 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, err)
 	}
 	if o.Labels, err = parseLabels(labels); err != nil {
+		return fail(stderr, err)
+	}
+	if err := validateRestart(o.Restart, o.Remote); err != nil {
 		return fail(stderr, err)
 	}
 	if follow && o.Remote {

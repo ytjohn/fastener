@@ -31,6 +31,31 @@ type launchOptions struct {
 	MaxRuntime, Grace  time.Duration
 	// Remote starts the profile's [remote] bridge instead of a headless run.
 	Remote bool
+	// Restart is the restart policy recorded in session.json: "no" (or "")
+	// or "on-reboot" (remote bridges only, validated by validateRestart).
+	Restart string
+}
+
+// Restart policies (session.json "restart").
+const (
+	restartNo       = "no"
+	restartOnReboot = "on-reboot"
+)
+
+// validateRestart checks --restart. on-reboot is for remote bridges only in
+// v0.3: a headless prompt may have side effects, so it is never rerun, and
+// interactive sessions arrive in v0.4.
+func validateRestart(policy string, remote bool) error {
+	switch policy {
+	case "", restartNo:
+		return nil
+	case restartOnReboot:
+		if !remote {
+			return usagef("--restart on-reboot needs --remote: a headless session is never rerun after a reboot")
+		}
+		return nil
+	}
+	return usagef("unknown --restart %q (want no or on-reboot)", policy)
 }
 
 // stepError tags a pre-flight error with the `check` step it belongs to.
@@ -190,6 +215,13 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 	if err := validateEnv(o.Env); err != nil {
 		return nil, err
 	}
+	if err := validateRestart(o.Restart, o.Remote); err != nil {
+		return nil, err
+	}
+	restart := o.Restart
+	if restart == "" {
+		restart = restartNo
+	}
 	var prompt, source string
 	if o.Remote {
 		// A bridge is driven from elsewhere; it never takes a prompt.
@@ -251,7 +283,7 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 		SchemaVersion: session.SchemaVersion, Name: name, CreatedAt: now, Kind: kind, Remote: o.Remote,
 		Backend: o.Backend, Cwd: cwd, PromptSource: source, Permissions: p.perms, Model: o.Model,
 		MaxRuntime: session.Duration(o.MaxRuntime), Grace: session.Duration(o.Grace),
-		EnvBase: p.envBase, Env: o.Env, EnvFile: p.envFile, Labels: o.Labels, Restart: "no",
+		EnvBase: p.envBase, Env: o.Env, EnvFile: p.envFile, Labels: o.Labels, Restart: restart,
 	}
 	plan := session.Plan{
 		SchemaVersion: session.SchemaVersion, Generation: 1,
