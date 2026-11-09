@@ -25,12 +25,13 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	fs.Var(&labels, "label", "KEY=VALUE label (repeatable)")
 	fs.BoolVar(&follow, "follow", false, "follow output after launch")
 	fs.BoolVar(&asJSON, "json", false, "print the session as JSON")
+	fs.BoolVar(&o.Remote, "remote", false, "start the backend's remote bridge ([remote] in its profile) instead of a headless run; takes no prompt")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return parseFail(err)
 	}
 	if len(pos) != 1 {
-		fmt.Fprintln(stderr, "usage: fastener run <backend> --cwd DIR (--prompt TEXT | --prompt-file F) [flags]")
+		fmt.Fprintln(stderr, "usage: fastener run <backend> --cwd DIR (--prompt TEXT | --prompt-file F | --remote) [flags]")
 		return exitUsage
 	}
 	o.Backend, o.Env = pos[0], env

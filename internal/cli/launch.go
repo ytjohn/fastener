@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,6 +29,8 @@ type launchOptions struct {
 	Env                []string
 	Labels             map[string]string
 	MaxRuntime, Grace  time.Duration
+	// Remote starts the profile's [remote] bridge instead of a headless run.
+	Remote bool
 }
 
 // stepError tags a pre-flight error with the `check` step it belongs to.
@@ -57,8 +60,9 @@ func (p *prepared) mergedEnv(extra []string) []string {
 	return runenv.Merge(p.envBase, p.fileEnv, extra)
 }
 
-// prepare runs every check that can fail without side effects.
-func prepare(o launchOptions, prompt string) (*prepared, error) {
+// prepare runs every check that can fail without side effects. name is the
+// session name, used by a remote bridge's {name} placeholder.
+func prepare(o launchOptions, prompt, name string) (*prepared, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, inStep("profile", err)
@@ -68,7 +72,16 @@ func prepare(o launchOptions, prompt string) (*prepared, error) {
 		return nil, inStep("profile", err)
 	}
 	perms := prof.ResolvePermissions(o.Permissions, cfg.DefaultPermissions)
-	r, err := prof.RenderHeadless(profile.Request{Permissions: perms, Model: o.Model, Prompt: prompt})
+	req := profile.Request{Permissions: perms, Model: o.Model, Prompt: prompt, Name: name}
+	var r profile.Rendered
+	if o.Remote {
+		r, err = prof.RenderRemote(req)
+		if errors.Is(err, profile.ErrNoRemote) {
+			err = usagef("%v", err) // no silent fallback to a headless run
+		}
+	} else {
+		r, err = prof.RenderHeadless(req)
+	}
 	if err != nil {
 		return nil, inStep("profile", err)
 	}
@@ -164,18 +177,29 @@ func launch(o launchOptions, stderr io.Writer) (*session.View, error) {
 	if err := validateEnv(o.Env); err != nil {
 		return nil, err
 	}
-	prompt, source := o.Prompt, "inline"
-	if o.PromptFile != "" {
-		if prompt != "" {
-			return nil, usagef("--prompt and --prompt-file are mutually exclusive")
+	var prompt, source string
+	if o.Remote {
+		// A bridge is driven from elsewhere; it never takes a prompt.
+		if o.Prompt != "" || o.PromptFile != "" {
+			return nil, usagef("--prompt and --prompt-file cannot be used with --remote")
 		}
-		var err error
-		if prompt, source, err = readPromptFile(o.PromptFile, os.Stdin); err != nil {
-			return nil, err
+		if o.Model != "" {
+			return nil, usagef("--model cannot be used with --remote")
 		}
-	}
-	if strings.TrimSpace(prompt) == "" {
-		return nil, usagef("a prompt is required (--prompt or --prompt-file)")
+	} else {
+		prompt, source = o.Prompt, "inline"
+		if o.PromptFile != "" {
+			if prompt != "" {
+				return nil, usagef("--prompt and --prompt-file are mutually exclusive")
+			}
+			var err error
+			if prompt, source, err = readPromptFile(o.PromptFile, os.Stdin); err != nil {
+				return nil, err
+			}
+		}
+		if strings.TrimSpace(prompt) == "" {
+			return nil, usagef("a prompt is required (--prompt or --prompt-file)")
+		}
 	}
 	if o.Cwd == "" {
 		return nil, usagef("--cwd is required")
@@ -187,7 +211,12 @@ func launch(o launchOptions, stderr io.Writer) (*session.View, error) {
 	if o.Name != "" && !session.ValidName(o.Name) {
 		return nil, usagef("invalid --name %q", o.Name)
 	}
-	p, err := prepare(o, prompt)
+	// The name is chosen before rendering: a bridge's arguments may carry it.
+	name := o.Name
+	if name == "" {
+		name = session.GenerateName(o.Backend)
+	}
+	p, err := prepare(o, prompt, name)
 	if err != nil {
 		return nil, err
 	}
@@ -195,17 +224,17 @@ func launch(o launchOptions, stderr io.Writer) (*session.View, error) {
 	if err != nil {
 		return nil, err
 	}
-	name := o.Name
-	if name == "" {
-		name = session.GenerateName(o.Backend)
-	}
 	d, err := session.Create(name)
 	if err != nil {
 		return nil, inStep("launch", err)
 	}
 	now := time.Now().UTC()
+	kind := session.KindHeadless
+	if o.Remote {
+		kind = session.KindRemote
+	}
 	sess := session.Session{
-		SchemaVersion: session.SchemaVersion, Name: name, CreatedAt: now, Kind: "headless",
+		SchemaVersion: session.SchemaVersion, Name: name, CreatedAt: now, Kind: kind, Remote: o.Remote,
 		Backend: o.Backend, Cwd: cwd, PromptSource: source, Permissions: p.perms, Model: o.Model,
 		MaxRuntime: session.Duration(o.MaxRuntime), Grace: session.Duration(o.Grace),
 		EnvBase: p.envBase, Env: o.Env, EnvFile: p.envFile, Labels: o.Labels, Restart: "no",
@@ -224,9 +253,11 @@ func launch(o launchOptions, stderr io.Writer) (*session.View, error) {
 		{d.PlanPath(1), plan},
 		{d.StatusPath(), session.Status{SchemaVersion: session.SchemaVersion, State: session.StateStarting, Generation: 1, UpdatedAt: now}},
 	}
-	if err := session.WriteFileAtomic(d.PromptPath(), []byte(prompt), 0o600); err != nil {
-		os.RemoveAll(string(d))
-		return nil, inStep("launch", err)
+	if !o.Remote {
+		if err := session.WriteFileAtomic(d.PromptPath(), []byte(prompt), 0o600); err != nil {
+			os.RemoveAll(string(d))
+			return nil, inStep("launch", err)
+		}
 	}
 	for _, w := range writes {
 		if err := session.WriteJSON(w.path, w.v); err != nil {

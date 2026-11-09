@@ -17,9 +17,24 @@ skip = ["--dangerously-skip-permissions"]
 [resume]
 args = ["--resume", "{conversation_id}"]
 
+# A remote bridge (`fastener run claude --remote`): `claude remote-control`
+# runs headless and is driven from claude.ai/code or the mobile app.
+# remote-control takes --permission-mode (acceptEdits, auto,
+# bypassPermissions, default, dontAsk, plan) but not
+# --dangerously-skip-permissions, so skip maps to bypassPermissions.
+[remote]
+args              = ["remote-control", "--name", "{name}"]
+parser            = "claude-remote"
+untrusted_pattern = '(?i)workspace not trusted'
+dedupe_frames     = true
+
+[remote.permissions]
+skip = ["--permission-mode", "bypassPermissions"]
+
 [check]
 version_args = ["--version"]
 diagnose = [
   { match = '(?i)not logged in|please run /login|invalid api key|authentication_error|oauth token has expired', hint = "auth: run `claude` interactively and log in (/login)" },
+  { match = '(?i)workspace not trusted', hint = "untrusted folder: authorize it with `fastener authorize claude-folder-trust <dir>`, or run `claude` there once and accept the trust dialog" },
   { match = '(?i)not_found_error|model[^\n]{0,40}\b(not found|does not exist|not available)\b', hint = "model unavailable: pass a valid --model" },
 ]

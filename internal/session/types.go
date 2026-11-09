@@ -30,6 +30,12 @@ const (
 	EndedByLaunchFailed = "launch-failed"
 )
 
+// Session kinds (session.json "kind").
+const (
+	KindHeadless = "headless"
+	KindRemote   = "remote" // a remote bridge (run --remote)
+)
+
 // Duration serialises as a Go duration string ("40m").
 type Duration time.Duration
 
@@ -65,7 +71,7 @@ type Session struct {
 	Kind          string            `json:"kind"`
 	Backend       string            `json:"backend"`
 	Cwd           string            `json:"cwd"`
-	PromptSource  string            `json:"prompt_source"`
+	PromptSource  string            `json:"prompt_source"` // "" for a remote bridge
 	Permissions   string            `json:"permissions"`
 	Model         string            `json:"model,omitempty"`
 	MaxRuntime    Duration          `json:"max_runtime,omitempty"`

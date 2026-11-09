@@ -241,9 +241,10 @@ func TestBuiltinDiagnosePatterns(t *testing.T) {
 		"a report about the unauthorized access of customer data was discussed",
 	}
 	positive := map[string][]string{
-		"codex":  {"HTTP 401 Unauthorized", "status: 401", "Not logged in"},
-		"pi":     {"HTTP 401 from provider", "status: 404", "status code 404"},
-		"claude": {"Invalid API key", `{"type":"not_found_error"}`, "model claude-x does not exist"},
+		"codex": {"HTTP 401 Unauthorized", "status: 401", "Not logged in"},
+		"pi":    {"HTTP 401 from provider", "status: 404", "status code 404"},
+		"claude": {"Invalid API key", `{"type":"not_found_error"}`, "model claude-x does not exist",
+			"Error: Workspace not trusted. Please run `claude` in /x first to review and accept the workspace trust dialog."},
 	}
 	for _, name := range []string{"claude", "codex", "pi"} {
 		p, err := Load(name, t.TempDir())
