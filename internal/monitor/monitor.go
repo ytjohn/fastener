@@ -48,6 +48,10 @@ const (
 )
 
 type monitor struct {
+	// maxHeld is the longest partial line pumpDedupe has held, for tests
+	// that check redraws are never accumulated into one line.
+	maxHeld int
+
 	d    session.Dir
 	gen  int
 	sess session.Session
@@ -633,6 +637,9 @@ func (m *monitor) pumpDedupe(r io.Reader, out io.Writer, p parser.Parser) {
 			overlong, line = true, nil
 		default:
 			line = appendCapped(line, seg)
+			if len(line) > m.maxHeld {
+				m.maxHeld = len(line)
+			}
 		}
 	}
 	for {

@@ -180,10 +180,12 @@ func TestPumpDedupeCarriageReturn(t *testing.T) {
 	in := io.MultiReader(&repeatReader{s: []byte(redraw), n: n}, strings.NewReader("\r\nbye\n"))
 	var out bytes.Buffer
 	peak := heapPeak(func() { m.pump(in, &out, rp) })
-	t.Logf("peak heap growth %d KB for %d MB of redraws", peak>>10, total>>20)
-	// Holding the redraws as one line would take at least 16 MB.
-	if peak > 12<<20 {
-		t.Errorf("heap grew by %d MB while pumping %d MB of redraws; memory is not bounded", peak>>20, total>>20)
+	// Heap sampling is informational only: its accounting varies by platform
+	// and under -race (it read 22 MB on macOS CI, 2-3 MB on Linux). The bound
+	// that matters is checked directly: no redraw was held as one long line.
+	t.Logf("peak live heap growth %d KB, longest held line %d bytes, for %d MB of redraws", peak>>10, m.maxHeld, total>>20)
+	if m.maxHeld > 4*len(redraw) {
+		t.Errorf("pump held a %d-byte line while pumping %d MB of %d-byte redraws; lone \\r is not ending lines", m.maxHeld, total>>20, len(redraw))
 	}
 	if m.st.RemoteURL != "https://claude.ai/code?environment=env_cr_01" || m.st.ParseErrors != 0 {
 		t.Errorf("fields = %+v", m.st.Fields)
@@ -280,9 +282,15 @@ func heapPeak(f func()) uint64 {
 	res := make(chan uint64)
 	go func() {
 		var peak uint64
-		t := time.NewTicker(2 * time.Millisecond)
+		// Sample the live heap: collect first, so garbage the pump has
+		// already dropped (the parser's per-line regex copies) does not
+		// count. A held 16 MB line would still be live at some sample.
+		// HeapAlloc without a collection depends on GC timing and failed
+		// on CI's runner while passing locally.
+		t := time.NewTicker(20 * time.Millisecond)
 		defer t.Stop()
 		for {
+			runtime.GC()
 			var ms runtime.MemStats
 			runtime.ReadMemStats(&ms)
 			if ms.HeapAlloc > base && ms.HeapAlloc-base > peak {
