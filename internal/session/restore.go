@@ -103,11 +103,15 @@ func rotate(cur, old string) error {
 // the session lock and refuses (ErrMonitorAlive) while a recorded monitor may
 // be alive; unlike Finalize it also relabels an exited record, which is what a
 // relaunched generation that ended at once (an untrusted folder) leaves. The
-// exit facts of such a record are kept.
+// exit facts of such a record are kept; the stale remote_url and
+// remote_sessions are cleared.
 func MarkRestoreFailed(d Dir, reason, msg string) error {
 	_, err := finalize(d, true, func(s *Status) {
 		now := time.Now().UTC()
 		s.State, s.RestoreReason, s.Error = StateRestoreFailed, reason, msg
+		// The bridge URL and sessions describe a bridge that is not running
+		// and was not relaunched; do not leave them looking live.
+		s.RemoteURL, s.RemoteSessions = "", nil
 		if s.EndedAt == nil {
 			s.EndedAt = &now
 		}

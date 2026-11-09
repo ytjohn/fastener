@@ -134,27 +134,80 @@ func LoadFull(name string, handshake time.Duration) (*View, error) {
 	return v, nil
 }
 
-// FindOrphans fills Orphans with marked processes still alive in a lost
-// session, or in an exited session whose agent left descendants behind (they
-// are tracked, never killed implicitly). It is a no-op for other states, and
-// for exited sessions that never spawned an agent.
+// FindOrphans fills Orphans with marked processes still alive:
+//   - lost: any process carrying the current generation's marker, in any
+//     process group (MarkedAnyGroup), the same scan restore uses, so what stop
+//     cleans up is what blocks a restore;
+//   - restore-failed: the marker in the recorded process group, or in any
+//     group when none was recorded;
+//   - exited, when the agent was spawned: the marker in its process group
+//     (descendants it left behind are tracked, never killed implicitly).
+//
+// It is a no-op for other states, and for exited sessions that never spawned
+// an agent.
 func (v *View) FindOrphans() {
 	v.OrphanErr = ""
-	scan := v.State == StateLost || (v.State == StateExited && v.Status.PGID > 0)
-	if !scan {
-		return
-	}
-	if v.Plan == nil {
-		if v.Status.PGID > 0 {
+	var ids []proc.Identity
+	var err error
+	switch {
+	case v.State == StateLost, v.State == StateRestoreFailed && v.Status.PGID <= 0:
+		ids, err = v.MarkedAnyGroup()
+	case v.State == StateRestoreFailed, v.State == StateExited && v.Status.PGID > 0:
+		if v.Plan == nil {
 			v.OrphanErr = "no readable plan for the current generation"
+			return
 		}
+		ids, err = proc.FindMarked(v.Status.PGID, v.Plan.Marker, v.Status.BootID)
+		if err != nil {
+			err = fmt.Errorf("process scan failed: %w", err)
+		}
+	default:
 		return
 	}
-	ids, err := proc.FindMarked(v.Status.PGID, v.Plan.Marker, v.Status.BootID)
 	v.Orphans = ids
 	if err != nil {
-		v.OrphanErr = "process scan failed: " + err.Error()
+		v.OrphanErr = err.Error()
 	}
+}
+
+// currentBoot is proc.BootID; replaced in tests.
+var currentBoot = proc.BootID
+
+// RecordedBoot is the boot the current generation ran in: status.json's
+// boot_id, else the launcher record's ("" if neither).
+func (v *View) RecordedBoot() string {
+	if v.Status.BootID != "" {
+		return v.Status.BootID
+	}
+	if v.Launcher != nil {
+		return v.Launcher.BootID
+	}
+	return ""
+}
+
+// MarkedAnyGroup returns the live processes, in any process group, that carry
+// the current generation's marker. When the generation recorded a previous
+// boot nothing is scanned: nothing survives a reboot. Without a readable plan
+// it is an error if the generation spawned anything, else nothing.
+func (v *View) MarkedAnyGroup() ([]proc.Identity, error) {
+	if v.Plan == nil || v.Plan.Marker == "" {
+		if v.Status.PGID > 0 || v.Status.Agent != nil {
+			return nil, errors.New("no readable plan for the current generation")
+		}
+		return nil, nil
+	}
+	cur, err := currentBoot()
+	if err != nil {
+		return nil, fmt.Errorf("cannot read the boot ID: %w", err)
+	}
+	if b := v.RecordedBoot(); b != "" && b != cur {
+		return nil, nil
+	}
+	ids, err := proc.FindMarkedAnyGroup(v.Plan.Marker)
+	if err != nil {
+		return ids, fmt.Errorf("process scan failed: %w", err)
+	}
+	return ids, nil
 }
 
 // planned is when the current generation was planned: the plan's planned_at
