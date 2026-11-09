@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -161,5 +162,61 @@ func TestRemoteWait(t *testing.T) {
 	c, err := Load()
 	if err != nil || c.RemoteWaitDuration() != 40*time.Second {
 		t.Fatalf("remote_wait = %v, %v", c.RemoteWaitDuration(), err)
+	}
+}
+
+func TestTrustDirs(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FASTENER_CONFIG_DIR", dir)
+	writeCfg(t, dir, "trust_dirs = [\"/srv/a\", \"/srv/b/\"]\n")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.TrustDirs) != 2 || !c.InTrustDirs("/srv/a") || !c.InTrustDirs("/srv/b") || c.InTrustDirs("/srv") {
+		t.Fatalf("got %+v", c.TrustDirs)
+	}
+	if !c.Allowlisted("/x", []Authorization{{Folder: "/x"}}) || c.Allowlisted("/y", []Authorization{{Folder: "/x"}}) {
+		t.Fatal("Allowlisted")
+	}
+	writeCfg(t, dir, "trust_dirs = [\"rel/dir\"]\n")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("relative trust_dirs: %v", err)
+	}
+}
+
+func TestAuthorizationsConcurrentUpdates(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("FASTENER_CONFIG_DIR", filepath.Join(dir, "cfg"))
+	if recs, err := LoadAuthorizations(); err != nil || recs != nil {
+		t.Fatalf("missing file: %v %v", recs, err)
+	}
+	const n = 20
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			errs <- UpdateAuthorizations(func(r []Authorization) ([]Authorization, error) {
+				return append(r, Authorization{Folder: filepath.Join("/f", strconv.Itoa(i)), AuthorizedAt: time.Now()}), nil
+			})
+		}(i)
+	}
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	recs, err := LoadAuthorizations()
+	if err != nil || len(recs) != n {
+		t.Fatalf("%d records, %v", len(recs), err)
+	}
+	fi, _ := os.Stat(AuthorizationsPath())
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", fi.Mode().Perm())
+	}
+	if err := os.WriteFile(AuthorizationsPath(), []byte(`{"schema_version": 99, "authorizations": []}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadAuthorizations(); err == nil {
+		t.Fatal("newer schema accepted")
 	}
 }
