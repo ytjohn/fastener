@@ -26,6 +26,8 @@ type Launcher interface {
 var (
 	available = systemd.Available
 	linger    = systemd.Linger
+	// availableBooting also accepts a manager that is still starting (boot).
+	availableBooting = systemd.AvailableOrStarting
 )
 
 // Select resolves the launcher preference ("", "auto", "setsid", "systemd").
@@ -36,6 +38,18 @@ var (
 // timeout. An explicit systemd is an error without a user manager, and works
 // without linger but warns on warn that sessions will stop at logout.
 func Select(pref string, warn io.Writer) (Launcher, error) {
+	return selectWith(pref, warn, available)
+}
+
+// SelectRestore is Select for `fastener restore`, which runs at boot while
+// the user manager may still be starting: a manager whose state is
+// "starting" counts as usable (it accepts transient units then), so neither
+// an explicit systemd launcher fails nor auto silently falls back to setsid.
+func SelectRestore(pref string, warn io.Writer) (Launcher, error) {
+	return selectWith(pref, warn, availableBooting)
+}
+
+func selectWith(pref string, warn io.Writer, available func() (bool, error)) (Launcher, error) {
 	switch pref {
 	case "", "auto":
 		if ok, _ := available(); ok {
