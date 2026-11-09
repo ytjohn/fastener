@@ -10,6 +10,7 @@
 //	FAKE_IGNORE_TERM=1         ignore SIGTERM
 //	FAKE_STDERR=text           print text to stderr first
 //	FAKE_GRANDCHILD=1          start a long-lived child in the same process group
+//	                           (also in bridge mode)
 //	FAKE_GRANDCHILD_PIDFILE=p  write that child's pid to p
 //	FAKE_GRANDCHILD_WRITES=d,… the child inherits stdout (holding the pipe open)
 //	                           and prints "grandchild-<i>" at each delay d after it starts
@@ -74,6 +75,7 @@ func main() {
 		os.Exit(1)
 	}
 	if os.Getenv("FAKE_BRIDGE") == "1" {
+		grandchild()
 		bridge()
 		return
 	}
@@ -84,20 +86,7 @@ func main() {
 	if s := os.Getenv("FAKE_STDERR"); s != "" {
 		fmt.Fprintln(os.Stderr, s)
 	}
-	if os.Getenv("FAKE_GRANDCHILD") == "1" {
-		c := exec.Command(os.Args[0])
-		c.Env = append(os.Environ(), "FAKE_ROLE=grandchild")
-		if os.Getenv("FAKE_GRANDCHILD_WRITES") != "" {
-			c.Stdout = os.Stdout
-		}
-		if err := c.Start(); err != nil {
-			fmt.Fprintln(os.Stderr, "grandchild:", err)
-			os.Exit(90)
-		}
-		if p := os.Getenv("FAKE_GRANDCHILD_PIDFILE"); p != "" {
-			_ = os.WriteFile(p, []byte(strconv.Itoa(c.Process.Pid)), 0o644)
-		}
-	}
+	grandchild()
 	const sid = "fake-session-0001"
 	initEv := map[string]any{"type": "system", "subtype": "init", "session_id": sid}
 	if m := os.Getenv("FAKE_MODEL"); m != "" {
@@ -138,6 +127,26 @@ func main() {
 	})
 	code, _ := strconv.Atoi(os.Getenv("FAKE_EXIT"))
 	os.Exit(code)
+}
+
+// grandchild starts a long-lived child in the same process group when
+// FAKE_GRANDCHILD=1 (headless and bridge modes alike).
+func grandchild() {
+	if os.Getenv("FAKE_GRANDCHILD") != "1" {
+		return
+	}
+	c := exec.Command(os.Args[0])
+	c.Env = append(os.Environ(), "FAKE_ROLE=grandchild")
+	if os.Getenv("FAKE_GRANDCHILD_WRITES") != "" {
+		c.Stdout = os.Stdout
+	}
+	if err := c.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, "grandchild:", err)
+		os.Exit(90)
+	}
+	if p := os.Getenv("FAKE_GRANDCHILD_PIDFILE"); p != "" {
+		_ = os.WriteFile(p, []byte(strconv.Itoa(c.Process.Pid)), 0o644)
+	}
 }
 
 func envDur(name string, def time.Duration) time.Duration {

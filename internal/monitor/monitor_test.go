@@ -475,3 +475,40 @@ func TestNonFinalWriteIsNotRetried(t *testing.T) {
 		t.Fatalf("calls %d closed %v", calls, m.closed)
 	}
 }
+
+// TestRunSecondGeneration: a restored generation runs although a stop
+// request for generation 1 is still on disk, and its status is built fresh
+// (nothing carried over from generation 1's record).
+func TestRunSecondGeneration(t *testing.T) {
+	bin := buildFake(t)
+	d := setupRun(t, []string{bin}, t.TempDir(), nil, 0)
+	old := time.Now().Add(-time.Hour).UTC()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(session.WriteJSON(d.StatusPath(), session.Status{SchemaVersion: 1, State: session.StateExited, Generation: 1,
+		EndedBy: session.EndedByStop, EndedAt: &old, Error: "generation 1"}))
+	must(session.WriteJSON(d.StopPath(), session.StopRequest{SchemaVersion: 1, Generation: 1, By: "stop"}))
+	must(session.WriteJSON(d.PlanPath(2), session.Plan{SchemaVersion: 1, Generation: 2, Argv: []string{bin},
+		PromptMode: "stdin", Parser: "claude-stream-json", Marker: "e2e:2:n"}))
+	m, err := load(d, 2, log.New(os.Stderr, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int, 1)
+	go func() { done <- m.run(make(chan os.Signal, 4)) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("generation 2 did not finish")
+	}
+	var st session.Status
+	must(session.ReadJSON(d.StatusPath(), &st))
+	if st.Generation != 2 || st.State != session.StateExited || st.EndedBy != session.EndedByExit || st.Error != "" ||
+		st.FinalMessage != "pong" || st.EndedAt == nil || !st.EndedAt.After(old) {
+		t.Errorf("generation 2 status = %+v", st)
+	}
+}

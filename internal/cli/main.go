@@ -25,7 +25,7 @@ const (
 const usageText = `usage: fastener <command> [arguments]
 
 commands:
-  run <backend>      launch a headless session (detached)
+  run <backend>      launch a headless session or a remote bridge (detached)
   ps                 list sessions
   inspect <name>     show a session's state and facts
   logs <name>        print a session's output
@@ -36,6 +36,7 @@ commands:
   check <backend>    prove a backend works end to end
   backends           list backend profiles
   authorize          trust a folder for Claude remote bridges (edits Claude's config)
+  restore [name...]  relaunch lost --restart on-reboot bridges (after a reboot)
   version            print the version
 
 Run "fastener <command> -h" for a command's flags.
@@ -74,6 +75,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return cmdBackends(rest, stdout, stderr)
 	case "authorize":
 		return cmdAuthorize(rest, stdout, stderr)
+	case "restore":
+		return cmdRestore(rest, stdout, stderr)
 	case "version":
 		return cmdVersion(rest, stdout, stderr)
 	case "help", "-h", "--help":

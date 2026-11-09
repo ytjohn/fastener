@@ -145,6 +145,10 @@ func renderInspect(stdout io.Writer, v *session.View, out inspectOut) {
 	}
 	row("signal", s.Signal)
 	row("error", s.Error)
+	row("restore_reason", s.RestoreReason)
+	if g := v.Generation(); g > 1 {
+		row("generation", fmt.Sprint(g))
+	}
 	row("conversation_id", s.ConversationID)
 	row("final_message", truncate(s.FinalMessage, 200))
 	row("served_model", s.Model)

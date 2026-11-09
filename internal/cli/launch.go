@@ -311,26 +311,38 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 			return nil, inStep("launch", err)
 		}
 	}
-	rec, err := l.Start(d, 1)
+	return startGeneration(d, name, 1, l, p.cfg.Handshake(), stderr)
+}
+
+// startGeneration starts generation gen's monitor through l (its plan and a
+// starting status.json are already written), records the launcher and runs
+// the handshake. If the monitor cannot be started the generation is finalized
+// as launch-failed; a first generation whose view then cannot be loaded is
+// removed, so no unreported directory is left behind (a restored session is
+// never removed).
+func startGeneration(d session.Dir, name string, gen int, l launcher.Launcher, hs time.Duration, stderr io.Writer) (*session.View, error) {
+	rec, err := l.Start(d, gen)
 	if err != nil {
 		_, _ = session.Finalize(d, func(s *session.Status) {
 			t := time.Now().UTC()
 			s.State, s.EndedBy, s.EndedAt, s.Error = session.StateExited, session.EndedByLaunchFailed, &t, "monitor: "+err.Error()
 		})
 		// Return the (finalized) view too, so `run --json` can print it.
-		nv, lerr := session.LoadFull(name, p.cfg.Handshake())
+		nv, lerr := session.LoadFull(name, hs)
 		if lerr != nil {
-			// No view to hand back: do not leave an unreported directory behind.
-			os.RemoveAll(string(d))
+			if gen == 1 {
+				// No view to hand back: do not leave an unreported directory behind.
+				os.RemoveAll(string(d))
+			}
 			nv = nil
 		}
 		return nv, inStep("launch", fmt.Errorf("session %s: start monitor: %w", name, err))
 	}
-	if err := session.WriteJSON(d.LauncherPath(1), rec); err != nil {
+	if err := session.WriteJSON(d.LauncherPath(gen), rec); err != nil {
 		// Not fatal: status.json carries the monitor identity once it starts.
 		fmt.Fprintf(stderr, "fastener: warning: session %s: cannot write launcher record: %v\n", name, err)
 	}
-	return handshake(name, p.cfg.Handshake())
+	return handshake(name, hs)
 }
 
 // handshakeLostAction decides what the handshake does with a session whose
