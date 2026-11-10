@@ -159,10 +159,9 @@ func (a *attachProc) rawDuring() {
 	a.t.Fatal("attach never put the terminal in raw mode")
 }
 
-func runningPTY(t *testing.T, h *harness) {
+func runningPTY(t *testing.T, h *harness, plan ...func(*session.Plan)) {
 	t.Helper()
-	d := startPTYSession(t, h, "setsid")
-	_ = d
+	startPTYSession(t, h, "setsid", plan...)
 	poll(t, "running", func() bool { return inspectPTY(t, h).State == session.StateRunning })
 }
 
@@ -305,5 +304,113 @@ func TestAttachRefusals(t *testing.T) {
 	h.ok("stop", "pty1")
 	if _, e, code := h.cmd("attach", "pty1"); code != 1 || !strings.Contains(e, "not running") {
 		t.Fatalf("exited session: exit %d: %s", code, e)
+	}
+}
+
+// paste writes n bytes of input to the terminal (the agent never reads
+// them) and waits until attach has read them all.
+func (a *attachProc) paste(n int) {
+	a.t.Helper()
+	chunk := bytes.Repeat([]byte("p"), 64<<10)
+	done := make(chan error, 1)
+	go func() {
+		for sent := 0; sent < n; sent += len(chunk) {
+			if _, err := a.master.Write(chunk); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			a.t.Fatal(err)
+		}
+	case <-time.After(20 * time.Second):
+		a.t.Fatal("attach stopped reading its terminal during the paste")
+	}
+}
+
+// TestAttachNonReadingAgent: an agent in raw mode that never reads its
+// terminal. A large paste fills every queue on the way, yet attach keeps
+// reading its terminal: the detach key still detaches (restoring the
+// terminal and reporting what was discarded), and so does SIGTERM.
+func TestAttachNonReadingAgent(t *testing.T) {
+	h := newHarness(t)
+	runningPTY(t, h)
+	a := startAttach(t, h, "pty1", "--quiet")
+	a.waitOutput("winch=30x100")
+	a.typeIn("stall\r")
+	a.waitOutput("stalled")
+	a.paste(16 << 20)
+	a.typeIn("\x1d")
+	if code := a.wait(); code != 0 {
+		t.Fatalf("detach after the paste exited %d:\n%.2000q", code, a.output())
+	}
+	a.termiosRestored()
+	if !strings.Contains(a.output(), "bytes of input were discarded") {
+		t.Fatalf("no discard note:\n%.2000q", a.output())
+	}
+
+	b := startAttach(t, h, "pty1", "--quiet")
+	time.Sleep(200 * time.Millisecond) // attached (the stalled agent does not redraw)
+	b.rawDuring()
+	b.paste(16 << 20)
+	start := time.Now()
+	if err := b.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if code := b.wait(); code != 128+15 {
+		t.Fatalf("SIGTERM after the paste exited %d:\n%.2000q", code, b.output())
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("SIGTERM took %v", d)
+	}
+	b.termiosRestored()
+	if v := inspectPTY(t, h); v.State != session.StateRunning {
+		t.Fatalf("session ended: %+v", v)
+	}
+}
+
+// TestAttachExitCodeMatchesWait: an agent that reports an error but exits
+// 0 makes both attach and wait exit 125.
+func TestAttachExitCodeMatchesWait(t *testing.T) {
+	h := newHarness(t)
+	runningPTY(t, h, func(p *session.Plan) { p.Parser = "claude-stream-json" })
+	a := startAttach(t, h, "pty1", "--quiet")
+	a.waitOutput("winch=30x100")
+	a.typeIn("result-error\r")
+	code := a.wait()
+	a.termiosRestored()
+	_, e, wcode := h.cmd("wait", "pty1")
+	if code != 125 || wcode != 125 {
+		t.Fatalf("attach exited %d, wait %d (%s); want 125 for both:\n%q", code, wcode, e, a.output())
+	}
+}
+
+// TestAttachResetsTerminalModes: after a detach the terminal gets the reset
+// sequence (alternate screen off, cursor shown, mouse and bracketed paste
+// off), and no agent output follows the final line.
+func TestAttachResetsTerminalModes(t *testing.T) {
+	h := newHarness(t)
+	runningPTY(t, h)
+	a := startAttach(t, h, "pty1", "--quiet")
+	a.waitOutput("winch=30x100")
+	a.typeIn("flood 900000\r") // still streaming at the detach; under the 1 MiB slow limit
+	a.waitOutput("xxxx")
+	a.typeIn("\x1d")
+	if code := a.wait(); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	time.Sleep(100 * time.Millisecond)
+	out := a.output()
+	reset := strings.LastIndex(out, "\x1b[?1049l\x1b[?25h")
+	final := strings.LastIndex(out, "[fastener: detached from pty1]")
+	if reset < 0 || final < reset {
+		t.Fatalf("reset at %d, final line at %d", reset, final)
+	}
+	if tail := out[final:]; strings.Contains(tail, "xxx") {
+		t.Fatalf("agent output after the final line: %.200q", tail)
 	}
 }
