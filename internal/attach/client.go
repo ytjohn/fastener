@@ -125,6 +125,18 @@ func (c *Client) Detach() error {
 	return err
 }
 
+// DetachWithin is Detach bounded by d: the write deadline is set before
+// anything else, so even a Send blocked on a full connection gives up (and
+// releases the frame lock) within d. The connection is closed in any case.
+func (c *Client) DetachWithin(d time.Duration) error {
+	_ = c.conn.SetWriteDeadline(time.Now().Add(d))
+	err := c.write(TypeDetach, nil)
+	if cerr := c.conn.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
 // Close closes the connection without a detach frame (the server treats it
 // the same way).
 func (c *Client) Close() error { return c.conn.Close() }

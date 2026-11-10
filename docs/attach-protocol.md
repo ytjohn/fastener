@@ -59,7 +59,7 @@ is a protocol error. Integers in payloads are big-endian unsigned 16-bit
 | 3 | `data` | both | terminal bytes: pty output (server → client) or input (client → server) |
 | 4 | `resize` | client → server | `rows u16`, `cols u16`, both non-zero; exactly 4 bytes |
 | 5 | `detach` | client → server | empty: the client leaves; the session keeps running |
-| 6 | `exit` | server → client | JSON `{"ended_by", "exit_code"?, "signal"?, "error"?}`, as in `status.json`; the server then closes |
+| 6 | `exit` | server → client | JSON `{"ended_by", "exit_code"?, "signal"?, "error"?, "agent_error"?}`, as in `status.json`; the server then closes |
 | 7 | `error` | server → client | JSON `{"code", "message", "versions"?}`; the server then closes |
 
 Error codes: `version` (the hello's version is not one the server speaks;

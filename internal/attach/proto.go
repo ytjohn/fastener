@@ -67,6 +67,9 @@ type ExitInfo struct {
 	ExitCode *int   `json:"exit_code,omitempty"`
 	Signal   string `json:"signal,omitempty"`
 	Error    string `json:"error,omitempty"`
+	// AgentError is the parser's agent_error, so a client can map the
+	// outcome exactly as `fastener wait` does.
+	AgentError *bool `json:"agent_error,omitempty"`
 }
 
 // ErrFrameTooLarge is returned for a header whose length exceeds MaxPayload.
