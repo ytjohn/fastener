@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -469,4 +470,83 @@ func TestAgentEnvPlanLayer(t *testing.T) {
 	if got["A"] != "plan" || got["B"] != "file" || got["C"] != "flag" || got["P"] != "plan" {
 		t.Fatalf("env %v", env)
 	}
+}
+
+// TestPTYConversationFinder: the monitor records the conversation the
+// plan's finder resolves, here an assigned ID whose transcript appears in a
+// synthetic Claude store (CLAUDE_CONFIG_DIR) after a while, and the
+// not-yet-written state before that.
+func TestPTYConversationFinder(t *testing.T) {
+	old := findSchedule
+	oldEvery := findEvery
+	findSchedule, findEvery = []time.Duration{50 * time.Millisecond, 200 * time.Millisecond}, 100*time.Millisecond
+	t.Cleanup(func() { findSchedule, findEvery = old, oldEvery })
+	conf := t.TempDir()
+	const sid = "11111111-2222-4333-8444-555555555555"
+	r := startPTY(t, []string{"CLAUDE_CONFIG_DIR=" + conf}, func(p *session.Plan) {
+		p.Finder, p.SessionID = "claude-transcripts", sid
+	})
+	r.running()
+	waitFor(t, "conversation_error", func() bool { return strings.Contains(r.status().ConversationError, "no transcript") })
+	if st := r.status(); st.ConversationID != "" {
+		t.Fatalf("found before it exists: %+v", st)
+	}
+	var sess session.Session
+	if err := session.ReadJSON(r.d.SessionPath(), &sess); err != nil {
+		t.Fatal(err)
+	}
+	cwd, _ := filepath.EvalSymlinks(sess.Cwd)
+	dir := filepath.Join(conf, "projects", finderKeyForTest(cwd))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "conversation_id", func() bool { return r.status().ConversationID == sid })
+	st := r.status()
+	if st.ConversationSource != "session_id" || st.ConversationError != "" {
+		t.Fatalf("status %+v", st)
+	}
+	c := r.attach(attach.Size{})
+	c.Send([]byte("exit 0\n"))
+	if fin := r.wait(); fin.ConversationID != sid || fin.ConversationSource != "session_id" {
+		t.Fatalf("final status %+v", fin)
+	}
+}
+
+// TestConversationLookupAtExit: a conversation written after the last
+// scheduled lookup is still recorded, by the lookup at exit.
+func TestConversationLookupAtExit(t *testing.T) {
+	old := findSchedule
+	findSchedule = []time.Duration{time.Hour}
+	t.Cleanup(func() { findSchedule = old })
+	conf := t.TempDir()
+	const sid = "66666666-7777-4888-9999-aaaaaaaaaaaa"
+	r := startPTY(t, []string{"CLAUDE_CONFIG_DIR=" + conf}, func(p *session.Plan) {
+		p.Finder, p.SessionID = "claude-transcripts", sid
+	})
+	r.running()
+	var sess session.Session
+	_ = session.ReadJSON(r.d.SessionPath(), &sess)
+	cwd, _ := filepath.EvalSymlinks(sess.Cwd)
+	dir := filepath.Join(conf, "projects", finderKeyForTest(cwd))
+	_ = os.MkdirAll(dir, 0o700)
+	_ = os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte("{}\n"), 0o600)
+	c := r.attach(attach.Size{})
+	c.Send([]byte("exit 0\n"))
+	if fin := r.wait(); fin.ConversationID != sid {
+		t.Fatalf("final status %+v", fin)
+	}
+}
+
+// finderKeyForTest is Claude's project key for a plain ASCII path.
+func finderKeyForTest(p string) string {
+	b := []byte(p)
+	for i, c := range b {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+			b[i] = '-'
+		}
+	}
+	return string(b)
 }

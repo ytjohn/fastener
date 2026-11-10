@@ -414,14 +414,23 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	if pt != nil {
 		pt.spawned(pid)
 	}
+	startedAt := time.Now().UTC()
 	m.update(func(s *session.Status) {
-		now := time.Now().UTC()
-		s.State, s.Agent, s.PGID, s.StartedAt = session.StateRunning, &agent, pid, &now
+		s.State, s.Agent, s.PGID, s.StartedAt = session.StateRunning, &agent, pid, &startedAt
 		if pt != nil {
 			n := pt.srv.Clients()
 			s.AttachSocket, s.AttachedClients = pt.path, &n
 		}
 	})
+	// The conversation an interactive agent writes is looked up on a
+	// schedule, and once more at exit (below).
+	conv := m.newConversationFinder(env, startedAt)
+	stopFind, findDone := make(chan struct{}), make(chan struct{})
+	if conv != nil {
+		go conv.run(stopFind, findDone)
+	} else {
+		close(findDone)
+	}
 
 	var src io.Reader = pr
 	var taps []io.Writer // each never blocks or fails
@@ -507,6 +516,11 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 		m.log.Printf("stdout still open %s after agent exit (a descendant holds it); not waiting, later output is lost", drainTimeout)
 	}
 	close(stopFlush)
+	close(stopFind)
+	<-findDone
+	if conv != nil {
+		conv.lookup() // the agent has exited: whatever it wrote is there now
+	}
 	m.finish(endedBy, func(s *session.Status) {
 		exitFacts(s, ps)
 		s.OutputTruncated = truncated

@@ -296,3 +296,55 @@ func TestRunInteractiveRemoteShortPromptKeepsDialog(t *testing.T) {
 		}
 	}
 }
+
+// TestRunInteractiveConversationID: a profile that assigns the session ID
+// passes a fresh UUID, records it in the plan, and the monitor's finder
+// reports the conversation once the agent has written it.
+func TestRunInteractiveConversationID(t *testing.T) {
+	h := newInteractiveHarness(t)
+	h.writeProfile("fakesid", strings.Replace(fmt.Sprintf(fakeInteractiveProfile, "fakesid", fakeBin, "arg", ""),
+		"[interactive]\n", "[interactive]\nsession_id = [\"--sid\", \"{session_id}\"]\nfinder = \"claude-transcripts\"\n", 1))
+	conf := t.TempDir()
+	physical, _ := filepath.EvalSymlinks(h.work)
+	key := []byte(physical)
+	for i, c := range key {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+			key[i] = '-'
+		}
+	}
+	dir := filepath.Join(conf, "projects", string(key))
+	h.ok("run", "fakesid", "--interactive", "--cwd", h.work, "--name", "c1",
+		"--env", "CLAUDE_CONFIG_DIR="+conf, "--env", "FAKE_PTY_RUN=touchsid "+dir)
+	var v struct {
+		Plan struct {
+			Argv      []string `json:"argv"`
+			SessionID string   `json:"session_id"`
+			Finder    string   `json:"finder"`
+		} `json:"plan"`
+		Status struct {
+			ConversationID     string `json:"conversation_id"`
+			ConversationSource string `json:"conversation_source"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(h.ok("inspect", "c1", "--json")), &v); err != nil {
+		t.Fatal(err)
+	}
+	sid := v.Plan.SessionID
+	if len(sid) != 36 || v.Plan.Finder != "claude-transcripts" || !strings.Contains(strings.Join(v.Plan.Argv, " "), "--sid "+sid) {
+		t.Fatalf("plan: %+v", v.Plan)
+	}
+	var rows []struct {
+		ConversationID string `json:"conversation_id"`
+	}
+	for end := time.Now().Add(15 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		if err := json.Unmarshal([]byte(h.ok("ps", "--json")), &rows); err == nil && len(rows) == 1 && rows[0].ConversationID == sid {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatalf("ps --json never showed conversation_id %s: %+v\n%s", sid, rows, h.ok("logs", "c1"))
+		}
+	}
+	if err := json.Unmarshal([]byte(h.ok("inspect", "c1", "--json")), &v); err != nil || v.Status.ConversationSource != "session_id" {
+		t.Fatalf("inspect: %v %+v", err, v.Status)
+	}
+}

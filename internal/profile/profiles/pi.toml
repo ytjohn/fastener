@@ -21,9 +21,15 @@ parser = "pi-json"
 # pi reads its messages as positional arguments but treats one starting with
 # "@" as a file to attach, even after "--", so an initial prompt is not
 # passed; type it after attaching.
+#
+# pi --session-id <id> uses that ID for a new session (and opens it if it
+# exists), so the conversation is known exactly; the pi-sessions finder
+# confirms its file (<agent dir>/sessions/--<cwd>--/<time>_<id>.jsonl).
 [interactive]
-args   = []
-prompt = "none"
+args       = []
+prompt     = "none"
+session_id = ["--session-id", "{session_id}"]
+finder     = "pi-sessions"
 
 [options]
 model = ["--model", "{value}"]

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -113,6 +114,9 @@ func prepare(o launchOptions, prompt, name string) (*prepared, error) {
 	req := profile.Request{Permissions: perms, Model: o.Model, Prompt: prompt, Name: name}
 	var r profile.Rendered
 	if o.Interactive {
+		// A conversation ID for profiles that assign one ([interactive]
+		// session_id); unused otherwise.
+		req.SessionID = newUUID()
 		r, err = prof.RenderInteractive(req, o.Remote)
 		if errors.Is(err, profile.ErrNoInteractive) {
 			err = usagef("%v", err) // no silent fallback to a headless run
@@ -340,6 +344,7 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 		Parser: p.rendered.Parser, DedupeFrames: p.rendered.DedupeFrames, ProfileSource: p.prof.Source, ProfileSHA256: p.prof.SHA256,
 		Marker: session.NewMarker(name, 1), FastenerVersion: version.String(), PlannedAt: now,
 		URLPattern: p.rendered.URLPattern, Env: p.rendered.Env,
+		SessionID: p.rendered.SessionID, Finder: p.rendered.Finder,
 	}
 	if o.Interactive {
 		size := o.PTY
@@ -471,4 +476,15 @@ func withOrphanScan(v *session.View, name string, timeout time.Duration,
 		v.OrphanErr = "orphan scan unavailable: " + err.Error()
 	}
 	return v
+}
+
+// newUUID returns a random (version 4) UUID.
+func newUUID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err) // crypto/rand does not fail on supported platforms
+	}
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

@@ -36,9 +36,17 @@ skip = ["--permission-mode", "bypassPermissions"]
 # own TUI on a pty the monitor owns; `fastener attach` connects to it. An
 # initial prompt is passed as the positional prompt, after "--" (Claude Code
 # 2.1.322 submits it as the first message).
+#
+# The conversation is known exactly: Fastener passes a new UUID with
+# --session-id (it works together with --remote-control), and Claude writes
+# its transcript to <config home>/projects/<cwd key>/<uuid>.jsonl at the first
+# message; the claude-transcripts finder confirms that file for status
+# conversation_id.
 [interactive]
-args   = []
-prompt = "arg"
+args       = []
+prompt     = "arg"
+session_id = ["--session-id", "{session_id}"]
+finder     = "claude-transcripts"
 
 # `run claude --interactive --remote`: the same TUI with Remote Control on,
 # so it can also be driven from claude.ai/code or the mobile app. Claude
