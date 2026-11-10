@@ -12,9 +12,15 @@ parser = "codex-jsonl"
 # An interactive session (`fastener run codex --interactive`): the Codex TUI
 # on a pty (codex-cli 0.167.0 starts cleanly there). An initial prompt is the
 # positional [PROMPT], after "--". Remote control for Codex is separate (#56).
+#
+# Codex cannot be given a session ID, so the codex-rollouts finder looks for
+# the one interactive rollout for this cwd started within 10 minutes after
+# the session (a heuristic: its answer is only conversation_candidate, and it
+# reports ambiguity rather than guess).
 [interactive]
 args   = []
 prompt = "arg"
+finder = "codex-rollouts"
 
 [options]
 model = ["--model", "{value}"]

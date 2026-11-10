@@ -5,12 +5,14 @@ import (
 	"errors"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/ytjohn/fastener/internal/attach"
+	"github.com/ytjohn/fastener/internal/finder"
 	"github.com/ytjohn/fastener/internal/session"
 )
 
@@ -468,5 +470,219 @@ func TestAgentEnvPlanLayer(t *testing.T) {
 	}
 	if got["A"] != "plan" || got["B"] != "file" || got["C"] != "flag" || got["P"] != "plan" {
 		t.Fatalf("env %v", env)
+	}
+}
+
+// TestPTYConversationFinder: the monitor records the conversation the
+// plan's finder resolves, here an assigned ID whose transcript appears in a
+// synthetic Claude store (CLAUDE_CONFIG_DIR) after a while, and the
+// not-yet-written state before that.
+func TestPTYConversationFinder(t *testing.T) {
+	old := findSchedule
+	oldEvery := findEvery
+	findSchedule, findEvery = []time.Duration{50 * time.Millisecond, 200 * time.Millisecond}, 100*time.Millisecond
+	t.Cleanup(func() { findSchedule, findEvery = old, oldEvery })
+	conf := t.TempDir()
+	const sid = "11111111-2222-4333-8444-555555555555"
+	r := startPTY(t, []string{"CLAUDE_CONFIG_DIR=" + conf}, func(p *session.Plan) {
+		p.Finder, p.SessionID = "claude-transcripts", sid
+	})
+	r.running()
+	waitFor(t, "conversation_error", func() bool { return strings.Contains(r.status().ConversationError, "no transcript") })
+	if st := r.status(); st.ConversationID != "" {
+		t.Fatalf("found before it exists: %+v", st)
+	}
+	var sess session.Session
+	if err := session.ReadJSON(r.d.SessionPath(), &sess); err != nil {
+		t.Fatal(err)
+	}
+	cwd, _ := filepath.EvalSymlinks(sess.Cwd)
+	dir := filepath.Join(conf, "projects", finderKeyForTest(cwd))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "conversation_id", func() bool { return r.status().ConversationID == sid })
+	st := r.status()
+	if st.ConversationSource != "session_id" || st.ConversationError != "" {
+		t.Fatalf("status %+v", st)
+	}
+	c := r.attach(attach.Size{})
+	c.Send([]byte("exit 0\n"))
+	if fin := r.wait(); fin.ConversationID != sid || fin.ConversationSource != "session_id" {
+		t.Fatalf("final status %+v", fin)
+	}
+}
+
+// TestConversationLookupAtExit: a conversation written after the last
+// scheduled lookup is still recorded, by the lookup at exit.
+func TestConversationLookupAtExit(t *testing.T) {
+	old := findSchedule
+	findSchedule = []time.Duration{time.Hour}
+	t.Cleanup(func() { findSchedule = old })
+	conf := t.TempDir()
+	const sid = "66666666-7777-4888-9999-aaaaaaaaaaaa"
+	r := startPTY(t, []string{"CLAUDE_CONFIG_DIR=" + conf}, func(p *session.Plan) {
+		p.Finder, p.SessionID = "claude-transcripts", sid
+	})
+	r.running()
+	var sess session.Session
+	_ = session.ReadJSON(r.d.SessionPath(), &sess)
+	cwd, _ := filepath.EvalSymlinks(sess.Cwd)
+	dir := filepath.Join(conf, "projects", finderKeyForTest(cwd))
+	_ = os.MkdirAll(dir, 0o700)
+	_ = os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte("{}\n"), 0o600)
+	c := r.attach(attach.Size{})
+	c.Send([]byte("exit 0\n"))
+	if fin := r.wait(); fin.ConversationID != sid {
+		t.Fatalf("final status %+v", fin)
+	}
+}
+
+// finderKeyForTest is Claude's project key for a plain ASCII path.
+func finderKeyForTest(p string) string {
+	b := []byte(p)
+	for i, c := range b {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+			b[i] = '-'
+		}
+	}
+	return string(b)
+}
+
+// convTest is a conversationFinder on a test monitor whose agent runs.
+func convTest(t *testing.T, plan func(*session.Plan), find finder.Finder) *conversationFinder {
+	t.Helper()
+	m := newTestMonitor(t)
+	m.st.State = session.StateRunning
+	if plan != nil {
+		plan(&m.plan)
+	}
+	q := finder.Query{Cwd: t.TempDir(), StartedAt: time.Now(), SessionID: m.plan.SessionID}
+	return &conversationFinder{m: m, find: find, q: q, exact: finder.Exact(q)}
+}
+
+func convState(c *conversationFinder) (id, cand, source, msg string) {
+	c.m.mu.Lock()
+	defer c.m.mu.Unlock()
+	s := c.m.st
+	return s.ConversationID, s.ConversationCandidate, s.ConversationSource, s.ConversationError
+}
+
+// TestCodexScenarioB: two Codex sessions in one folder, the later one
+// writing first. The first rollout is only a candidate; when ours appears
+// too, the candidate is cleared for good and the error names both.
+func TestCodexScenarioB(t *testing.T) {
+	codex := t.TempDir()
+	var c *conversationFinder
+	c = convTest(t, func(p *session.Plan) { p.Finder = "codex-rollouts" }, nil)
+	f, _ := finder.Get("codex-rollouts")
+	c.find = f
+	c.q.Env = []string{"HOME=" + t.TempDir(), "CODEX_HOME=" + codex}
+	c.q.StartedAt = time.Now().Add(-5 * time.Minute)
+	physical, _ := filepath.EvalSymlinks(c.q.Cwd)
+	day := filepath.Join(codex, "sessions", time.Now().Format("2006/01/02"))
+	rollout := func(id string, at time.Time) {
+		t.Helper()
+		_ = os.MkdirAll(day, 0o700)
+		meta := `{"type":"session_meta","payload":{"id":"` + id + `","timestamp":"` + at.UTC().Format(time.RFC3339Nano) +
+			`","cwd":"` + physical + `","source":"cli"}}` + "\n"
+		if err := os.WriteFile(filepath.Join(day, "rollout-x-"+id+".jsonl"), []byte(meta), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const other, ours = "bbbbbbbb-0000-4000-8000-000000000002", "aaaaaaaa-0000-4000-8000-000000000001"
+	c.lookup(false)
+	if id, cand, _, msg := convState(c); id != "" || cand != "" || !strings.Contains(msg, "no conversation") {
+		t.Fatalf("nothing written: %q %q %q", id, cand, msg)
+	}
+	rollout(other, c.q.StartedAt.Add(3*time.Minute)) // the later session writes first
+	if c.lookup(false) {
+		t.Fatal("a heuristic answer ended the lookups")
+	}
+	if id, cand, src, _ := convState(c); id != "" || cand != other || src != "codex-rollouts" {
+		t.Fatalf("one rollout: id %q candidate %q source %q", id, cand, src)
+	}
+	rollout(ours, c.q.StartedAt.Add(time.Minute))
+	c.lookup(false)
+	id, cand, _, msg := convState(c)
+	if id != "" || cand != "" || !strings.Contains(msg, other) || !strings.Contains(msg, ours) {
+		t.Fatalf("two rollouts: id %q candidate %q error %q", id, cand, msg)
+	}
+	// Even if one of them goes away, the session stays ambiguous.
+	_ = os.Remove(filepath.Join(day, "rollout-x-"+other+".jsonl"))
+	c.lookup(true)
+	if id, cand, _, msg := convState(c); id != "" || cand != "" || !strings.Contains(msg, "2 conversations") {
+		t.Fatalf("after one went away: %q %q %q", id, cand, msg)
+	}
+}
+
+// TestCandidateChangesIsAmbiguous: a different single candidate later (the
+// first one gone, another there) is ambiguous too, and a candidate gone at
+// exit is not kept.
+func TestCandidateChangesIsAmbiguous(t *testing.T) {
+	answers := []string{"one", "two"}
+	c := convTest(t, func(p *session.Plan) { p.Finder = "pi-sessions" }, func(finder.Query) (string, error) {
+		a := answers[0]
+		answers = answers[1:]
+		return a, nil
+	})
+	c.lookup(false)
+	if _, cand, _, _ := convState(c); cand != "one" {
+		t.Fatalf("candidate %q", cand)
+	}
+	c.lookup(false)
+	if _, cand, _, msg := convState(c); cand != "" || !strings.Contains(msg, "one, two") {
+		t.Fatalf("changed candidate: %q %q", cand, msg)
+	}
+
+	gone := convTest(t, func(p *session.Plan) { p.Finder = "pi-sessions" }, nil)
+	calls := 0
+	gone.find = func(finder.Query) (string, error) {
+		calls++
+		if calls == 1 {
+			return "only", nil
+		}
+		return "", finder.ErrNotFound
+	}
+	gone.lookup(false)
+	gone.lookup(true)
+	if _, cand, _, msg := convState(gone); cand != "" || !strings.Contains(msg, "gone") {
+		t.Fatalf("candidate gone at exit: %q %q", cand, msg)
+	}
+}
+
+// TestExactNeverCandidate: an assigned ID is recorded as conversation_id and
+// ends the lookups; a heuristic answer never is.
+func TestExactNeverCandidate(t *testing.T) {
+	c := convTest(t, func(p *session.Plan) { p.Finder, p.SessionID = "claude-transcripts", "sid-1" },
+		func(q finder.Query) (string, error) { return q.SessionID, nil })
+	if !c.lookup(false) {
+		t.Fatal("an exact answer did not end the lookups")
+	}
+	if id, cand, src, _ := convState(c); id != "sid-1" || cand != "" || src != "session_id" {
+		t.Fatalf("exact: %q %q %q", id, cand, src)
+	}
+	h := convTest(t, func(p *session.Plan) { p.Finder = "claude-transcripts" },
+		func(finder.Query) (string, error) { return "guess", nil })
+	h.lookup(false)
+	h.lookup(true)
+	if id, cand, _, _ := convState(h); id != "" || cand != "guess" {
+		t.Fatalf("heuristic: id %q candidate %q", id, cand)
+	}
+}
+
+// TestExitLookupBounded: a finder that hangs does not hold up the exit.
+func TestExitLookupBounded(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	c := convTest(t, func(p *session.Plan) { p.Finder = "codex-rollouts" },
+		func(finder.Query) (string, error) { <-release; return "", finder.ErrNotFound })
+	start := time.Now()
+	c.atExit()
+	if d := time.Since(start); d > exitLookupTimeout+time.Second {
+		t.Fatalf("exit lookup took %v", d)
 	}
 }

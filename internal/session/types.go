@@ -121,7 +121,13 @@ type Plan struct {
 	URLPattern string `json:"url_pattern,omitempty"`
 	// Env is KEY=VALUE pairs from the profile ([interactive].env), layered
 	// after the session's env_base and before its env-file and --env.
-	Env             []string  `json:"env,omitempty"`
+	Env []string `json:"env,omitempty"`
+	// SessionID is the conversation ID passed to the agent at launch (the
+	// profile's [interactive] session_id); Finder names the finder that
+	// locates the conversation (internal/finder), for status
+	// conversation_id. Interactive generations only.
+	SessionID       string    `json:"session_id,omitempty"`
+	Finder          string    `json:"finder,omitempty"`
 	ProfileSource   string    `json:"profile_source"`
 	ProfileSHA256   string    `json:"profile_sha256"`
 	Marker          string    `json:"marker"`
@@ -193,6 +199,17 @@ type Status struct {
 	// (flushed about once a second). Both are set only while it runs.
 	AttachSocket    string `json:"attach_socket,omitempty"`
 	AttachedClients *int   `json:"attached_clients,omitempty"`
+	// For an interactive session: ConversationID (parser.Fields) is set only
+	// from an exact source, the ID assigned at launch once the agent has
+	// written that conversation (ConversationSource "session_id").
+	// ConversationCandidate is a heuristic finder's answer
+	// (ConversationSource is then the finder's name): possibly another
+	// conversation in the same folder, so a restore uses it only when told
+	// to. ConversationError says why there is neither: nothing written yet,
+	// or more than one candidate.
+	ConversationCandidate string `json:"conversation_candidate,omitempty"`
+	ConversationSource    string `json:"conversation_source,omitempty"`
+	ConversationError     string `json:"conversation_error,omitempty"`
 	parser.Fields
 	UpdatedAt time.Time `json:"updated_at"`
 }

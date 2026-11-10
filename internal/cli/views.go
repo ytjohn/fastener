@@ -73,6 +73,9 @@ type psRow struct {
 	// runs; from status.json, flushed about once a second).
 	Interactive     bool `json:"interactive,omitempty"`
 	AttachedClients *int `json:"attached_clients,omitempty"`
+	// ConversationID is status conversation_id: what a parser or an
+	// interactive session's finder found.
+	ConversationID string `json:"conversation_id,omitempty"`
 }
 
 func handshakeTimeout() time.Duration {
@@ -157,6 +160,11 @@ func renderInspect(stdout io.Writer, v *session.View, out inspectOut) {
 		row("generation", fmt.Sprint(g))
 	}
 	row("conversation_id", s.ConversationID)
+	row("conversation_candidate", s.ConversationCandidate)
+	row("conversation_source", s.ConversationSource)
+	if s.ConversationID == "" && s.ConversationCandidate == "" {
+		row("conversation", s.ConversationError)
+	}
 	row("final_message", truncate(s.FinalMessage, 200))
 	row("served_model", s.Model)
 	if s.AgentError != nil {
@@ -233,7 +241,8 @@ func cmdPs(args []string, stdout, stderr io.Writer) int {
 			Name: n, Backend: v.Session.Backend, Kind: v.Session.Kind, State: v.State, CreatedAt: v.Session.CreatedAt,
 			EndedAt: v.Status.EndedAt, EndedBy: v.Status.EndedBy, ExitCode: v.Status.ExitCode,
 			Labels: v.Session.Labels, RemoteURL: v.Status.RemoteURL,
-			Interactive: v.Plan != nil && v.Plan.PTY != nil,
+			Interactive:    v.Plan != nil && v.Plan.PTY != nil,
+			ConversationID: v.Status.ConversationID,
 		}
 		if row.Interactive && v.State == session.StateRunning {
 			row.AttachedClients = v.Status.AttachedClients

@@ -11,6 +11,8 @@ type Request struct {
 	Model       string
 	Prompt      string
 	Name        string // the session name, for remote.args' {name}
+	// SessionID is the conversation ID chosen for [interactive].session_id.
+	SessionID string
 }
 
 // ErrNoRemote is wrapped by RenderRemote when the profile has no [remote]
@@ -40,6 +42,9 @@ type Rendered struct {
 	// URLPattern is matched against terminal output to find remote_url
 	// ([interactive.remote].url_pattern).
 	URLPattern string
+	// SessionID is the conversation ID passed at launch ([interactive]
+	// session_id), and Finder the profile's finder.
+	SessionID, Finder string
 }
 
 // ErrNoInteractive is wrapped by RenderInteractive when the profile has no
@@ -54,7 +59,7 @@ func (e noInteractiveError) Error() string        { return e.msg }
 func (e noInteractiveError) Is(target error) bool { return target == ErrNoInteractive }
 
 // RenderInteractive builds an interactive run's argument list:
-// [interactive].args, then (remote) [interactive.remote].args with {name}
+// [interactive].args, then [interactive].session_id with r.SessionID, then (remote) [interactive.remote].args with {name}
 // replaced, then the permission level's arguments ([interactive.permissions]
 // if it lists the level, else [permissions]), then the model option, then,
 // when a prompt is given and the profile takes one as an argument, "--" and
@@ -72,7 +77,16 @@ func (p *Profile) RenderInteractive(r Request, remote bool) (Rendered, error) {
 		return Rendered{}, err
 	}
 	args := append([]string{}, in.Args...)
-	out := Rendered{PromptMode: PromptNone, Parser: in.InteractiveParser(), Env: append([]string(nil), in.Env...)}
+	out := Rendered{PromptMode: PromptNone, Parser: in.InteractiveParser(), Env: append([]string(nil), in.Env...), Finder: in.Finder}
+	if in.SessionID != nil {
+		if r.SessionID == "" {
+			return Rendered{}, fmt.Errorf("backend %s assigns a session ID, but none was given", p.Name)
+		}
+		for _, a := range in.SessionID {
+			args = append(args, strings.ReplaceAll(a, sessionIDPH, r.SessionID))
+		}
+		out.SessionID = r.SessionID
+	}
 	if remote {
 		for _, a := range in.Remote.Args {
 			args = append(args, strings.ReplaceAll(a, namePH, r.Name))

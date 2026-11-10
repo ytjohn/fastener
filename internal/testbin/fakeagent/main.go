@@ -45,7 +45,8 @@
 //	                           a remote-control URL the way Claude Code does (spaces as
 //	                           cursor moves, an OSC 8 link), split across two writes with
 //	                           nothing after it; "cat <file>" writes the file's bytes as
-//	                           they are
+//	                           they are; "touchsid <dir>" creates <dir>/<id>.jsonl for the
+//	                           ID after --sid in its arguments
 //	FAKE_PTY_ARGV=1            print "argv=<args joined by |>" at start
 //	FAKE_PTY_RUN=line          handle line as if typed, right after the start output
 //	FAKE_PTY_INIT=1            also print a claude stream-json init event at start
@@ -363,6 +364,16 @@ func ptyMode() {
 			mu.Lock()
 			fmt.Print("ion_01FAKEPTYSESSION0001\x1b]8;;\x07")
 			mu.Unlock()
+		case len(f) == 2 && f[0] == "touchsid":
+			// Write <dir>/<id>.jsonl for the ID after --sid in argv, as an
+			// agent writes its conversation at the first message.
+			for i, a := range os.Args {
+				if a == "--sid" && i+1 < len(os.Args) {
+					_ = os.MkdirAll(f[1], 0o700)
+					_ = os.WriteFile(f[1]+"/"+os.Args[i+1]+".jsonl", []byte("{}\n"), 0o600)
+					say("touched %s", os.Args[i+1])
+				}
+			}
 		case len(f) == 2 && f[0] == "cat":
 			b, err := os.ReadFile(f[1])
 			if err != nil {

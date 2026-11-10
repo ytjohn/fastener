@@ -78,6 +78,14 @@ func TestValidationErrors(t *testing.T) {
 		{"interactive remote name twice", base + "[interactive]\nprompt = \"arg\"\n[interactive.remote]\nargs = [\"{name}\", \"{name}\"]\nurl_pattern = 'x'\n", "at most once"},
 		{"interactive remote hint alone", base + "[interactive]\nprompt = \"arg\"\n[interactive.remote]\nargs = [\"--rc\"]\nurl_pattern = 'x'\nuntrusted_hint = \"h\"\n", "needs"},
 		{"interactive remote bad untrusted", base + "[interactive]\nprompt = \"arg\"\n[interactive.remote]\nargs = [\"--rc\"]\nurl_pattern = 'x'\nuntrusted_pattern = '('\n", "untrusted_pattern"},
+		{"interactive parser and finder", base + "[interactive]\nprompt = \"arg\"\nparser = \"claude-stream-json\"\nfinder = \"claude-transcripts\"\n", "finder owns"},
+		{"interactive unknown finder", base + "[interactive]\nprompt = \"arg\"\nfinder = \"nope\"\n", "interactive.finder"},
+		{"interactive session_id without placeholder", base + "[interactive]\nprompt = \"arg\"\nsession_id = [\"--session-id\"]\n", "exactly once"},
+		{"interactive session_id empty", base + "[interactive]\nprompt = \"arg\"\nsession_id = []\n", "exactly once"},
+		{"interactive session_id twice", base + "[interactive]\nprompt = \"arg\"\nsession_id = [\"{session_id}\", \"{session_id}\"]\n", "exactly once"},
+		{"session_id placeholder elsewhere", base + "[interactive]\nprompt = \"arg\"\nargs = [\"{session_id}\"]\n", "only allowed in interactive.session_id"},
+		{"session_id placeholder in headless", strings.Replace(base, "args = []", `args = ["{session_id}"]`, 1), "only allowed in interactive.session_id"},
+		{"name in session_id", base + "[interactive]\nprompt = \"arg\"\nsession_id = [\"{session_id}{name}\"]\n", "only the {session_id}"},
 		{"interactive remote unknown key", base + "[interactive]\nprompt = \"arg\"\n[interactive.remote]\nargs = [\"--rc\"]\nurl_pattern = 'x'\nwhat = 1\n", "unknown keys"},
 		{"empty permissions", strings.Replace(base, "auto = []\n", "", 1), "at least one level"},
 		{"schema 2", strings.Replace(base, "schema_version = 1", "schema_version = 2", 1), "schema_version"},
@@ -395,25 +403,33 @@ func TestBuiltinInteractive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := claude.RenderInteractive(Request{Permissions: "skip", Name: "s1", Prompt: "-hi", Model: "opus"}, true)
+	const sid = "11111111-2222-4333-8444-555555555555"
+	r, err := claude.RenderInteractive(Request{Permissions: "skip", Name: "s1", Prompt: "-hi", Model: "opus", SessionID: sid}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"--remote-control", "s1", "--dangerously-skip-permissions", "--model", "opus", "--", "-hi"}
-	if strings.Join(r.Args, "|") != strings.Join(want, "|") || r.URLPattern == "" || r.Parser != "none" || r.PromptMode != "arg" {
+	want := []string{"--session-id", sid, "--remote-control", "s1", "--dangerously-skip-permissions", "--model", "opus", "--", "-hi"}
+	if strings.Join(r.Args, "|") != strings.Join(want, "|") || r.URLPattern == "" || r.Parser != "none" || r.PromptMode != "arg" ||
+		r.SessionID != sid || r.Finder != "claude-transcripts" {
 		t.Fatalf("claude interactive remote: %+v", r)
 	}
 	if !regexp.MustCompile(r.URLPattern).MatchString("https://claude.ai/code/session_017sf5rxuW4AeHi7B5SRz7ij") {
 		t.Fatal("claude url_pattern misses a session URL")
 	}
-	if r, err := claude.RenderInteractive(Request{Permissions: "auto"}, false); err != nil || strings.Join(r.Args, "|") != "--permission-mode|auto" || r.PromptMode != "none" {
+	if _, err := claude.RenderInteractive(Request{Permissions: "auto"}, false); err == nil {
+		t.Fatal("claude rendered without the session ID it assigns")
+	}
+	if r, err := claude.RenderInteractive(Request{Permissions: "auto", SessionID: sid}, false); err != nil || strings.Join(r.Args, "|") != "--session-id|"+sid+"|--permission-mode|auto" || r.PromptMode != "none" {
 		t.Fatalf("claude interactive: %+v %v", r, err)
 	}
 	pi, err := Load("pi", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pi.RenderInteractive(Request{Permissions: "skip", Prompt: "hi"}, false); !errors.Is(err, ErrNoInteractive) {
+	if r, err := pi.RenderInteractive(Request{Permissions: "skip", SessionID: sid}, false); err != nil || strings.Join(r.Args, "|") != "--session-id|"+sid || r.Finder != "pi-sessions" {
+		t.Fatalf("pi interactive: %+v %v", r, err)
+	}
+	if _, err := pi.RenderInteractive(Request{Permissions: "skip", Prompt: "hi", SessionID: sid}, false); !errors.Is(err, ErrNoInteractive) {
 		t.Fatalf("pi with a prompt: %v", err)
 	}
 	if _, err := pi.RenderInteractive(Request{Permissions: "skip"}, true); !errors.Is(err, ErrNoInteractive) {
@@ -423,7 +439,7 @@ func TestBuiltinInteractive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r, err := codex.RenderInteractive(Request{Permissions: "auto", Prompt: "go"}, false); err != nil || strings.Join(r.Args, "|") != "--approve-for-me|--|go" {
+	if r, err := codex.RenderInteractive(Request{Permissions: "auto", Prompt: "go"}, false); err != nil || strings.Join(r.Args, "|") != "--approve-for-me|--|go" || r.Finder != "codex-rollouts" || r.SessionID != "" {
 		t.Fatalf("codex interactive: %+v %v", r, err)
 	}
 }

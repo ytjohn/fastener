@@ -31,6 +31,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/ytjohn/fastener/internal/finder"
 	"github.com/ytjohn/fastener/internal/parser"
 )
 
@@ -122,6 +123,14 @@ type Interactive struct {
 	Env []string `toml:"env"`
 	// Permissions overrides [permissions] per level, as [remote.permissions].
 	Permissions map[string][]string `toml:"permissions"`
+	// SessionID, when set, passes a conversation ID Fastener chooses (a new
+	// UUID; {session_id}, exactly once) to the agent at launch, so its
+	// conversation is known exactly instead of found by a heuristic.
+	SessionID []string `toml:"session_id"`
+	// Finder names the built-in finder (internal/finder) that locates the
+	// session's conversation in the agent's store, for status
+	// conversation_id; with SessionID it confirms that conversation exists.
+	Finder string `toml:"finder"`
 	// Remote is `run --interactive --remote`: the same TUI, also driven
 	// from elsewhere.
 	Remote *InteractiveRemote `toml:"remote"`
@@ -390,6 +399,19 @@ func (p *Profile) validateInteractive() error {
 	if _, ok := parser.Get(in.InteractiveParser()); !ok {
 		return fmt.Errorf("interactive.parser %q unknown (known: %s)", in.Parser, strings.Join(parser.Names(), ", "))
 	}
+	if in.Finder != "" {
+		if _, ok := finder.Get(in.Finder); !ok {
+			return fmt.Errorf("interactive.finder %q unknown (known: %s)", in.Finder, strings.Join(finder.Names(), ", "))
+		}
+		// One source for conversation_id: the finder owns it in an
+		// interactive session.
+		if parser.SetsConversationID(in.InteractiveParser()) {
+			return fmt.Errorf("interactive.parser %q sets conversation_id, which interactive.finder owns; use one of them", in.InteractiveParser())
+		}
+	}
+	if in.SessionID != nil && (len(in.SessionID) == 0 || countIn(in.SessionID, sessionIDPH) != 1) {
+		return fmt.Errorf("interactive.session_id must be non-empty and contain %s exactly once", sessionIDPH)
+	}
 	for i, kv := range in.Env {
 		k, _, ok := strings.Cut(kv, "=")
 		if !ok || !envKeyRE.MatchString(k) {
@@ -430,6 +452,8 @@ func (p *Profile) validateInteractive() error {
 	}
 	return nil
 }
+
+const sessionIDPH = "{session_id}"
 
 var envKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -475,6 +499,22 @@ func (p *Profile) validateTemplates() error {
 	}
 	if p.Resume != nil {
 		noName = append(noName, p.Resume.Args)
+	}
+	sidLists := append([][]string{}, noName...)
+	if p.Remote != nil {
+		sidLists = append(sidLists, p.Remote.Args)
+	}
+	if in := p.Interactive; in != nil && in.Remote != nil {
+		sidLists = append(sidLists, in.Remote.Args)
+	}
+	for _, a := range sidLists {
+		if countIn(a, sessionIDPH) != 0 {
+			return fmt.Errorf("placeholder %s is only allowed in interactive.session_id", sessionIDPH)
+		}
+	}
+	if in := p.Interactive; in != nil && in.SessionID != nil && (countIn(in.SessionID, namePH) != 0 ||
+		countIn(in.SessionID, "{value}") != 0 || countIn(in.SessionID, "{conversation_id}") != 0) {
+		return fmt.Errorf("interactive.session_id may contain only the %s placeholder", sessionIDPH)
 	}
 	for _, a := range noName {
 		if countIn(a, namePH) != 0 {
