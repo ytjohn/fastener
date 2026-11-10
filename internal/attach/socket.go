@@ -72,13 +72,14 @@ type Listener struct {
 	bound os.FileInfo
 }
 
-// Close stops listening and removes the socket if it is still ours.
+// Close removes the socket if it is still ours, then stops listening. The
+// check comes first: while our fd is open the inode cannot be freed, so a
+// successor's socket can never be taken for ours by a reused inode number.
 func (l *Listener) Close() error {
-	err := l.UnixListener.Close()
-	if fi, serr := os.Lstat(l.path); serr == nil && os.SameFile(fi, l.bound) {
+	if fi, err := os.Lstat(l.path); err == nil && os.SameFile(fi, l.bound) {
 		_ = os.Remove(l.path)
 	}
-	return err
+	return l.UnixListener.Close()
 }
 
 // Listen creates the attach socket for the session in dir and returns the
