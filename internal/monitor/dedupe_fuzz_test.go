@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/ytjohn/fastener/internal/parser"
 )
 
 // A generated redrawn screen: frames of rows, each row drawn zero or more
@@ -60,20 +62,32 @@ func genFrames(pick func(n int) int, nFrames int, draws bool) [][]genRow {
 	return frames
 }
 
+// genPrefixes are non-moving sequences a redraw may put before its frame
+// start: SGR, modes, erase, cursor save.
+var genPrefixes = []string{"", "\x1b[0m", "\x1b[1;32m", "\x1b[?25l", "\x1b[2K", "\x1b[J", "\x1b7", "\x1b[s"}
+
+// genStyles is how many styles genMarker draws.
+const genStyles = 6 * 8 * 3
+
 // genMarker is one of the redraw styles' frame starts, for a previous frame
-// of prev rows.
+// of prev rows: style%6 picks the redraw, then a non-moving prefix, then
+// 0-2 extra rows to move up (a wrapped line takes two terminal rows).
 func genMarker(style, prev int) string {
-	switch style % 5 {
+	pre := genPrefixes[style/6%len(genPrefixes)]
+	up := prev + style/48%3
+	switch style % 6 {
 	case 0:
-		return fmt.Sprintf("\x1b[%dA\x1b[J", prev) // Claude 2.1.319
+		return pre + fmt.Sprintf("\x1b[%dA\x1b[J", up) // Claude 2.1.319
 	case 1:
-		return "\x1b[H\x1b[2J"
+		return pre + "\x1b[H\x1b[2J"
 	case 2:
-		return strings.Repeat("\x1b[2K\x1b[1A", prev) + "\x1b[2K\x1b[G" // Ink
+		return pre + strings.Repeat("\x1b[2K\x1b[1A", up) + "\x1b[2K\x1b[G" // Ink
 	case 3:
-		return fmt.Sprintf("\x1b[%dF", prev)
+		return pre + fmt.Sprintf("\x1b[%dF", up)
+	case 4:
+		return pre + fmt.Sprintf("\x1b[?25l\x1b[%dA\x1b[J", up)
 	default:
-		return fmt.Sprintf("\x1b[?25l\x1b[%dA\x1b[J", prev)
+		return pre + "\x1b8\x1b[J" // restore the cursor saved above the screen
 	}
 }
 
@@ -138,7 +152,7 @@ func checkFrames(t *testing.T, frames [][]genRow, style func() int) {
 			}
 			// What a terminal shows: the written text, except that an empty
 			// line after a "\r" on the same row overwrites nothing.
-			text := string(trimCursor([]byte(strings.TrimRight(it.line, "\r\n"))))
+			text := string(parser.StripTerminal(trimCursor([]byte(strings.TrimRight(it.line, "\r\n")))))
 			if text != "" || openRow != it.row || openFrame != it.frame {
 				view[it.row] = text
 			}
@@ -183,8 +197,14 @@ func checkPump(t *testing.T, frames [][]genRow, style func() int) {
 	m.plan.DedupeFrames = true
 	var out bytes.Buffer
 	m.pump(strings.NewReader(in.String()), &out, mustParser(t, "none"))
-	if got := out.String(); got != strings.Join(want, "") {
-		t.Fatalf("output.log =\n%q\nwant\n%q", got, strings.Join(want, ""))
+	var got []string // output.log's lines, with the kept colours stripped
+	for _, l := range strings.SplitAfter(out.String(), "\n") {
+		if l != "" {
+			got = append(got, string(parser.StripTerminal([]byte(strings.TrimSuffix(l, "\n"))))+"\n")
+		}
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("output.log =\n%q\nwant\n%q", out.String(), strings.Join(want, ""))
 	}
 }
 
@@ -195,7 +215,7 @@ func TestDedupeFramesNeverLoseState(t *testing.T) {
 	for seed := range uint64(3000) {
 		r := rand.New(rand.NewPCG(seed, 60))
 		pick := func(n int) int { return r.IntN(n) }
-		style := func() int { return r.IntN(5) }
+		style := func() int { return r.IntN(genStyles) }
 		draws := seed%2 == 1
 		frames := genFrames(pick, 1+r.IntN(12), draws)
 		checkFrames(t, frames, style)
@@ -221,18 +241,18 @@ func FuzzDedupeFrames(f *testing.F) {
 			return int(data[i-1]) % n
 		}
 		frames := genFrames(pick, len(data)/4, draws)
-		checkFrames(t, frames, func() int { return pick(5) })
+		checkFrames(t, frames, func() int { return pick(genStyles) })
 	})
 }
 
-// TestDedupeMarkerlessDropsOnlyCycles: without frame markers, a line is
-// dropped exactly when, for some period p, the p lines ending with it equal
-// the p lines before them (checked by brute force on random input).
-func TestDedupeMarkerlessDropsOnlyCycles(t *testing.T) {
+// TestDedupeMarkerlessKeepsChanges: without frame markers, a line is
+// dropped exactly when it equals the line right before it, so every line
+// that differs from its predecessor is written and the log ends on the
+// stream's last line (random lines, cycles of many periods, "\n" and "\r"
+// ends).
+func TestDedupeMarkerlessKeepsChanges(t *testing.T) {
 	for seed := range uint64(300) {
 		r := rand.New(rand.NewPCG(seed, 61))
-		// Repeat random blocks a random number of times, so cycles of many
-		// periods occur, and break them now and then.
 		var lines []string
 		for len(lines) < 400 {
 			block := make([]string, 1+r.IntN(8))
@@ -243,40 +263,38 @@ func TestDedupeMarkerlessDropsOnlyCycles(t *testing.T) {
 				lines = append(lines, block...)
 			}
 		}
+		lines = lines[:len(lines)-r.IntN(8)] // stop anywhere in a cycle
+		var in strings.Builder
 		d := &frameDedupe{}
-		open, shown := false, "" // output.log's row left open by a "\r", and what it shows
+		open := false // output.log's row is left open by a "\r"
 		for i, l := range lines {
-			how := endNL
+			how, term := endNL, "\n"
 			if r.IntN(3) == 0 {
-				how = endCR
+				how, term = endCR, "\r"
 			}
-			term := map[lineEnd]string{endNL: "\n", endCR: "\r"}[how]
+			in.WriteString(l + term)
 			a := d.next([]byte(l+term), how)
-			// A row's final text is forced out when the open row shows
-			// another drawing; else a line is dropped exactly on a cycle.
-			forced := how == endNL && open && shown != l
-			wantLine := !cycle(lines[:i+1]) || forced
+			wantLine := i == 0 || lines[i-1] != l
 			wantNL := !wantLine && how == endNL && open
-			if got := a&actLine != 0; got != wantLine || (a&actNewline != 0) != wantNL {
+			if (a&actLine != 0) != wantLine || (a&actNewline != 0) != wantNL {
 				t.Fatalf("seed %d line %d (%q%s): action %b, want line %v newline %v\n%q", seed, i, l, term, a, wantLine, wantNL, lines[max(0, i-20):i+1])
 			}
 			switch {
 			case a&actLine != 0:
-				open, shown = how == endCR, l
+				open = how == endCR
 			case a&actNewline != 0:
 				open = false
 			}
 		}
-	}
-}
-
-// cycle reports whether the last line of lines completes a repeated block.
-func cycle(lines []string) bool {
-	n := len(lines)
-	for p := 1; p <= dedupeMaxPeriod && 2*p <= n; p++ {
-		if slices.Equal(lines[n-p:], lines[n-2*p:n-p]) {
-			return true
+		// Through the pump, the last row of output.log shows the last line.
+		m := newTestMonitor(t)
+		m.plan.DedupeFrames = true
+		var out bytes.Buffer
+		m.pump(strings.NewReader(in.String()), &out, mustParser(t, "none"))
+		rows := strings.Split(strings.TrimRight(out.String(), "\r\n"), "\n")
+		draws := strings.Split(rows[len(rows)-1], "\r")
+		if got := draws[len(draws)-1]; got != lines[len(lines)-1] {
+			t.Fatalf("seed %d: output.log ends showing %q, the stream %q", seed, got, lines[len(lines)-1])
 		}
 	}
-	return false
 }

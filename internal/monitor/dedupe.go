@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"io"
 	"regexp"
+	"strconv"
 
 	"github.com/ytjohn/fastener/internal/parser"
 )
@@ -114,33 +115,78 @@ const (
 	endEOF                // the stream ended without a terminator
 )
 
-// cursorRE matches the cursor-movement and erase sequences (CSI n A-H, f, J,
-// K) and cursor show/hide and other private modes (CSI ? n h/l) at the start
-// of a line.
-var cursorRE = regexp.MustCompile(`^(?:\x1b\[[0-9;]*[A-HJKf]|\x1b\[\?[0-9;]*[hl])+`)
+// leadRE matches the run of escape sequences a redraw puts at the start of a
+// line before its text: cursor movement and erase (CSI n A-H, f, J, K),
+// SGR (CSI n m), private modes such as cursor show/hide (CSI ? n h/l), and
+// cursor save and restore (CSI s, CSI u, ESC 7, ESC 8).
+var leadRE = regexp.MustCompile(`^(?:\x1b\[[0-9;]*[A-HJKf]|\x1b\[[0-9;:]*m|\x1b\[\?[0-9;]*[hl]|\x1b\[[su]|\x1b[78])+`)
 
-// trimCursor drops leading cursor-movement and erase sequences from line.
+// leadSeqRE splits a leading run into its sequences; leadSGRRE is an SGR.
+var (
+	leadSeqRE = regexp.MustCompile(`\x1b\[[0-9;:?]*[A-HJKfmsuhl]|\x1b[78]`)
+	leadSGRRE = regexp.MustCompile(`^\x1b\[[0-9;:]*m$`)
+)
+
+// trimCursor drops the leading run's cursor-movement, erase, mode and
+// save/restore sequences from line, so `logs` on a terminal does not erase
+// or overwrite earlier, unrelated lines. SGR sequences (colours) are kept.
 func trimCursor(line []byte) []byte {
-	if n := cursorRE.Find(line); n != nil {
-		return line[len(n):]
+	run := leadRE.Find(line)
+	if run == nil {
+		return line
 	}
-	return line
+	var sgr []byte
+	for _, seq := range leadSeqRE.FindAll(run, -1) {
+		if leadSGRRE.Match(seq) {
+			sgr = append(sgr, seq...)
+		}
+	}
+	if sgr == nil {
+		return line[len(run):]
+	}
+	return append(sgr, line[len(run):]...)
 }
 
-// markerRE finds, in a line's leading cursor sequences (cursorRE), one that
-// moves the cursor up or home, which is how a redrawn frame starts:
-// cursor-up (ESC[nA, Claude 2.1.319: ESC[nA ESC[J), cursor-previous-line
-// (ESC[nF), cursor-position (ESC[H, ESC[r;cH, ESC[r;cf: full-screen ESC[H
-// ESC[2J), and Ink's log-update (ESC[2K ESC[1A … ESC[2K ESC[G). Erase or
-// column moves alone (ESC[2K, ESC[G) redraw the current row and are not
-// frame starts.
-var markerRE = regexp.MustCompile(`\x1b\[[0-9;]*[AFHf]`)
+// frameStart describes a line's leading run (leadRE): whether it starts a
+// redrawn frame, by moving the cursor up or home, and by how many rows it
+// moves up. Frame starts: cursor-up (ESC[nA; Claude 2.1.319: ESC[nA ESC[J),
+// cursor-previous-line (ESC[nF), cursor-position (ESC[H, ESC[r;cH,
+// ESC[r;cf: full-screen ESC[H ESC[2J), Ink's log-update (ESC[2K ESC[1A …
+// ESC[2K ESC[G), and cursor restore (ESC 8, CSI u) back to a position saved
+// above the frame. SGR, modes, erase, save and column moves (ESC[2K, ESC[G)
+// may come before or between them, and alone start no frame. up counts the
+// rows of ESC[nA and ESC[nF; counted is false when a move is absolute.
+type frameStart struct {
+	marker, counted bool
+	up              int
+}
+
+func leadFrame(text []byte) frameStart {
+	run := leadRE.Find(text)
+	if run == nil {
+		return frameStart{}
+	}
+	fs := frameStart{counted: true}
+	for _, seq := range leadSeqRE.FindAll(run, -1) {
+		final := seq[len(seq)-1]
+		switch {
+		case len(seq) == 2: // ESC 7 or ESC 8
+			if final == '8' {
+				fs.marker, fs.counted = true, false
+			}
+		case seq[2] == '?':
+		case final == 'A' || final == 'F':
+			n, _ := strconv.Atoi(string(seq[2 : len(seq)-1]))
+			fs.marker, fs.up = true, fs.up+max(n, 1)
+		case final == 'H' || final == 'f' || final == 'u':
+			fs.marker, fs.counted = true, false
+		}
+	}
+	return fs
+}
 
 // isMarker reports whether text starts a redrawn frame.
-func isMarker(text []byte) bool {
-	n := cursorRE.Find(text)
-	return n != nil && markerRE.Match(n)
-}
+func isMarker(text []byte) bool { return leadFrame(text).marker }
 
 // dedupeMaxLine: longer lines are never de-duplicated (always written), so
 // the stripped copy hashed for each line stays small.
@@ -150,10 +196,6 @@ const dedupeMaxLine = 64 << 10
 // it are compared with nothing and written. A Claude bridge's screen is about
 // 8 lines plus one per session (32 by default).
 const dedupeMaxFrame = 1024
-
-// dedupeMaxPeriod is the longest block of lines recognised as repeating in
-// output without frame markers.
-const dedupeMaxPeriod = 64
 
 // frameKey identifies a line by the SHA-256 of its text with terminal escapes
 // stripped (redraws of the same line differ in cursor escapes). ok is false
@@ -180,45 +222,36 @@ const (
 // text is its last drawing; an empty drawing ("\r\r\n", a terminal's
 // ONLCR) overwrites nothing, so it leaves the text as it was.
 //
-// With frame markers: a frame starts at a line whose leading cursor
-// sequences move up or home (isMarker), and the rows before the first
-// marker are a frame too. A row is a repeat when its text equals the row at
-// the same position in the previous frame; a "\r" drawing is a repeat when
-// it equals that row too, or the drawing before it in its row. So a frame is
+// With frame markers: a frame starts at a line whose leading sequences move
+// the cursor up or home (leadFrame), and the rows before the first marker
+// are a frame too. A row is a repeat when its text equals the row at the
+// same position in the previous frame; a "\r" drawing is a repeat when it
+// equals that row too, or the drawing before it in its row. So a frame is
 // only ever compared with the frame right before it: a screen that changes
 // and changes back (Connected, Disconnected, Connected) logs every change,
-// and every row that differs from the previous frame is written.
+// and every row that differs from the previous frame is written. If a
+// marker moves up over fewer rows than the frame it ends holds, a frame
+// start was missed and the rows are not aligned, so the new frame is
+// compared with nothing and written whole.
 //
-// Without frame markers there are no frames to compare, so a line (row or
-// "\r" drawing) is a repeat only when it completes a repeated block: for some
-// period p ≤ dedupeMaxPeriod, the p lines ending with it equal the p lines
-// before them. p = 1 is a line equal to the one before it; a 2-line status
-// printed over and over, or a 4-step spinner, is written for one round and
-// all but the last line of the next, then dropped until a line breaks the
-// cycle; that line, any change to the block, is always written. Recent
-// lines are not kept in a set: a line seen a while ago (A, B, A) is written
-// again, so a return to an earlier state is never lost.
+// Without frame markers there are no frames, and a line (row or drawing) is
+// a repeat only when it equals the line right before it. Nothing longer is
+// collapsed: a stream that stops part-way through a repeating block would
+// otherwise leave the log showing a state that is no longer the screen's.
 //
 // Rows stay true and readable: once a "\r" drawing of a row was written, a
-// repeat that the log's row does not show yet is written anyway (the row's
-// final text always; with frame markers, any drawing), so the text the log
-// shows last for a row is the screen's. When the log shows it already, a
-// final "\n" is written alone to finish the row, so the next row never
-// overwrites it; a frame marker after an open row writes "\n" first.
+// repeat that the log's row does not show yet is written anyway, so the
+// text the log shows last for a row is the screen's. When the log shows it
+// already, a final "\n" is written alone to finish the row, so the next row
+// never overwrites it; a frame marker after an open row writes "\n" first.
 //
-// Memory is two frames of row hashes (at most 2 × dedupeMaxFrame keys) and
-// dedupeMaxPeriod hashes of recent lines.
+// Memory is two frames of row hashes (at most 2 × dedupeMaxFrame keys).
 type frameDedupe struct {
 	framed    bool       // a frame marker has been seen
 	prev, cur []frameKey // the rows of the previous and the current frame, in order
 	drawn     frameKey   // the last "\r" drawing of the current row
 	inRow     bool       // drawn is set: the current row has had "\r" drawings
-
-	// Without frame markers: the recent lines, and run[p], how many lines
-	// in a row have equalled the line p before them.
-	hist [dedupeMaxPeriod]frameKey
-	n    int
-	run  [dedupeMaxPeriod + 1]int
+	last      frameKey   // the line before this one (without frame markers)
 
 	open  bool     // output.log's last write ended in a lone "\r"
 	shown frameKey // what that open row shows
@@ -234,18 +267,19 @@ func (d *frameDedupe) next(line []byte, how lineEnd) action {
 		// nothing: the row still shows its last drawing.
 		key = d.drawn
 	case len(text) <= dedupeMaxLine:
-		key = frameKey{sum: sha256.Sum256(parser.StripTerminal(text)), ok: true}
+		run := leadRE.Find(text) // ESC 7 and ESC 8 survive StripTerminal
+		key = frameKey{sum: sha256.Sum256(parser.StripTerminal(text[len(run):])), ok: true}
 	}
-	return d.record(key, how, isMarker(text))
+	return d.record(key, how, leadFrame(text))
 }
 
 // unique records a line that repeats nothing and that nothing repeats (an
 // overlong line, already written).
-func (d *frameDedupe) unique(how lineEnd) { d.record(frameKey{}, how, false) }
+func (d *frameDedupe) unique(how lineEnd) { d.record(frameKey{}, how, frameStart{}) }
 
-func (d *frameDedupe) record(key frameKey, how lineEnd, marker bool) action {
+func (d *frameDedupe) record(key frameKey, how lineEnd, fs frameStart) action {
 	var a action
-	if marker {
+	if fs.marker {
 		if d.open {
 			a |= actClose
 			d.open = false
@@ -255,6 +289,9 @@ func (d *frameDedupe) record(key frameKey, how lineEnd, marker bool) action {
 		}
 		d.framed = true
 		d.prev, d.cur = d.cur, d.prev[:0]
+		if fs.counted && fs.up < len(d.prev) {
+			d.prev = d.prev[:0] // a missed frame start: compare with nothing
+		}
 	}
 	var dup bool
 	if d.framed {
@@ -264,16 +301,14 @@ func (d *frameDedupe) record(key frameKey, how lineEnd, marker bool) action {
 			dup = true
 		}
 	} else {
-		dup = d.periodic(key)
+		dup = d.last.same(key)
 	}
 	switch {
 	case !dup:
 		a |= actLine
-	case d.open && !d.shown.same(key) && (how != endCR || d.framed):
+	case d.open && !d.shown.same(key):
 		// A repeat, but the log's open row shows another drawing of this
 		// row: write it, so the row the log shows last is the screen's.
-		// (A "\r" drawing without frame markers is dropped only as part of
-		// a cycle already written, so it is not forced.)
 		a |= actLine
 	case d.open && how == endNL:
 		a |= actNewline // the log shows this text already; finish the row
@@ -282,6 +317,7 @@ func (d *frameDedupe) record(key frameKey, how lineEnd, marker bool) action {
 		d.open = how == endCR && a&actLine != 0
 		d.shown = key
 	}
+	d.last = key
 	if how == endCR {
 		d.drawn, d.inRow = key, true
 	} else {
@@ -296,24 +332,4 @@ func (d *frameDedupe) endRow(key frameKey) {
 	if len(d.cur) < dedupeMaxFrame {
 		d.cur = append(d.cur, key)
 	}
-}
-
-// periodic records key in the recent lines and reports whether it completes
-// a repeated block of some period p: the p lines ending with it equal the p
-// lines before them.
-func (d *frameDedupe) periodic(key frameKey) bool {
-	dup := false
-	for p := 1; p <= dedupeMaxPeriod; p++ {
-		if p <= d.n && d.hist[(d.n-p)%dedupeMaxPeriod].same(key) {
-			d.run[p]++
-			if d.run[p] >= p {
-				dup = true
-			}
-		} else {
-			d.run[p] = 0
-		}
-	}
-	d.hist[d.n%dedupeMaxPeriod] = key
-	d.n++
-	return dup
 }
