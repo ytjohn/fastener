@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,6 +74,9 @@ type Server struct {
 	// change it to exercise the refusal).
 	ownerUID atomic.Int64
 }
+
+// writeBatch bounds the bytes of one writev to a client.
+const writeBatch = 64 << 10
 
 // inputQueue is how many input frames may wait for the pty writer. A client
 // sending input while it is full waits; other frames are not affected.
@@ -277,15 +281,23 @@ func (s *Server) writer(c *client) {
 			<-c.wake
 			s.mu.Lock()
 		}
-		batch, closing := c.pending, c.closing
-		c.pending = nil
+		// Take at most about writeBatch bytes: queued counts a batch until
+		// it is written, so a big batch would make a client that keeps up
+		// look further behind than it is.
+		k, n := 0, 0
+		for k < len(c.pending) && (k == 0 || n+len(c.pending[k]) <= writeBatch) {
+			n += len(c.pending[k])
+			k++
+		}
+		batch := slices.Clone(c.pending[:k])
+		c.pending = c.pending[k:]
+		if len(c.pending) == 0 {
+			c.pending = nil // let the backing array go
+		}
+		closing := c.closing
 		s.mu.Unlock()
 		if len(batch) == 0 && closing {
 			return
-		}
-		n := 0
-		for _, b := range batch {
-			n += len(b)
 		}
 		bufs := net.Buffers(batch)
 		if _, err := bufs.WriteTo(c.conn); err != nil {

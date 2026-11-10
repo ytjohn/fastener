@@ -69,7 +69,9 @@ func startServer(t *testing.T) (*Server, *fakePTY, string) {
 		t.Fatal(err)
 	}
 	f := &fakePTY{size: Size{24, 80}}
-	s := NewServer(l, f.config())
+	cfg := f.config()
+	cfg.Logf = t.Logf
+	s := NewServer(l, cfg)
 	go s.Serve()
 	t.Cleanup(func() { s.Close(nil) })
 	return s, f, path
