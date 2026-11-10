@@ -556,9 +556,11 @@ func TestFallbackDirChecks(t *testing.T) {
 func TestPeerOfAnotherUserRefused(t *testing.T) {
 	s, _, path := startServer(t)
 	s.ownerUID.Store(int64(os.Getuid() + 1))
-	_, err := Dial(path, Options{})
-	if err == nil || !strings.Contains(err.Error(), "no welcome") {
-		t.Fatalf("Dial as a stranger: %v", err)
+	// The server closes at once: the hello's write or the welcome's read
+	// fails, depending on timing; either way there is no welcome.
+	if c, err := Dial(path, Options{}); err == nil {
+		c.Close()
+		t.Fatal("a stranger was welcomed")
 	}
 	if s.Clients() != 0 {
 		t.Fatal("stranger counted as a client")
