@@ -3,11 +3,11 @@ package cli_test
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/ytjohn/fastener/internal/session"
 )
@@ -224,29 +224,41 @@ func TestRestoreInteractiveRemote(t *testing.T) {
 }
 
 // TestRestoreInteractiveRefusesWhileOldAlive: restore never relaunches
-// while a process of the old generation lives: here the agent, whose monitor
-// was killed. (On Linux the agent dies with its monitor, PR_SET_PDEATHSIG,
-// so this runs on macOS; the scan itself is the bridges' one.)
+// while a process of the old generation lives. The agent itself dies with
+// its terminal (the hangup when the monitor goes), so the survivor here is
+// a marked child it started in its own session, as a daemonizing tool would.
 func TestRestoreInteractiveRefusesWhileOldAlive(t *testing.T) {
 	h := newHarness(t)
 	h.writeProfile("fres", fakeResumeProfile("fres", `session_id = ["--sid", "{session_id}"]`, false))
 	conf := t.TempDir()
+	pidfile := filepath.Join(t.TempDir(), "child.pid")
 	h.ok("run", "fres", "--interactive", "--restart", "on-reboot", "--cwd", h.work, "--name", "r5",
-		"--env", "CLAUDE_CONFIG_DIR="+conf, "--env", "FAKE_PTY_RUN=touchsid "+claudeStoreDir(conf, h.work))
-	v := inspectR(t, h, "r5")
-	agent := v.Status.PGID
-	t.Cleanup(func() { _ = syscall.Kill(-agent, syscall.SIGKILL) })
-	_ = syscall.Kill(v.Status.Monitor.PID, syscall.SIGKILL)
+		"--env", "CLAUDE_CONFIG_DIR="+conf, "--env", "FAKE_SETSID_CHILD="+pidfile,
+		"--env", "FAKE_PTY_RUN=touchsid "+claudeStoreDir(conf, h.work))
+	child := waitPid(t, pidfile)
+	t.Cleanup(func() { _ = syscall.Kill(child, syscall.SIGKILL) })
+	reboot := inspectR(t, h, "r5")
+	_ = syscall.Kill(reboot.Status.Monitor.PID, syscall.SIGKILL)
+	_ = syscall.Kill(-reboot.Status.PGID, syscall.SIGKILL)
 	poll(t, "lost", func() bool { return inspectR(t, h, "r5").State == session.StateLost })
-	time.Sleep(200 * time.Millisecond)
-	if !pidAlive(agent) {
-		t.Skip("the agent died with its monitor (PR_SET_PDEATHSIG)")
-	}
 	out := h.ok("restore", "r5")
 	if !strings.Contains(out, "skipped") || !strings.Contains(out, "stop it first") {
-		t.Fatalf("restore with the old agent alive: %q", out)
+		t.Fatalf("restore with a process of the old generation alive: %q", out)
 	}
 	if v := inspectR(t, h, "r5"); v.Plan.Generation != 1 {
-		t.Fatalf("relaunched beside the old agent: %+v", v.Plan)
+		t.Fatalf("relaunched beside the old generation: %+v", v.Plan)
 	}
+	// stop clears it, and then restore relaunches.
+	h.ok("stop", "r5")
+	if pidAlive(child) {
+		t.Fatal("stop left the old generation's child alive")
+	}
+	_ = os.Remove(pidfile)
+	if out := h.ok("restore", "r5"); !strings.Contains(out, "restored  generation 2") {
+		t.Fatalf("restore after stop: %q", out)
+	}
+	// Generation 2 starts its own detached child (the env is the session's);
+	// stop and rm leave a process that left the group alone, so kill it here.
+	child2 := waitPid(t, pidfile)
+	t.Cleanup(func() { _ = syscall.Kill(child2, syscall.SIGKILL) })
 }
