@@ -41,7 +41,13 @@
 //	                           every SIGWINCH prints "winch=<rows>x<cols>"; EOF exits 0;
 //	                           "stall" puts the terminal in raw mode, prints "stalled" and
 //	                           never reads again; "result-error" prints a claude
-//	                           stream-json result with is_error and exits 0
+//	                           stream-json result with is_error and exits 0; "url" draws
+//	                           a remote-control URL the way Claude Code does (spaces as
+//	                           cursor moves, an OSC 8 link), split across two writes with
+//	                           nothing after it; "cat <file>" writes the file's bytes as
+//	                           they are
+//	FAKE_PTY_ARGV=1            print "argv=<args joined by |>" at start
+//	FAKE_PTY_RUN=line          handle line as if typed, right after the start output
 //	FAKE_PTY_INIT=1            also print a claude stream-json init event at start
 //	FAKE_PTY_FLOOD=n           print n bytes at start, as "flood n" would
 //	FAKE_PTY_AUTOEXIT=1        exit with FAKE_EXIT right after the start output
@@ -297,6 +303,9 @@ func ptyMode() {
 		b, _ := json.Marshal(map[string]any{"type": "system", "subtype": "init", "session_id": "fake-pty-0001"})
 		say("%s", b)
 	}
+	if os.Getenv("FAKE_PTY_ARGV") == "1" {
+		say("argv=%s", strings.Join(os.Args[1:], "|"))
+	}
 	say("tty=%v ctty=%v size=%s", ttyErr == nil, ctty, size())
 	flood := func(n int) {
 		line := strings.Repeat("x", 99)
@@ -324,9 +333,7 @@ func ptyMode() {
 			say("winch=%s", size())
 		}
 	}()
-	sc := bufio.NewScanner(os.Stdin)
-	for sc.Scan() {
-		line := strings.TrimRight(sc.Text(), "\r")
+	handle := func(line string) {
 		f := strings.Fields(line)
 		switch {
 		case len(f) == 2 && f[0] == "exit":
@@ -347,6 +354,24 @@ func ptyMode() {
 			for { // never reads its terminal again
 				time.Sleep(time.Hour)
 			}
+		case line == "url":
+			const u = "https://claude.ai/code/session_01FAKEPTYSESSION0001"
+			mu.Lock()
+			fmt.Print("\x1b[2C/remote-control\x1b[1Cis\x1b[1Cactive\x1b[1C\u00b7\x1b[1Cor\x1b[1Cat\x1b[3C\x1b]8;;" + u + "?from=cli\x07https://claude.ai/code/sess")
+			mu.Unlock()
+			time.Sleep(100 * time.Millisecond)
+			mu.Lock()
+			fmt.Print("ion_01FAKEPTYSESSION0001\x1b]8;;\x07")
+			mu.Unlock()
+		case len(f) == 2 && f[0] == "cat":
+			b, err := os.ReadFile(f[1])
+			if err != nil {
+				say("cat: %v", err)
+				break
+			}
+			mu.Lock()
+			os.Stdout.Write(b)
+			mu.Unlock()
 		case line == "result-error":
 			b, _ := json.Marshal(map[string]any{"type": "result", "subtype": "error", "session_id": "fake-pty-0001",
 				"result": "model call failed", "is_error": true})
@@ -355,5 +380,12 @@ func ptyMode() {
 		default:
 			say("echo:%s", line)
 		}
+	}
+	if c := os.Getenv("FAKE_PTY_RUN"); c != "" {
+		handle(c)
+	}
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		handle(strings.TrimRight(sc.Text(), "\r"))
 	}
 }

@@ -29,8 +29,13 @@ type launchOptions struct {
 	Env                []string
 	Labels             map[string]string
 	MaxRuntime, Grace  time.Duration
-	// Remote starts the profile's [remote] bridge instead of a headless run.
+	// Remote starts the profile's [remote] bridge instead of a headless run;
+	// with Interactive, the [interactive.remote] variant of the TUI.
 	Remote bool
+	// Interactive runs the profile's [interactive] TUI on a monitor-owned
+	// pty of size PTY (run --interactive).
+	Interactive bool
+	PTY         session.PTYPlan
 	// Restart is the restart policy recorded in session.json: "no" (or "")
 	// or "on-reboot" (remote bridges only, validated by validateRestart).
 	Restart string
@@ -42,14 +47,17 @@ const (
 	restartOnReboot = "on-reboot"
 )
 
-// validateRestart checks --restart. on-reboot is for remote bridges only in
-// v0.3: a headless prompt may have side effects, so it is never rerun, and
-// interactive sessions arrive in v0.4.
-func validateRestart(policy string, remote bool) error {
+// validateRestart checks --restart. on-reboot is for remote bridges only: a
+// headless prompt may have side effects, so it is never rerun, and restoring
+// interactive sessions (from their conversation) is not implemented yet.
+func validateRestart(policy string, remote, interactive bool) error {
 	switch policy {
 	case "", restartNo:
 		return nil
 	case restartOnReboot:
+		if interactive {
+			return usagef("--restart on-reboot cannot be used with --interactive yet: restoring interactive sessions is not implemented (#55)")
+		}
 		if !remote {
 			return usagef("--restart on-reboot needs --remote: a headless session is never rerun after a reboot")
 		}
@@ -79,7 +87,12 @@ type prepared struct {
 	envBase  []string
 	envFile  string
 	fileEnv  []string
+	// interactive: rendered from [interactive] (run --interactive).
+	interactive bool
 }
+
+// defaultTERM is an interactive session's TERM when the caller has none.
+const defaultTERM = "xterm-256color"
 
 func (p *prepared) mergedEnv(extra []string) []string {
 	return runenv.Merge(p.envBase, p.fileEnv, extra)
@@ -99,7 +112,12 @@ func prepare(o launchOptions, prompt, name string) (*prepared, error) {
 	perms := prof.ResolvePermissions(o.Permissions, cfg.DefaultPermissions)
 	req := profile.Request{Permissions: perms, Model: o.Model, Prompt: prompt, Name: name}
 	var r profile.Rendered
-	if o.Remote {
+	if o.Interactive {
+		r, err = prof.RenderInteractive(req, o.Remote)
+		if errors.Is(err, profile.ErrNoInteractive) {
+			err = usagef("%v", err) // no silent fallback to a headless run
+		}
+	} else if o.Remote {
 		r, err = prof.RenderRemote(req)
 		if errors.Is(err, profile.ErrNoRemote) {
 			err = usagef("%v", err) // no silent fallback to a headless run
@@ -113,10 +131,20 @@ func prepare(o launchOptions, prompt, name string) (*prepared, error) {
 	if err := validateEnv(o.Env); err != nil {
 		return nil, inStep("binary", err)
 	}
-	p := &prepared{cfg: cfg, prof: prof, perms: perms, rendered: r}
+	p := &prepared{cfg: cfg, prof: prof, perms: perms, rendered: r, interactive: o.Interactive}
 	p.envBase = runenv.Base(cfg.EnvPassthrough, os.Environ())
 	if p.envBase == nil {
 		p.envBase = []string{}
+	}
+	if o.Interactive && runenv.Get(p.envBase, "TERM") == "" {
+		// A TUI needs TERM (design §5: passed through for interactive
+		// sessions only); without one in the caller's environment, assume a
+		// modern terminal.
+		term := os.Getenv("TERM")
+		if term == "" || term == "dumb" {
+			term = defaultTERM
+		}
+		p.envBase = append(p.envBase, "TERM="+term)
 	}
 	if o.EnvFile != "" {
 		abs, err := filepath.Abs(o.EnvFile)
@@ -215,7 +243,7 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 	if err := validateEnv(o.Env); err != nil {
 		return nil, err
 	}
-	if err := validateRestart(o.Restart, o.Remote); err != nil {
+	if err := validateRestart(o.Restart, o.Remote, o.Interactive); err != nil {
 		return nil, err
 	}
 	restart := o.Restart
@@ -223,7 +251,25 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 		restart = restartNo
 	}
 	var prompt, source string
-	if o.Remote {
+	if o.Interactive {
+		// The prompt is optional: an interactive session starts at its TUI.
+		prompt, source = o.Prompt, ""
+		if prompt != "" {
+			source = "inline"
+		}
+		if o.PromptFile != "" {
+			if prompt != "" {
+				return nil, usagef("--prompt and --prompt-file are mutually exclusive")
+			}
+			var err error
+			if prompt, source, err = readPromptFile(o.PromptFile, os.Stdin); err != nil {
+				return nil, err
+			}
+		}
+		if strings.TrimSpace(prompt) == "" {
+			prompt, source = "", ""
+		}
+	} else if o.Remote {
 		// A bridge is driven from elsewhere; it never takes a prompt.
 		if o.Prompt != "" || o.PromptFile != "" {
 			return nil, usagef("--prompt and --prompt-file cannot be used with --remote")
@@ -276,7 +322,10 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 	}
 	now := time.Now().UTC()
 	kind := session.KindHeadless
-	if o.Remote {
+	switch {
+	case o.Interactive:
+		kind = session.KindInteractive
+	case o.Remote:
 		kind = session.KindRemote
 	}
 	sess := session.Session{
@@ -290,6 +339,14 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 		Argv: append([]string{p.argv0}, p.rendered.Args...), PromptMode: p.rendered.PromptMode,
 		Parser: p.rendered.Parser, DedupeFrames: p.rendered.DedupeFrames, ProfileSource: p.prof.Source, ProfileSHA256: p.prof.SHA256,
 		Marker: session.NewMarker(name, 1), FastenerVersion: version.String(), PlannedAt: now,
+		URLPattern: p.rendered.URLPattern, Env: p.rendered.Env,
+	}
+	if o.Interactive {
+		size := o.PTY
+		if size.Rows == 0 || size.Cols == 0 {
+			size.Rows, size.Cols = session.DefaultPTYRows, session.DefaultPTYCols
+		}
+		plan.PTY = &size
 	}
 	writes := []struct {
 		path string
@@ -299,7 +356,7 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 		{d.PlanPath(1), plan},
 		{d.StatusPath(), session.Status{SchemaVersion: session.SchemaVersion, State: session.StateStarting, Generation: 1, UpdatedAt: now}},
 	}
-	if !o.Remote {
+	if prompt != "" {
 		if err := session.WriteFileAtomic(d.PromptPath(), []byte(prompt), 0o600); err != nil {
 			os.RemoveAll(string(d))
 			return nil, inStep("launch", err)

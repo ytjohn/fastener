@@ -129,6 +129,11 @@ func recvText(t *testing.T, c *attach.Client, want string) {
 func testPTYSession(t *testing.T, h *harness, launch string) {
 	d := startPTYSession(t, h, launch)
 	poll(t, "running", func() bool { return inspectPTY(t, h).State == session.StateRunning })
+	// fakeagent installs its SIGWINCH handler before its first line.
+	poll(t, "the agent's first line", func() bool {
+		out, _, _ := h.cmd("logs", "pty1")
+		return strings.Contains(out, "tty=")
+	})
 	v := inspectPTY(t, h)
 	if v.Plan.PTY == nil || v.Plan.PTY.Rows != 33 || v.Status.AttachSocket == "" {
 		t.Fatalf("inspect: %+v", v)

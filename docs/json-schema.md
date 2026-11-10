@@ -22,22 +22,24 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 | `paths` | `dir`, `output_log`, `stderr_log`, `monitor_log` (absolute paths) |
 | `liveness_error` | String, omitted when empty. Present only while `state` is `starting` or `running` and the check on the monitor process failed (for example a permission error reading `/proc`). Fastener then assumes the monitor is alive rather than declaring the session `lost`, so a session can look `running` for as long as the error persists. |
 | `orphan_error` | String, omitted when empty. Why `orphans` cannot be trusted: no readable plan for the current generation, a failed process scan, or (after a failed `run`) a reload that failed twice, so the true count may be higher than reported. |
-| `reason` | String, `run --remote` only, omitted otherwise. Why the bridge ended before reporting its URL: `untrusted_workspace` (its `stderr.log` matched the profile's `[remote] untrusted_pattern`: the backend refuses the folder until its trust is accepted, see `folder`) or `exited` (any other end before `run` saw the URL; the error on stderr names how it ended and the last line of `stderr.log`, and says `ended after reporting <url>` instead of `ended before reporting its URL` when the bridge had printed one, which is then in `status.remote_url`). |
+| `reason` | String, `run --remote` (and `run --interactive --remote`) only, omitted otherwise. Why the bridge ended before reporting its URL: `untrusted_workspace` (its `stderr.log` matched the profile's `[remote] untrusted_pattern`, or, for an interactive session, its terminal output matched `[interactive.remote] untrusted_pattern`, in which case `run` stopped the session: the backend refuses the folder until its trust is accepted, see `folder`) or `exited` (any other end before `run` saw the URL; the error on stderr names how it ended and the last line of `stderr.log`, or for an interactive session the last line of its terminal output, prefixed `terminal:` (a pty merges stderr into it), and says `ended after reporting <url>` instead of `ended before reporting its URL` when the bridge had printed one, which is then in `status.remote_url`). |
 | `folder` | String, with `reason: "untrusted_workspace"` only: the absolute folder to authorize (the session's `cwd`). |
 | `warnings` | Array of strings, omitted when empty. One entry per state file whose `schema_version` is newer than this fastener understands, e.g. `status.json has schema_version 2; this fastener understands up to 1, so some fields may be ignored`. The file is still read; unknown fields are ignored. |
 
 `session` fields:
-- `schema_version`, `name`, `created_at`, `kind` (`headless` | `remote`), `backend`, `cwd` (absolute)
-- `prompt_source`: `inline`, `stdin` (for `--prompt-file -`), or the absolute `--prompt-file` path; `""` for a remote bridge, which takes no prompt. The text itself is not in the JSON.
+- `schema_version`, `name`, `created_at`, `kind` (`headless` | `remote` | `interactive`: `run --interactive`, with `remote: true` when also `--remote`), `backend`, `cwd` (absolute)
+- `prompt_source`: `inline`, `stdin` (for `--prompt-file -`), or the absolute `--prompt-file` path; `""` for a remote bridge, which takes no prompt, and for an interactive session started without one. The text itself is not in the JSON.
 - `permissions`, `model`, `max_runtime`, `grace`
 - `env_base`: environment values captured from the caller (the passthrough list); `env`: the `--env` values; `env_file`: the path only. Precedence is base, then env-file, then `--env`.
-- `labels`, `restart` (`no` | `on-reboot`; `on-reboot` only with `remote`), `remote` (true for `run --remote`)
+- `labels`, `restart` (`no` | `on-reboot`; `on-reboot` only with `remote`, and not for interactive sessions), `remote` (true for `run --remote`, including `run --interactive --remote`)
 
 `plan` fields:
 - `schema_version`, `generation`
 - `argv`: the fully resolved argument list; `argv[0]` is an absolute path. For `prompt = "arg"` backends it contains the prompt text itself
-- `prompt_mode` (`stdin` | `arg` | `none`: a remote bridge, whose stdin is `/dev/null`), `parser`
+- `prompt_mode` (`stdin` | `arg` | `none`: a remote bridge, whose stdin is `/dev/null`, or an interactive session started without a prompt), `parser`
 - `dedupe_frames`: `true` when the monitor drops redrawn status lines from `output.log` (a line equal to the same position in the previous frame) and strips leading cursor-movement escapes from the lines it writes (from the profile's `[remote] dedupe_frames`; every line is still parsed). Omitted otherwise.
+- `url_pattern`: for `run --interactive --remote`, the profile's `[interactive.remote] url_pattern`; the monitor matches it against the terminal output (escapes stripped) and records the latest match as `status.remote_url`. Omitted otherwise.
+- `env`: array of `KEY=VALUE` from the profile's `[interactive].env`, set for the agent after `session.env_base` and before the env-file and `session.env`. Omitted when empty.
 - `pty`: `{rows, cols}` for an interactive generation, which the monitor runs on a pty it owns (design §8.2); `rows` and `cols` are the initial window size, each omitted when 0 (meaning 24 × 80). Omitted for every other generation.
 - `profile_source` (`builtin` or the file path), `profile_sha256`
 - `marker`: the value of `FASTENER_SESSION` in the agent's environment
@@ -64,7 +66,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
   - `agent_error`
   - `usage`: `{input_tokens, output_tokens, cost_usd}`, present only when the backend reported usage or a cost. `cost_usd` is omitted when the backend reported no cost (Pi without pricing, Codex), never emitted as 0. `input_tokens` and `output_tokens` are omitted when the backend reported no token counts (for example a Claude result with `total_cost_usd` but no `usage` block, which yields `{"cost_usd": x}`)
   - `parse_errors`
-  - `remote_url` (remote bridges, parser `claude-remote`): the bridge's URL, `https://claude.ai/code?environment=env_…`, the latest one the bridge printed
+  - `remote_url`: for a remote bridge (parser `claude-remote`), the bridge's URL, `https://claude.ai/code?environment=env_…`, the latest one the bridge printed; for an interactive remote session, the latest match of `plan.url_pattern` in its terminal output (Claude: `https://claude.ai/code/session_…`)
   - `remote_sessions` (remote bridges): array of the session URLs the bridge has shown, `https://claude.ai/code/session_…` without their query string, de-duplicated, in the order first seen; at most 64 entries, the oldest evicted first (a URL seen again after its eviction is added again at the end)
   - `usage.input_tokens` counts *all* input tokens for the run, including cache reads and writes. This differs from Anthropic's own `usage.input_tokens`, which excludes cache tokens.
 - `updated_at`
@@ -73,7 +75,7 @@ While a session runs, parser fields are flushed about once a second and always a
 
 ## `ps --json`
 
-An array (never null) of `{name, backend, state, created_at, ended_at?, ended_by?, exit_code?, labels?, remote_url?, interactive?, attached_clients?}`, newest first. `remote_url` is a remote bridge's URL (`status.remote_url`), once it has reported one. `interactive` is `true` when the current generation runs on a pty (`plan.pty`), omitted otherwise; `attached_clients` is `status.attached_clients`, present only for an interactive session whose state is `running`. Without `--all`, `ps` lists running, starting and lost sessions plus those that ended in the last 24 hours. `ps` does not scan for orphans (too costly across many sessions) and has no orphans field; use `inspect` for that. `--filter KEY=VALUE` (repeatable, ANDed; see design §10) keeps only matching rows after the window is applied; the shape is unchanged and no match gives `[]`. A session that cannot be read is skipped with a warning on stderr. A session whose files have a newer `schema_version` than this fastener understands is listed, with one `fastener: warning: <name>: …` line on stderr (the same text as `inspect`'s `warnings`).
+An array (never null) of `{name, backend, kind?, state, created_at, ended_at?, ended_by?, exit_code?, labels?, remote_url?, interactive?, attached_clients?}`, newest first. `kind` is `session.kind` (`headless`, `remote` or `interactive`; omitted for a session whose `session.json` is missing). `remote_url` is a remote bridge's or interactive remote session's URL (`status.remote_url`), once it has reported one. `interactive` is `true` when the current generation runs on a pty (`plan.pty`), omitted otherwise; `attached_clients` is `status.attached_clients`, present only for an interactive session whose state is `running`. Without `--all`, `ps` lists running, starting and lost sessions plus those that ended in the last 24 hours. `ps` does not scan for orphans (too costly across many sessions) and has no orphans field; use `inspect` for that. `--filter KEY=VALUE` (repeatable, ANDed; see design §10) keeps only matching rows after the window is applied; the shape is unchanged and no match gives `[]`. A session that cannot be read is skipped with a warning on stderr. A session whose files have a newer `schema_version` than this fastener understands is listed, with one `fastener: warning: <name>: …` line on stderr (the same text as `inspect`'s `warnings`).
 
 ## `prune --json`
 

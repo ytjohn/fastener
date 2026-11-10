@@ -25,7 +25,7 @@ const (
 const usageText = `usage: fastener <command> [arguments]
 
 commands:
-  run <backend>      launch a headless session or a remote bridge (detached)
+  run <backend>      launch a headless session, a remote bridge or an interactive TUI (detached)
   ps                 list sessions
   inspect <name>     show a session's state and facts
   logs <name>        print a session's output

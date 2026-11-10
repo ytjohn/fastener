@@ -17,6 +17,14 @@ args   = ["-p", "--mode", "json"]
 prompt = "stdin"
 parser = "pi-json"
 
+# An interactive session (`fastener run pi --interactive`): pi's TUI on a pty.
+# pi reads its messages as positional arguments but treats one starting with
+# "@" as a file to attach, even after "--", so an initial prompt is not
+# passed; type it after attaching.
+[interactive]
+args   = []
+prompt = "none"
+
 [options]
 model = ["--model", "{value}"]
 

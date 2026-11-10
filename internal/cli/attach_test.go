@@ -35,6 +35,13 @@ type attachProc struct {
 
 func startAttach(t *testing.T, h *harness, args ...string) *attachProc {
 	t.Helper()
+	return startOnPty(t, h, append([]string{"attach"}, args...)...)
+}
+
+// startOnPty runs `fastener <args>` with a pty the test owns as its
+// controlling terminal and stdin, stdout and stderr.
+func startOnPty(t *testing.T, h *harness, args ...string) *attachProc {
+	t.Helper()
 	master, slave, err := pty.Open()
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +53,7 @@ func startAttach(t *testing.T, h *harness, args ...string) *attachProc {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(fastenerBin, append([]string{"attach"}, args...)...)
+	cmd := exec.Command(fastenerBin, args...)
 	cmd.Env = append(append([]string{}, h.extraEnv...),
 		"FASTENER_STATE_DIR="+h.state, "FASTENER_CONFIG_DIR="+h.config,
 		"PATH="+os.Getenv("PATH"), "HOME="+os.Getenv("HOME"), "TMPDIR="+h.work)
@@ -163,6 +170,12 @@ func runningPTY(t *testing.T, h *harness, plan ...func(*session.Plan)) {
 	t.Helper()
 	startPTYSession(t, h, "setsid", plan...)
 	poll(t, "running", func() bool { return inspectPTY(t, h).State == session.StateRunning })
+	// fakeagent installs its SIGWINCH handler before its first line; an
+	// attach before that could resize it before it listens.
+	poll(t, "the agent's first line", func() bool {
+		out, _, _ := h.cmd("logs", "pty1")
+		return strings.Contains(out, "tty=")
+	})
 }
 
 // TestAttachEchoResizeDetach: keys reach the agent and its output reaches

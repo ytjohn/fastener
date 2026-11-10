@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/ytjohn/fastener/internal/parser"
 )
 
 func TestBuiltinsLoadAndValidate(t *testing.T) {
@@ -62,7 +64,21 @@ func TestValidationErrors(t *testing.T) {
 		{"bad regex", base + "[check]\ndiagnose = [{ match = '(', hint = \"h\" }]\n", "match"},
 		{"no hint", base + "[check]\ndiagnose = [{ match = 'a' }]\n", "hint is required"},
 		{"no command", strings.Replace(base, `command = "x"`, `command = ""`, 1), "required"},
-		{"interactive", base + "[interactive]\nargs = []\n", "unknown keys"},
+		{"interactive no prompt", base + "[interactive]\nargs = []\n", "interactive.prompt"},
+		{"interactive bad prompt", base + "[interactive]\nprompt = \"stdin\"\n", "interactive.prompt"},
+		{"interactive unknown key", base + "[interactive]\nprompt = \"arg\"\nbogus = 1\n", "unknown keys"},
+		{"interactive bad parser", base + "[interactive]\nprompt = \"arg\"\nparser = \"nope\"\n", "interactive.parser"},
+		{"interactive bad env", base + "[interactive]\nprompt = \"arg\"\nenv = [\"NOEQUALS\"]\n", "interactive.env"},
+		{"interactive bad level", base + "[interactive]\nprompt = \"arg\"\n[interactive.permissions]\nskip = []\n", "not defined"},
+		{"interactive name in args", base + "[interactive]\nprompt = \"arg\"\nargs = [\"{name}\"]\n", "{name}"},
+		{"interactive value in args", base + "[interactive]\nprompt = \"arg\"\nargs = [\"{value}\"]\n", "placeholders"},
+		{"interactive remote no args", base + "[interactive]\nprompt = \"arg\"\n[interactive.remote]\nurl_pattern = 'x'\n", "interactive.remote.args"},
+		{"interactive remote no pattern", base + "[interactive]\nprompt = \"arg\"\n[interactive.remote]\nargs = [\"--rc\"]\n", "url_pattern is required"},
+		{"interactive remote bad pattern", base + "[interactive]\nprompt = \"arg\"\n[interactive.remote]\nargs = [\"--rc\"]\nurl_pattern = '('\n", "url_pattern"},
+		{"interactive remote name twice", base + "[interactive]\nprompt = \"arg\"\n[interactive.remote]\nargs = [\"{name}\", \"{name}\"]\nurl_pattern = 'x'\n", "at most once"},
+		{"interactive remote hint alone", base + "[interactive]\nprompt = \"arg\"\n[interactive.remote]\nargs = [\"--rc\"]\nurl_pattern = 'x'\nuntrusted_hint = \"h\"\n", "needs"},
+		{"interactive remote bad untrusted", base + "[interactive]\nprompt = \"arg\"\n[interactive.remote]\nargs = [\"--rc\"]\nurl_pattern = 'x'\nuntrusted_pattern = '('\n", "untrusted_pattern"},
+		{"interactive remote unknown key", base + "[interactive]\nprompt = \"arg\"\n[interactive.remote]\nargs = [\"--rc\"]\nurl_pattern = 'x'\nwhat = 1\n", "unknown keys"},
 		{"empty permissions", strings.Replace(base, "auto = []\n", "", 1), "at least one level"},
 		{"schema 2", strings.Replace(base, "schema_version = 1", "schema_version = 2", 1), "schema_version"},
 		{"model without value", base + "[options]\nmodel = [\"--model\"]\n", "exactly once"},
@@ -372,4 +388,70 @@ func TestCodexUsesCodexJSONL(t *testing.T) {
 		}
 	}
 	t.Fatal("no diagnose entry matches the unsupported-model message")
+}
+
+func TestBuiltinInteractive(t *testing.T) {
+	claude, err := Load("claude", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := claude.RenderInteractive(Request{Permissions: "skip", Name: "s1", Prompt: "-hi", Model: "opus"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--remote-control", "s1", "--dangerously-skip-permissions", "--model", "opus", "--", "-hi"}
+	if strings.Join(r.Args, "|") != strings.Join(want, "|") || r.URLPattern == "" || r.Parser != "none" || r.PromptMode != "arg" {
+		t.Fatalf("claude interactive remote: %+v", r)
+	}
+	if !regexp.MustCompile(r.URLPattern).MatchString("https://claude.ai/code/session_017sf5rxuW4AeHi7B5SRz7ij") {
+		t.Fatal("claude url_pattern misses a session URL")
+	}
+	if r, err := claude.RenderInteractive(Request{Permissions: "auto"}, false); err != nil || strings.Join(r.Args, "|") != "--permission-mode|auto" || r.PromptMode != "none" {
+		t.Fatalf("claude interactive: %+v %v", r, err)
+	}
+	pi, err := Load("pi", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pi.RenderInteractive(Request{Permissions: "skip", Prompt: "hi"}, false); !errors.Is(err, ErrNoInteractive) {
+		t.Fatalf("pi with a prompt: %v", err)
+	}
+	if _, err := pi.RenderInteractive(Request{Permissions: "skip"}, true); !errors.Is(err, ErrNoInteractive) {
+		t.Fatalf("pi --remote: %v", err)
+	}
+	codex, err := Load("codex", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, err := codex.RenderInteractive(Request{Permissions: "auto", Prompt: "go"}, false); err != nil || strings.Join(r.Args, "|") != "--approve-for-me|--|go" {
+		t.Fatalf("codex interactive: %+v %v", r, err)
+	}
+}
+
+// TestClaudeTrustDialogPattern: the interactive untrusted_pattern matches
+// the dialog Claude Code 2.1.322 really draws, and not a prompt that only
+// quotes its question.
+func TestClaudeTrustDialogPattern(t *testing.T) {
+	claude, err := Load("claude", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(claude.Interactive.Remote.UntrustedPattern)
+	raw, err := os.ReadFile("testdata/claude-2.1.322-trust-dialog.raw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !re.Match(parser.StripForMatch(raw)) {
+		t.Fatal("the real trust dialog does not match")
+	}
+	for _, echo := range []string{
+		"Claude asked me: is this a project you created or one you trust? What does that mean?",
+		"Quick safety check: is this a project you created or one you trust?",
+		"why does it say workspace not trusted",
+		"Yes, I trust this folder",
+	} {
+		if re.MatchString(echo) {
+			t.Errorf("a prompt echo matched: %q", echo)
+		}
+	}
 }

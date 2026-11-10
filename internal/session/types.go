@@ -34,6 +34,9 @@ const (
 const (
 	KindHeadless = "headless"
 	KindRemote   = "remote" // a remote bridge (run --remote)
+	// KindInteractive is run --interactive (with or without --remote): the
+	// agent's TUI on a monitor-owned pty.
+	KindInteractive = "interactive"
 )
 
 // Duration serialises as a Go duration string ("40m").
@@ -111,7 +114,14 @@ type Plan struct {
 	// the agent on a pseudo-terminal it owns and serves attach.sock (design
 	// §8.2). Absent in every plan written before v0.4, which run exactly as
 	// before.
-	PTY             *PTYPlan  `json:"pty,omitempty"`
+	PTY *PTYPlan `json:"pty,omitempty"`
+	// URLPattern, when set, is matched against the agent's terminal output
+	// (escapes stripped); the latest match is status remote_url. From the
+	// profile's [interactive.remote] url_pattern.
+	URLPattern string `json:"url_pattern,omitempty"`
+	// Env is KEY=VALUE pairs from the profile ([interactive].env), layered
+	// after the session's env_base and before its env-file and --env.
+	Env             []string  `json:"env,omitempty"`
 	ProfileSource   string    `json:"profile_source"`
 	ProfileSHA256   string    `json:"profile_sha256"`
 	Marker          string    `json:"marker"`

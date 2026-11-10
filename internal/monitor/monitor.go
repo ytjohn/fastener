@@ -255,7 +255,7 @@ func (m *monitor) stopRequest() (session.StopRequest, bool) {
 }
 
 func (m *monitor) agentEnv() ([]string, error) {
-	layers := [][]string{m.sess.EnvBase}
+	layers := [][]string{m.sess.EnvBase, m.plan.Env}
 	if m.sess.EnvFile != "" {
 		f, err := runenv.ReadFile(m.sess.EnvFile)
 		if err != nil {
@@ -303,6 +303,14 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	p, ok := parser.Get(m.plan.Parser)
 	if !ok {
 		return m.launchFailed(fmt.Errorf("unknown parser %q", m.plan.Parser))
+	}
+	var urls *urlWatch
+	if m.plan.URLPattern != "" {
+		re, err := regexp.Compile(m.plan.URLPattern)
+		if err != nil {
+			return m.launchFailed(fmt.Errorf("url_pattern: %w", err))
+		}
+		urls = &urlWatch{m: m, sm: parser.NewStreamMatcher(re)}
 	}
 	cmd := exec.Command(m.plan.Argv[0], m.plan.Argv[1:]...)
 	cmd.Dir = m.sess.Cwd
@@ -416,8 +424,15 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	})
 
 	var src io.Reader = pr
+	var taps []io.Writer // each never blocks or fails
 	if pt != nil {
-		src = io.TeeReader(pr, pt.srv) // the server never blocks or fails
+		taps = append(taps, pt.srv)
+	}
+	if urls != nil {
+		taps = append(taps, urls)
+	}
+	if len(taps) > 0 {
+		src = io.TeeReader(pr, io.MultiWriter(taps...))
 	}
 	drained := make(chan struct{})
 	go func() {
@@ -426,7 +441,7 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 		m.pump(src, out, p)
 	}()
 	stopFlush := make(chan struct{})
-	go m.flushLoop(stopFlush)
+	go m.flushLoop(stopFlush, urls)
 
 	var limit <-chan time.Time
 	if m.sess.MaxRuntime > 0 {
@@ -849,8 +864,9 @@ func (m *monitor) endLine(p parser.Parser, line []byte, overlong bool) {
 	m.dirty = true
 }
 
-// flushLoop writes parser updates at most once per second.
-func (m *monitor) flushLoop(stop <-chan struct{}) {
+// flushLoop writes parser updates at most once per second; it also lets a
+// url watch take a match held at the end of quiet output.
+func (m *monitor) flushLoop(stop <-chan struct{}, urls *urlWatch) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {
@@ -858,6 +874,9 @@ func (m *monitor) flushLoop(stop <-chan struct{}) {
 		case <-stop:
 			return
 		case <-t.C:
+			if urls != nil {
+				urls.flush()
+			}
 			m.flush()
 		}
 	}
@@ -871,4 +890,41 @@ func unwrapPath(err error) error {
 		return pe.Err
 	}
 	return err
+}
+
+// urlWatch matches the plan's url_pattern against the agent's output stream
+// and records the latest match as remote_url (flushed with parser fields).
+type urlWatch struct {
+	m  *monitor
+	mu sync.Mutex
+	sm *parser.StreamMatcher
+}
+
+func (u *urlWatch) Write(p []byte) (int, error) {
+	u.mu.Lock()
+	found := u.sm.Feed(p)
+	u.mu.Unlock()
+	u.record(found)
+	return len(p), nil
+}
+
+func (u *urlWatch) flush() {
+	u.mu.Lock()
+	found := u.sm.Flush()
+	u.mu.Unlock()
+	u.record(found)
+}
+
+func (u *urlWatch) record(url string) {
+	if url == "" {
+		return
+	}
+	m := u.m
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// The matcher already refuses cut-short copies (parser.StreamMatcher).
+	if m.st.RemoteURL != url {
+		m.st.RemoteURL = url
+		m.dirty = true
+	}
 }
