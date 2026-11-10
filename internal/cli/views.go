@@ -67,6 +67,11 @@ type psRow struct {
 	Labels    map[string]string `json:"labels,omitempty"`
 	// RemoteURL is a remote bridge's URL, once it has reported one.
 	RemoteURL string `json:"remote_url,omitempty"`
+	// Interactive marks a generation running on a pty (plan.pty), and
+	// AttachedClients is how many terminals are attached to it (while it
+	// runs; from status.json, flushed about once a second).
+	Interactive     bool `json:"interactive,omitempty"`
+	AttachedClients *int `json:"attached_clients,omitempty"`
 }
 
 func handshakeTimeout() time.Duration {
@@ -156,6 +161,15 @@ func renderInspect(stdout io.Writer, v *session.View, out inspectOut) {
 		row("agent_error", fmt.Sprint(*s.AgentError))
 	}
 	row("remote_url", s.RemoteURL)
+	if v.Plan != nil && v.Plan.PTY != nil {
+		row("interactive", "yes")
+		if v.State == session.StateRunning {
+			row("attach_socket", s.AttachSocket)
+			if s.AttachedClients != nil {
+				row("attached", fmt.Sprint(*s.AttachedClients))
+			}
+		}
+	}
 	for _, u := range s.RemoteSessions {
 		row("remote_session", u)
 	}
@@ -217,6 +231,10 @@ func cmdPs(args []string, stdout, stderr io.Writer) int {
 			Name: n, Backend: v.Session.Backend, State: v.State, CreatedAt: v.Session.CreatedAt,
 			EndedAt: v.Status.EndedAt, EndedBy: v.Status.EndedBy, ExitCode: v.Status.ExitCode,
 			Labels: v.Session.Labels, RemoteURL: v.Status.RemoteURL,
+			Interactive: v.Plan != nil && v.Plan.PTY != nil,
+		}
+		if row.Interactive && v.State == session.StateRunning {
+			row.AttachedClients = v.Status.AttachedClients
 		}
 		if matchAll(filters, row) {
 			rows = append(rows, row)
