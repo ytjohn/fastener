@@ -6,9 +6,11 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/ytjohn/fastener/internal/config"
+	"github.com/ytjohn/fastener/internal/finder"
 	"github.com/ytjohn/fastener/internal/launcher"
 	"github.com/ytjohn/fastener/internal/profile"
 	"github.com/ytjohn/fastener/internal/runenv"
@@ -31,7 +33,7 @@ const (
 const (
 	// skipped
 	rsNotOnReboot    = "not_on_reboot"   // restart is not on-reboot
-	rsNotRemote      = "not_remote"      // a headless session is never rerun; interactive arrives in v0.4
+	rsNotRemote      = "not_remote"      // a headless session is never rerun (only bridges and interactive sessions are)
 	rsRunning        = "running"         // still supervised (or another restore just relaunched it)
 	rsNotLost        = "not_lost"        // exited: it was stopped or ended, not lost to a reboot
 	rsOrphans        = "orphans"         // marked processes of the old generation are alive
@@ -51,6 +53,10 @@ const (
 	rsExited       = reasonExited    // the bridge ended before reporting its URL
 	rsLost         = "lost"          // the relaunched monitor died; left lost for stop/rm
 	rsError        = "error"         // an I/O error while relaunching
+	// interactive sessions
+	rsNoResume       = "no_resume"             // the profile cannot resume an interactive session
+	rsNoConversation = "no_conversation"       // nothing to resume: the agent never wrote a conversation (or it is ambiguous)
+	rsCandidate      = "unconfirmed_candidate" // only a heuristic candidate; needs --accept-candidate
 )
 
 type restoreOut struct {
@@ -66,10 +72,15 @@ func cmdRestore(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("restore [name...]", stderr)
 	dry := fs.Bool("dry-run", false, "show what would be restored; change nothing")
 	asJSON := fs.Bool("json", false, "print JSON")
+	accept := fs.Bool("accept-candidate", false, "for the named interactive sessions: resume a conversation_candidate (a heuristic finder's guess) as their conversation")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return parseFail(err)
 	}
+	if *accept && len(pos) == 0 {
+		return fail(stderr, usagef("--accept-candidate needs the sessions named: it confirms a guess, which is never done for every session at once"))
+	}
+	acceptCandidate = *accept
 	for _, n := range pos {
 		if !session.ValidName(n) {
 			return fail(stderr, usagef("invalid session name %q", n))
@@ -116,6 +127,10 @@ func cmdRestore(args []string, stdout, stderr io.Writer) int {
 	}
 	return code
 }
+
+// acceptCandidate is restore's --accept-candidate: resume an interactive
+// session's conversation_candidate. Only ever set for named sessions.
+var acceptCandidate bool
 
 // restoreLockWait bounds how long restore waits for another restore of the
 // same session: that one's handshake plus its wait for the URL, with margin.
@@ -187,15 +202,16 @@ func restoreOne(name string, explicit, dry bool, stderr io.Writer) (r restoreOut
 
 // notRestorable is why v cannot be restored at all, "" if it can be tried.
 // Lost and restore-failed sessions with restart=on-reboot that are remote
-// bridges can be, and, when named (explicit), one that `stop` finalized from
-// lost (after cleaning up the orphans that made restore skip it).
+// bridges or interactive sessions can be, and, when named (explicit), one
+// that `stop` finalized from lost (after cleaning up the orphans that made
+// restore skip it).
 func notRestorable(v *session.View, explicit bool) (reason, msg string) {
 	s := v.Session
 	switch {
 	case s.Restart != restartOnReboot:
 		return rsNotOnReboot, fmt.Sprintf("restart is %q, not on-reboot", s.Restart)
-	case s.Kind != session.KindRemote || !s.Remote:
-		return rsNotRemote, fmt.Sprintf("a %s session is never restored (only remote bridges are, in this version)", kindOf(s))
+	case !(s.Kind == session.KindRemote && s.Remote) && s.Kind != session.KindInteractive:
+		return rsNotRemote, fmt.Sprintf("a %s session is never restored (only remote bridges and interactive sessions are)", kindOf(s))
 	case v.Alive():
 		return rsRunning, "the session is " + v.State
 	case v.State == session.StateExited && explicit && v.FinalizedFromLost():
@@ -264,7 +280,13 @@ func (e *restoreFailure) Error() string { return e.msg }
 // using the intent in session.json (backend, permissions, name, environment).
 // Nothing falls back: a profile without [remote], a level it no longer
 // defines, or a binary that is gone is a failure with its reason.
-func prepareRestore(s session.Session) (*prepared, *restoreFailure) {
+//
+// An interactive session is rendered from [interactive] (and
+// [interactive.remote] when it is remote) resuming its conversation (see
+// restoreConversation) through the profile's [resume] or [interactive]
+// session_id; v is needed for that, and may be nil for a bridge.
+func prepareRestore(v *session.View) (*prepared, *restoreFailure) {
+	s := v.Session
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, &restoreFailure{rsConfig, err.Error()}
@@ -273,21 +295,38 @@ func prepareRestore(s session.Session) (*prepared, *restoreFailure) {
 	if err != nil {
 		return nil, &restoreFailure{rsProfile, err.Error()}
 	}
-	r, err := prof.RenderRemote(profile.Request{Permissions: s.Permissions, Name: s.Name})
+	interactive := s.Kind == session.KindInteractive
+	var r profile.Rendered
+	var fileEnv []string
+	if s.EnvFile != "" {
+		if fileEnv, err = runenv.ReadFile(s.EnvFile); err != nil {
+			return nil, &restoreFailure{rsEnvFile, "env file: " + err.Error()}
+		}
+	}
+	if interactive {
+		if !prof.CanResumeInteractive() {
+			return nil, &restoreFailure{rsNoResume, fmt.Sprintf("backend %s cannot resume an interactive session (its profile has neither [resume] nor [interactive] session_id)", s.Backend)}
+		}
+		id, f := restoreConversation(v, runenv.Merge(s.EnvBase, planEnv(v), fileEnv, s.Env))
+		if f != nil {
+			return nil, f
+		}
+		r, err = prof.RenderInteractive(profile.Request{Permissions: s.Permissions, Model: s.Model, Name: s.Name, ResumeID: id}, s.Remote)
+	} else {
+		r, err = prof.RenderRemote(profile.Request{Permissions: s.Permissions, Name: s.Name})
+	}
 	switch {
-	case errors.Is(err, profile.ErrNoRemote):
+	case errors.Is(err, profile.ErrNoRemote), errors.Is(err, profile.ErrNoInteractive):
 		return nil, &restoreFailure{rsNoRemote, err.Error()}
+	case errors.Is(err, profile.ErrNoResume):
+		return nil, &restoreFailure{rsNoResume, err.Error()}
 	case errors.Is(err, profile.ErrNoPermissionLevel):
 		return nil, &restoreFailure{rsNoPermission, err.Error()}
 	case err != nil:
 		return nil, &restoreFailure{rsProfile, err.Error()}
 	}
-	p := &prepared{cfg: cfg, prof: prof, perms: s.Permissions, rendered: r, envBase: s.EnvBase, envFile: s.EnvFile}
-	if s.EnvFile != "" {
-		if p.fileEnv, err = runenv.ReadFile(s.EnvFile); err != nil {
-			return nil, &restoreFailure{rsEnvFile, "env file: " + err.Error()}
-		}
-	}
+	p := &prepared{cfg: cfg, prof: prof, perms: s.Permissions, rendered: r, envBase: s.EnvBase, envFile: s.EnvFile,
+		fileEnv: fileEnv, interactive: interactive}
 	p.argv0, err = runenv.LookPath(prof.Command, runenv.Get(p.mergedEnv(s.Env), "PATH"))
 	if err != nil {
 		return nil, &restoreFailure{rsBinary, err.Error()}
@@ -302,7 +341,7 @@ func dryRestore(v *session.View) (restoreOut, bool) {
 		r.Result, r.Reason, r.Message = restoreSkipped, reason, msg
 		return r, true
 	}
-	if _, f := prepareRestore(v.Session); f != nil {
+	if _, f := prepareRestore(v); f != nil {
 		r.Result, r.Reason, r.Message = restoreWouldFail, f.reason, f.msg
 		return r, true
 	}
@@ -325,7 +364,7 @@ func relaunch(v *session.View, stderr io.Writer) restoreOut {
 		}
 		return r
 	}
-	p, f := prepareRestore(v.Session)
+	p, f := prepareRestore(v)
 	if f != nil {
 		return failed(f.reason, f.msg, true)
 	}
@@ -342,6 +381,16 @@ func relaunch(v *session.View, stderr io.Writer) restoreOut {
 		Argv: append([]string{p.argv0}, p.rendered.Args...), PromptMode: p.rendered.PromptMode,
 		Parser: p.rendered.Parser, DedupeFrames: p.rendered.DedupeFrames, ProfileSource: p.prof.Source, ProfileSHA256: p.prof.SHA256,
 		Marker: session.NewMarker(name, gen), FastenerVersion: version.String(), PlannedAt: now,
+		URLPattern: p.rendered.URLPattern, Env: p.rendered.Env,
+		SessionID: p.rendered.SessionID, Finder: p.rendered.Finder,
+	}
+	if p.interactive {
+		// The same terminal size as before; attaching resizes it anyway.
+		size := session.PTYPlan{Rows: session.DefaultPTYRows, Cols: session.DefaultPTYCols}
+		if v.Plan != nil && v.Plan.PTY != nil {
+			size = *v.Plan.PTY
+		}
+		plan.PTY = &size
 	}
 	// Rotate the old generation's logs, drop a leftover stop request (the
 	// monitor would ignore it, being for another generation, but a later
@@ -365,6 +414,15 @@ func relaunch(v *session.View, stderr io.Writer) restoreOut {
 		reason, record := earlyOutcome(nv, rsLaunch)
 		return failed(reason, err.Error(), record)
 	}
+	if !v.Session.Remote {
+		// An interactive session without remote control: up is up.
+		r.Result = restoreRestored
+		if nv != nil && nv.State == session.StateExited {
+			reason, record := earlyOutcome(nv, rsExited)
+			return failed(reason, fmt.Sprintf("generation %d ended at once (ended_by=%s)", gen, nv.Status.EndedBy), record)
+		}
+		return r
+	}
 	nv, err = waitRemoteURL(nv, p, p.cfg.RemoteWaitDuration())
 	if err != nil {
 		var rf *remoteFailure
@@ -383,8 +441,8 @@ func relaunch(v *session.View, stderr io.Writer) restoreOut {
 	}
 	r.Result, r.RemoteURL = restoreRestored, nv.Status.RemoteURL
 	if r.RemoteURL == "" {
-		fmt.Fprintf(stderr, "fastener: %s: no URL yet after %s; the bridge is still running (fastener inspect %s shows the URL once reported)\n",
-			name, p.cfg.RemoteWaitDuration(), name)
+		fmt.Fprintf(stderr, "fastener: %s: no URL yet after %s; the %s is still running (fastener inspect %s shows the URL once reported)\n",
+			name, p.cfg.RemoteWaitDuration(), remoteNoun(p), name)
 	}
 	return r
 }
@@ -402,4 +460,71 @@ func earlyOutcome(nv *session.View, reason string) (string, bool) {
 		return rsLost, false
 	}
 	return reason, false
+}
+
+// planEnv is the previous plan's profile env ([interactive].env), if any.
+func planEnv(v *session.View) []string {
+	if v.Plan == nil {
+		return nil
+	}
+	return v.Plan.Env
+}
+
+// restoreConversation picks the conversation an interactive session resumes
+// (design §8.4), from its last generation:
+//   - status conversation_id: exact, resumed;
+//   - else, the ID assigned at launch (plan session_id), if the finder now
+//     finds the agent wrote it (the monitor may have died before it looked):
+//     exact, resumed;
+//   - else a candidate (status conversation_candidate, or the finder's
+//     heuristic answer now) only with --accept-candidate;
+//   - else there is nothing to resume, and the restore fails: it never
+//     starts a fresh conversation in its place.
+func restoreConversation(v *session.View, env []string) (string, *restoreFailure) {
+	st, plan := v.Status, v.Plan
+	if st.ConversationID != "" {
+		return st.ConversationID, nil
+	}
+	var find finder.Finder
+	if plan != nil && plan.Finder != "" {
+		find, _ = finder.Get(plan.Finder)
+	}
+	q := finder.Query{Cwd: v.Session.Cwd, Env: env}
+	if st.StartedAt != nil {
+		q.StartedAt = *st.StartedAt
+	}
+	if plan != nil && plan.SessionID != "" {
+		q.SessionID = plan.SessionID
+		if find != nil {
+			if id, err := find(q); err == nil && id != "" {
+				return id, nil
+			}
+		}
+		return "", &restoreFailure{rsNoConversation, fmt.Sprintf(
+			"session %s has no conversation to resume: the agent never wrote conversation %s (nothing was sent to it?); restore never starts a fresh one",
+			v.Session.Name, plan.SessionID)}
+	}
+	if strings.HasPrefix(st.ConversationError, finder.ErrAmbiguous.Error()) {
+		// The monitor saw more than one candidate: that stays so.
+		return "", &restoreFailure{rsNoConversation, fmt.Sprintf("session %s: %s; restore cannot tell which to resume", v.Session.Name, st.ConversationError)}
+	}
+	cand := st.ConversationCandidate
+	if cand == "" && find != nil {
+		// Nothing recorded (the monitor may have died before it looked): ask now.
+		if id, err := find(q); err == nil {
+			cand = id
+		} else if errors.Is(err, finder.ErrAmbiguous) {
+			return "", &restoreFailure{rsNoConversation, fmt.Sprintf("session %s: %v; restore cannot tell which to resume", v.Session.Name, err)}
+		}
+	}
+	switch {
+	case cand != "" && acceptCandidate:
+		return cand, nil
+	case cand != "":
+		n := v.Session.Name
+		return "", &restoreFailure{rsCandidate, fmt.Sprintf(
+			"session %s's conversation is only a guess (%s, from finder %s): another conversation in the same folder could be it; to resume it anyway: fastener restore --accept-candidate %s",
+			n, cand, plan.Finder, n)}
+	}
+	return "", &restoreFailure{rsNoConversation, fmt.Sprintf("session %s has no conversation to resume; restore never starts a fresh one", v.Session.Name)}
 }

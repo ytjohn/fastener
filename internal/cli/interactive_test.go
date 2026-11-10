@@ -224,7 +224,7 @@ func TestRunInteractiveRefusals(t *testing.T) {
 		{[]string{"run", "fakei", "--interactive", "--cwd", h.work, "--size", "0x80"}, "ROWSxCOLS"},
 		{[]string{"run", "fakei", "--cwd", h.work, "--prompt", "x", "--size", "40x80"}, "need --interactive"},
 		{[]string{"run", "fakei", "--cwd", h.work, "--prompt", "x", "--attach"}, "need --interactive"},
-		{[]string{"run", "fakei", "--interactive", "--remote", "--restart", "on-reboot", "--cwd", h.work}, "#55"},
+		{[]string{"run", "fakei", "--interactive", "--remote", "--restart", "on-reboot", "--cwd", h.work}, "cannot resume"},
 		{[]string{"run", "fakei", "--interactive", "--follow", "--cwd", h.work}, "--attach"},
 		{[]string{"run", "fakei", "--interactive", "--attach", "--cwd", h.work}, "terminal on stdin"},
 	} {

@@ -35,7 +35,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	fs.BoolVar(&follow, "follow", false, "follow output after launch")
 	fs.BoolVar(&asJSON, "json", false, "print the session as JSON")
 	fs.BoolVar(&o.Remote, "remote", false, "start the backend's remote bridge ([remote] in its profile) instead of a headless run; takes no prompt")
-	fs.StringVar(&o.Restart, "restart", restartNo, "restart policy: no|on-reboot (on-reboot needs --remote; `fastener restore` relaunches it after a reboot)")
+	fs.StringVar(&o.Restart, "restart", restartNo, "restart policy: no|on-reboot (on-reboot needs --remote or --interactive; `fastener restore` relaunches it after a reboot, an interactive session resuming its conversation)")
 	fs.BoolVar(&o.Interactive, "interactive", false, "run the backend's TUI ([interactive] in its profile) on a pty you can attach to; the prompt is optional; with --remote, also driven remotely ([interactive.remote])")
 	fs.StringVar(&sizeFlag, "size", "", "with --interactive: the terminal size as ROWSxCOLS (default: this terminal's size, else 24x80)")
 	fs.BoolVar(&attachAfter, "attach", false, "with --interactive: attach this terminal right after the launch, as fastener attach does")
