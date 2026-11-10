@@ -3,16 +3,14 @@ package cli_test
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/ytjohn/fastener/internal/attach"
+	"github.com/ytjohn/fastener/internal/launcher"
 	"github.com/ytjohn/fastener/internal/session"
 )
 
@@ -47,30 +45,21 @@ func startPTYSession(t *testing.T, h *harness, launch string) session.Dir {
 			t.Fatal(err)
 		}
 	}
-	switch launch {
-	case "setsid":
-		logf, err := os.OpenFile(d.MonitorLog(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer logf.Close()
-		c := exec.Command(fastenerBin, "_monitor", string(d), "1")
-		c.Dir, c.Stdout, c.Stderr = "/", logf, logf
-		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-		if err := c.Start(); err != nil {
-			t.Fatal(err)
-		}
-		go c.Wait() // reap it when it exits
-	case "systemd":
-		unit := fmt.Sprintf("fastener-pty1-g1-test%d.service", time.Now().UnixNano())
-		out, err := exec.Command("systemd-run", "--user", "--unit="+unit, "--collect", "--quiet",
-			"-p", "Type=exec", "-p", "KillMode=mixed", "-p", "StandardInput=null",
-			"-p", "StandardOutput=append:"+d.MonitorLog(), "-p", "StandardError=append:"+d.MonitorLog(),
-			"--", fastenerBin, "_monitor", string(d), "1").CombinedOutput()
-		if err != nil {
-			t.Fatalf("systemd-run: %v\n%s", err, out)
-		}
-		t.Cleanup(func() { waitUnitGone(t, unit, 45*time.Second) })
+	// The real launchers, pointed at the fastener binary (the test binary
+	// is not one).
+	var l launcher.Launcher = launcher.Setsid{Exe: fastenerBin}
+	if launch == "systemd" {
+		l = launcher.Systemd{Exe: fastenerBin}
+	}
+	rec, err := l.Start(d, 1)
+	if err != nil {
+		t.Fatalf("%s launcher: %v", launch, err)
+	}
+	if err := session.WriteJSON(d.LauncherPath(1), rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Unit != "" {
+		t.Cleanup(func() { waitUnitGone(t, rec.Unit, 45*time.Second) })
 	}
 	return d
 }
