@@ -591,9 +591,9 @@ fastener check <backend> | --all [--static] [--keep] [--expect-model M] [run opt
 fastener version [--json]
 fastener authorize claude-folder-trust <dir> [--json]    # v0.3, §8.3
 fastener authorize --list [--json] | --revoke <dir> [--json]
+fastener attach <name> [--detach-key KEY] [--quiet]          # v0.4
 # phase B
 fastener run <backend> --interactive [--remote] [--restart no|on-reboot] ...
-fastener attach <name>
 ```
 
 - **`run`:**
@@ -625,6 +625,14 @@ fastener attach <name>
   - Exits 127 for a session name that never existed.
 
   A caller can therefore tell "timed out" from "lost" without a follow-up `inspect`. As with Podman, 124, 125 and 127 can collide with real agent exit codes. The documentation names `inspect --json` as the authoritative answer.
+- **`attach`** (v0.4): connects the terminal to an interactive session's pty through `status.attach_socket` (§8.2, docs/attach-protocol.md). Stdin must be a terminal; it is put in raw mode, so every key (ctrl-c included) goes to the agent, and SIGWINCH is forwarded as a resize. The detach key (`--detach-key`, else config `detach_key`, default `ctrl-]`; `ctrl-a`…`ctrl-z`, `ctrl-@`, `ctrl-\`, `ctrl-]`, `ctrl-^`, `ctrl-_`, or `none`; `ctrl-[` is ESC and refused) leaves the session running; it is matched anywhere in the input, so pasting it detaches too, and there is no way to send it literally. A one-line hint naming the key goes to stderr when it is a terminal, unless `--quiet`. The terminal is restored on every way out: the detach key, the session ending, an error frame from the monitor, a lost connection, SIGINT/SIGTERM/SIGHUP to `attach` itself, and a panic. Then one line on stderr says what happened (`[fastener: detached from <name>]`, `[fastener: session <name> exited N]`, …). Exit codes:
+  - 0: detached (the detach key, or stdin ended);
+  - the session's code when it ended while attached, mapped as `wait` maps it (128+N for a signal, 125 for `launch-failed`);
+  - 1: could not attach: the session is not interactive (its plan has no `pty`), not `running`, has no attach socket, or the monitor refused the connection (`busy`, `version`);
+  - 2: usage error, a bad detach key, or stdin not a terminal;
+  - 125: the attachment was lost after it was made (the connection closed without an exit, or the monitor dropped this client, e.g. as `slow`);
+  - 127: no such session;
+  - 128+N: `attach` itself got signal N; the session keeps running.
 - **`logs`:** prints `output.log`; `--stderr` prints `stderr.log`; `-f` follows until the session ends; `--generation N` prints a restored session's earlier generation (`output.<N>.log`, §8.4).
 - **`restore`** and **`install-restore`:** §8.4. `--restart on-reboot` needs `--remote` in v0.3.
 - **`rm`:** refuses a session that is alive, or has orphans (including descendants an exited agent or a failed restore left behind), or that a `restore` is relaunching (even with `--force`), unless `--force` (which stops it first). `--force` also removes a corrupt session that cannot be loaded, after killing whatever marked processes it can still identify. Orphans that survive SIGKILL block removal.
@@ -656,7 +664,7 @@ fastener attach <name>
   - `handshake_timeout`
   - `launcher` (`auto` | `systemd` | `setsid`)
   - `env_passthrough`
-  - `detach_key`
+  - `detach_key` (default `ctrl-]`; see `attach`)
   - `remote_wait` (positive duration, default `15s`: how long `run --remote` waits for a bridge's URL)
   - `trust_dirs` (array of absolute folders: a user-maintained allowlist for `authorize claude-folder-trust`, §8.3; Fastener never writes this file, and keeps its own records in `authorizations.json`)
 - **Environment overrides:** `FASTENER_STATE_DIR` and `FASTENER_CONFIG_DIR` override the state and config locations (§3).
