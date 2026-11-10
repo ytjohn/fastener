@@ -205,6 +205,9 @@ func (m *monitor) finish(endedBy string, mutate func(*session.Status)) {
 	m.update(func(s *session.Status) {
 		now := time.Now().UTC()
 		s.State, s.EndedBy, s.EndedAt = session.StateExited, endedBy, &now
+		// The attach socket goes with the monitor, on every path to an
+		// outcome (also a stop or launch failure before the spawn).
+		s.AttachSocket, s.AttachedClients = "", nil
 		if mutate != nil {
 			mutate(s)
 		}
@@ -492,7 +495,6 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	m.finish(endedBy, func(s *session.Status) {
 		exitFacts(s, ps)
 		s.OutputTruncated = truncated
-		s.AttachSocket, s.AttachedClients = "", nil // the socket goes with the monitor
 	})
 	return 0
 }

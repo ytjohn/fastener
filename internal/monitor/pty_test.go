@@ -387,3 +387,42 @@ func TestHeadlessPlanHasNoAttach(t *testing.T) {
 		t.Fatalf("status.json mentions attach: %s", b)
 	}
 }
+
+// TestFinishClearsAttachFields: every path to an outcome drops the attach
+// fields, including those that never reach the spawn (a stop or a launch
+// failure while a client was attached during starting).
+func TestFinishClearsAttachFields(t *testing.T) {
+	m := newTestMonitor(t)
+	one := 1
+	m.update(func(s *session.Status) { s.AttachSocket, s.AttachedClients = "/x/attach.sock", &one })
+	m.launchFailed(errors.New("boom"))
+	var st session.Status
+	if err := session.ReadJSON(m.d.StatusPath(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.State != session.StateExited || st.AttachSocket != "" || st.AttachedClients != nil {
+		t.Fatalf("exit record keeps attach fields: %+v", st)
+	}
+}
+
+// TestClientCountOnlyWhileRunning: a count reported while starting or after
+// the outcome is not recorded.
+func TestClientCountOnlyWhileRunning(t *testing.T) {
+	m := newTestMonitor(t)
+	p := &ptyIO{m: m}
+	m.st.State = session.StateStarting
+	p.clients(2)
+	if m.st.AttachedClients != nil {
+		t.Fatal("count recorded while starting")
+	}
+	m.st.State = session.StateRunning
+	p.clients(3)
+	if m.st.AttachedClients == nil || *m.st.AttachedClients != 3 {
+		t.Fatalf("count while running: %v", m.st.AttachedClients)
+	}
+	m.finish(session.EndedByExit, nil)
+	p.clients(4)
+	if m.st.AttachedClients != nil {
+		t.Fatalf("count recorded after the outcome: %v", *m.st.AttachedClients)
+	}
+}

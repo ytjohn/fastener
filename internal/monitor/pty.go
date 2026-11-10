@@ -146,12 +146,14 @@ func (p *ptyIO) reaping() {
 	p.sigMu.Unlock()
 }
 
-// clients records the attached-client count; the flush loop writes it.
+// clients records the attached-client count while the agent runs; the
+// flush loop writes it. (The running record sets it from srv.Clients, so a
+// client that attached during starting is counted too.)
 func (p *ptyIO) clients(n int) {
 	m := p.m
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.final || m.st.State == session.StateExited {
+	if m.final || m.st.State != session.StateRunning {
 		return
 	}
 	m.st.AttachedClients = &n
