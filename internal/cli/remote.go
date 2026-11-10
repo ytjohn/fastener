@@ -140,22 +140,33 @@ func trustCheck(v *session.View, p *prepared) (pattern, hint string, text []byte
 	return
 }
 
-// withoutPrompt removes every echo of the session's initial prompt from
-// text, comparing with runs of whitespace collapsed (the TUI may wrap it),
-// so a prompt that quotes the trust dialog cannot pass for it. The
-// untrusted pattern is the real guard: it matches the dialog's heading and
-// its option text together.
+// minPromptEcho is the shortest prompt whose echo withoutPrompt removes. A
+// shorter prompt ("trust", "Quick safety check") could not reproduce the
+// whole dialog the pattern needs anyway, and removing it could cut words out
+// of the real dialog.
+const minPromptEcho = 40
+
+// withoutPrompt removes the first echo of the session's initial prompt from
+// text (case-insensitively, as untrusted patterns are; with runs of
+// whitespace collapsed on both sides, since the TUI may wrap it), so a long
+// prompt that quotes the trust dialog cannot pass for it. Prompts shorter
+// than minPromptEcho are left alone. The untrusted pattern is the real
+// guard: it matches the dialog's heading and its option text together.
 func withoutPrompt(text []byte, promptPath string) []byte {
+	norm := strings.Join(strings.Fields(string(text)), " ")
 	b, err := os.ReadFile(promptPath)
 	if err != nil {
-		return text
-	}
-	prompt := strings.Join(strings.Fields(string(parser.StripForMatch(b))), " ")
-	norm := strings.Join(strings.Fields(string(text)), " ")
-	if prompt == "" {
 		return []byte(norm)
 	}
-	return []byte(strings.ReplaceAll(norm, prompt, " "))
+	prompt := strings.Join(strings.Fields(string(parser.StripForMatch(b))), " ")
+	if len(prompt) < minPromptEcho {
+		return []byte(norm)
+	}
+	loc := regexp.MustCompile("(?i)" + regexp.QuoteMeta(prompt)).FindStringIndex(norm)
+	if loc == nil {
+		return []byte(norm)
+	}
+	return []byte(norm[:loc[0]] + " " + norm[loc[1]:])
 }
 
 // untrustedFailure reports the folder untrusted when the output matches the

@@ -274,3 +274,16 @@ func TestRunInteractiveRemotePromptQuotingDialog(t *testing.T) {
 		}
 	}
 }
+
+// TestRunInteractiveRemoteShortPromptKeepsDialog: a short prompt made of
+// the dialog's own words does not hide the real dialog.
+func TestRunInteractiveRemoteShortPromptKeepsDialog(t *testing.T) {
+	h := newInteractiveHarness(t)
+	for i, prompt := range []string{"trust", "Quick safety check", "Yes, I trust this folder"} {
+		_, errOut, code := h.cmd("run", "fakei", "--interactive", "--remote", "--cwd", h.work, "--name", fmt.Sprintf("s%d", i),
+			"--prompt", prompt, "--env", "FAKE_PTY_RUN=cat "+trustDialogFixture(t))
+		if code != 1 || !strings.Contains(errOut, "is not a trusted workspace") {
+			t.Errorf("prompt %q hid the dialog: exit %d: %s", prompt, code, errOut)
+		}
+	}
+}
