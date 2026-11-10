@@ -310,7 +310,10 @@ func heapPeak(f func()) uint64 {
 }
 
 // TestPumpDedupeRealCapture runs the sanitized Claude capture through the
-// pump: every distinct state is logged once, without cursor escapes.
+// pump: every distinct state is logged once, without cursor escapes. The
+// capture (Claude Code 2.1.319, 4,351 bytes) gives 1,684 bytes of
+// output.log, and the size is pinned, so a change to how its frames are
+// recognised is noticed.
 func TestPumpDedupeRealCapture(t *testing.T) {
 	raw, err := os.ReadFile("../parser/testdata/claude-remote.txt")
 	if err != nil {
@@ -332,5 +335,8 @@ func TestPumpDedupeRealCapture(t *testing.T) {
 	}
 	if m.st.RemoteURL == "" || len(m.st.RemoteSessions) != 1 {
 		t.Errorf("fields = %+v", m.st.Fields)
+	}
+	if out.Len() != 1684 {
+		t.Errorf("output.log is %d bytes, was 1684: if the change is intended, update this and the numbers in dedupe_styles_test.go and design §8.1", out.Len())
 	}
 }
