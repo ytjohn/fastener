@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -36,6 +37,8 @@ type Query struct {
 	Env []string
 	// SessionID is the ID assigned at launch, if the profile assigns one.
 	SessionID string
+	// Logf, optional, is told about IDs a finder skipped as invalid.
+	Logf func(format string, args ...any)
 }
 
 // Errors a finder returns when it has no ID.
@@ -58,10 +61,51 @@ var finders = map[string]Finder{
 	"pi-sessions":        piSessions,
 }
 
-// Get returns the named finder.
+// Get returns the named finder. Whatever it returns has passed ValidID:
+// a conversation ID goes into an agent's argv on restore, and the stores
+// it comes from are files anyone with the user's rights can write.
 func Get(name string) (Finder, bool) {
 	f, ok := finders[name]
-	return f, ok
+	if !ok {
+		return nil, false
+	}
+	return func(q Query) (string, error) {
+		if q.SessionID != "" && !ValidID(q.SessionID) {
+			return "", fmt.Errorf("invalid session ID %q", q.SessionID)
+		}
+		id, err := f(q)
+		if err == nil && !ValidID(id) {
+			q.logf("finder %s: ignoring invalid conversation ID %q", name, id)
+			return "", notFound("only an invalid ID")
+		}
+		var ae *AmbiguousError
+		if errors.As(err, &ae) {
+			var ok []string
+			for _, c := range ae.IDs {
+				if ValidID(c) {
+					ok = append(ok, c)
+				} else {
+					q.logf("finder %s: ignoring invalid conversation ID %q", name, c)
+				}
+			}
+			ae.IDs = ok
+		}
+		return id, err
+	}, true
+}
+
+// idRE is the shape of every conversation ID the agents use: Claude Code
+// 2.1.322, pi 0.84.4 and codex-cli 0.167.0 all name conversations by UUID
+// (Codex's look like version 7).
+var idRE = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// ValidID reports whether id has the shape of a conversation ID (a UUID).
+func ValidID(id string) bool { return idRE.MatchString(id) }
+
+func (q Query) logf(format string, args ...any) {
+	if q.Logf != nil {
+		q.Logf(format, args...)
+	}
 }
 
 // Names lists the finders, sorted.

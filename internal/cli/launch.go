@@ -48,16 +48,17 @@ const (
 	restartOnReboot = "on-reboot"
 )
 
-// validateRestart checks --restart. on-reboot is for remote bridges only: a
-// headless prompt may have side effects, so it is never rerun, and restoring
-// interactive sessions (from their conversation) is not implemented yet.
+// validateRestart checks --restart. on-reboot is for remote bridges and
+// interactive sessions (resumed from their conversation; prepare checks that
+// the profile can resume one); a headless prompt may have side effects, so
+// it is never rerun.
 func validateRestart(policy string, remote, interactive bool) error {
 	switch policy {
 	case "", restartNo:
 		return nil
 	case restartOnReboot:
 		if interactive {
-			return usagef("--restart on-reboot cannot be used with --interactive yet: restoring interactive sessions is not implemented (#55)")
+			return nil
 		}
 		if !remote {
 			return usagef("--restart on-reboot needs --remote: a headless session is never rerun after a reboot")
@@ -120,6 +121,9 @@ func prepare(o launchOptions, prompt, name string) (*prepared, error) {
 		r, err = prof.RenderInteractive(req, o.Remote)
 		if errors.Is(err, profile.ErrNoInteractive) {
 			err = usagef("%v", err) // no silent fallback to a headless run
+		}
+		if err == nil && o.Restart == restartOnReboot && !prof.CanResumeInteractive() {
+			err = usagef("--restart on-reboot: backend %s cannot resume an interactive session (its profile has neither [resume] nor [interactive] session_id)", o.Backend)
 		}
 	} else if o.Remote {
 		r, err = prof.RenderRemote(req)

@@ -170,8 +170,21 @@ func (i *Interactive) InteractiveParser() string {
 // DefaultRemoteParser is [remote].parser when the profile names none.
 const DefaultRemoteParser = "claude-remote"
 
+// Resume is how an interactive session is resumed (`fastener restore`):
+// Args ({conversation_id} exactly once) take the place of [interactive]
+// session_id. With Subcommand they come right after the command, before
+// [interactive].args, as `codex resume <id>` must; otherwise after them.
 type Resume struct {
-	Args []string `toml:"args"`
+	Args       []string `toml:"args"`
+	Subcommand bool     `toml:"subcommand"`
+}
+
+// CanResumeInteractive reports whether an interactive session of this
+// profile can be resumed: by [resume], or by passing the conversation ID
+// again through [interactive] session_id (pi's --session-id opens an
+// existing session).
+func (p *Profile) CanResumeInteractive() bool {
+	return p.Interactive != nil && (p.Resume != nil || p.Interactive.SessionID != nil)
 }
 
 type Check struct {

@@ -55,7 +55,7 @@ func (m *monitor) newConversationFinder(env []string, started time.Time) *conver
 		m.log.Printf("unknown finder %q; the conversation will not be found", m.plan.Finder)
 		return nil
 	}
-	q := finder.Query{Cwd: m.sess.Cwd, StartedAt: started, Env: env, SessionID: m.plan.SessionID}
+	q := finder.Query{Cwd: m.sess.Cwd, StartedAt: started, Env: env, SessionID: m.plan.SessionID, Logf: m.log.Printf}
 	return &conversationFinder{m: m, find: f, q: q, exact: finder.Exact(q)}
 }
 

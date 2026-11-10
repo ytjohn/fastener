@@ -29,6 +29,12 @@ model = ["--model", "{value}"]
 auto = ["--approve-for-me"]
 skip = ["--dangerously-bypass-approvals-and-sandbox"]
 
+# Restoring an interactive session (fastener restore) runs
+# `codex resume <id>`: a subcommand, so it comes right after the command.
+[resume]
+args       = ["resume", "{conversation_id}"]
+subcommand = true
+
 [check]
 version_args = ["--version"]
 diagnose = [

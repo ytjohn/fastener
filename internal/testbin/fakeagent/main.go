@@ -50,7 +50,8 @@
 //	                           they are; "touchsid <dir>" creates <dir>/<id>.jsonl for the
 //	                           ID after --sid in its arguments
 //	FAKE_PTY_ARGV=1            print "argv=<args joined by |>" at start
-//	FAKE_PTY_RUN=line          handle line as if typed, right after the start output
+//	FAKE_PTY_RUN=line;…        handle each line as if typed, right after the start output;
+//	                           "touch <file>" creates file
 //	FAKE_PTY_INIT=1            also print a claude stream-json init event at start
 //	FAKE_PTY_FLOOD=n           print n bytes at start, as "flood n" would
 //	FAKE_PTY_AUTOEXIT=1        exit with FAKE_EXIT right after the start output
@@ -64,6 +65,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -381,6 +383,10 @@ func ptyMode() {
 					say("touched %s", os.Args[i+1])
 				}
 			}
+		case len(f) == 2 && f[0] == "touch":
+			_ = os.MkdirAll(filepath.Dir(f[1]), 0o700)
+			_ = os.WriteFile(f[1], []byte("{}\n"), 0o600)
+			say("touched %s", filepath.Base(f[1]))
 		case len(f) == 2 && f[0] == "cat":
 			b, err := os.ReadFile(f[1])
 			if err != nil {
@@ -400,7 +406,9 @@ func ptyMode() {
 		}
 	}
 	if c := os.Getenv("FAKE_PTY_RUN"); c != "" {
-		handle(c)
+		for _, line := range strings.Split(c, ";") {
+			handle(strings.TrimSpace(line))
+		}
 	}
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {

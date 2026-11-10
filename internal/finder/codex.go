@@ -14,7 +14,9 @@ import (
 // the codex home is $CODEX_HOME, else ~/.codex, and the date is local. The
 // file appears with the first message. Its first line is a session_meta
 // record whose payload has the id, the cwd, the start time (UTC) and the
-// source ("cli" for the TUI, "exec" for `codex exec`). Codex has no option
+// source ("exec" for `codex exec`; the TUI has written "cli" and, in
+// 0.167.0 with the desktop app installed, "vscode", so only "exec" is
+// excluded). Codex has no option
 // to choose the ID, so this finder is a heuristic: the one interactive
 // session for this cwd that started within CodexWindow after the Fastener
 // session did. Its answer is a candidate, never the session's certain
@@ -92,10 +94,21 @@ func readCodexMeta(path string) (codexMeta, bool) {
 }
 
 // codexRollouts finds the rollout of an interactive Codex session in this
-// cwd started at or after the session (exact for an assigned ID: Codex
-// cannot take one, but a profile may still name it).
+// cwd started within CodexWindow after the session; for a known ID (a
+// restored generation), the rollout of that ID, wherever it is.
 func codexRollouts(q Query) (string, error) {
 	root := filepath.Join(codexHome(q), "sessions")
+	if q.SessionID != "" {
+		// A known ID (a restored generation resumes the conversation it was
+		// given): its rollout, whatever day it started.
+		matches, _ := filepath.Glob(filepath.Join(root, "*", "*", "*", "rollout-*"+q.SessionID+".jsonl"))
+		for _, path := range matches {
+			if m, ok := readCodexMeta(path); ok && m.Payload.ID == q.SessionID {
+				return q.SessionID, nil
+			}
+		}
+		return "", notFound("no rollout for " + q.SessionID + " in " + root)
+	}
 	want := map[string]bool{}
 	for _, c := range cwds(q.Cwd) {
 		want[c] = true
@@ -115,9 +128,6 @@ func codexRollouts(q Query) (string, error) {
 			if !e.Type().IsRegular() || !strings.HasPrefix(name, "rollout-") || !strings.HasSuffix(name, ".jsonl") {
 				continue
 			}
-			if q.SessionID != "" && !strings.Contains(name, q.SessionID) {
-				continue
-			}
 			if fi, err := e.Info(); err != nil || fi.ModTime().Before(q.StartedAt.Add(-mtimeSlack)) {
 				continue // not written since the session started
 			}
@@ -129,7 +139,8 @@ func codexRollouts(q Query) (string, error) {
 			if s, ok := m.Payload.Source.(string); ok && s == "exec" {
 				continue // a headless `codex exec` run, not a TUI
 			}
-			if q.SessionID != "" && m.Payload.ID != q.SessionID {
+			if !ValidID(m.Payload.ID) {
+				q.logf("finder codex-rollouts: ignoring rollout %s with invalid id %q", name, m.Payload.ID)
 				continue
 			}
 			cands = append(cands, m.Payload.ID)
