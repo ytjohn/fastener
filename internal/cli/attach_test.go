@@ -42,7 +42,7 @@ func startAttach(t *testing.T, h *harness, args ...string) *attachProc {
 	if err := pty.Setsize(master, &pty.Winsize{Rows: 30, Cols: 100}); err != nil {
 		t.Fatal(err)
 	}
-	before, err := unix.IoctlGetTermios(int(slave.Fd()), ioctlGetTermios)
+	before, err := termiosOf(master)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +91,14 @@ func startAttach(t *testing.T, h *harness, args ...string) *attachProc {
 	return a
 }
 
+// termiosOf reads the terminal's settings through the master: a termios
+// ioctl on a pty master acts on its slave (Linux, macOS), and the master
+// stays usable after attach, the session leader on this pty, exits and the
+// kernel hangs up the slave.
+func termiosOf(master *os.File) (*unix.Termios, error) {
+	return unix.IoctlGetTermios(int(master.Fd()), ioctlGetTermios)
+}
+
 func (a *attachProc) output() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -128,7 +136,7 @@ func (a *attachProc) wait() int {
 // termiosRestored checks the terminal is in the mode it had before attach.
 func (a *attachProc) termiosRestored() {
 	a.t.Helper()
-	after, err := unix.IoctlGetTermios(int(a.slave.Fd()), ioctlGetTermios)
+	after, err := termiosOf(a.master)
 	if err != nil {
 		a.t.Fatal(err)
 	}
@@ -143,7 +151,7 @@ func (a *attachProc) termiosRestored() {
 func (a *attachProc) rawDuring() {
 	a.t.Helper()
 	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
-		tio, err := unix.IoctlGetTermios(int(a.slave.Fd()), ioctlGetTermios)
+		tio, err := termiosOf(a.master)
 		if err == nil && tio.Lflag&(unix.ECHO|unix.ICANON) == 0 {
 			return
 		}
