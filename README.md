@@ -176,11 +176,16 @@ fastener attach my-session --detach-key ctrl-a
 
 Every key goes to the agent (ctrl-c included); the detach key, `ctrl-]` by
 default (`detach_key` in `config.toml`, or `--detach-key`; `none` disables
-it), leaves. The terminal is restored however `attach` ends. It exits 0 when
-you detach, with the agent's exit code when the session ends while you are
-attached, 1 when it cannot attach (the session is not interactive or not
-running, or too many terminals are attached), 2 when stdin is not a
-terminal, 125 when the connection is lost, and 127 for an unknown session.
+it), leaves. However `attach` ends, it restores the terminal's settings and
+resets the modes full-screen agents turn on (alternate screen, hidden cursor,
+mouse reporting, bracketed paste); the screen contents are not restored.
+It exits 0 when you detach, with the agent's exit code (as `wait` reports
+it) when the session ends while you are attached, 1 when it cannot attach
+(the session is not interactive or not running, or too many terminals are
+attached), 2 when stdin is not a terminal, 125 when the connection is lost,
+127 for an unknown session, and 128+N when `attach` itself gets signal N
+(129 when the terminal closes). Input the session does not read is queued
+up to 1 MiB and then discarded, with a note on exit.
 `ps` and `inspect` show whether a session is interactive and how many
 terminals are attached.
 
