@@ -284,3 +284,47 @@ func TestCodexKnownID(t *testing.T) {
 	_, err := codexRollouts(q)
 	wantErr(t, err, ErrNotFound)
 }
+
+// TestInvalidIDsNeverReturned: a store that names a conversation with
+// something that is not an ID (here a flag) never yields it, alone or among
+// candidates, and an invalid assigned ID is refused.
+func TestInvalidIDsNeverReturned(t *testing.T) {
+	const bad = "--dangerously-skip-permissions"
+	var logged []string
+	logf := func(f string, a ...any) { logged = append(logged, f) }
+	codexF, _ := Get("codex-rollouts")
+	codex := t.TempDir()
+	cwd := t.TempDir()
+	physical, _ := filepath.EvalSymlinks(cwd)
+	start := time.Now().Add(-time.Minute)
+	day := filepath.Join(codex, "sessions", time.Now().Format("2006/01/02"))
+	write(t, filepath.Join(day, "rollout-x-evil.jsonl"), codexMetaLine(bad, physical, start.Add(time.Second), "cli"), time.Time{})
+	q := Query{Cwd: cwd, StartedAt: start, Env: []string{"HOME=" + t.TempDir(), "CODEX_HOME=" + codex}, Logf: logf}
+	if id, err := codexF(q); id != "" || !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a bad rollout id was returned: %q %v", id, err)
+	}
+	write(t, filepath.Join(day, "rollout-x-"+idA+".jsonl"), codexMetaLine(idA, physical, start.Add(2*time.Second), "cli"), time.Time{})
+	if id, err := codexF(q); err != nil || id != idA {
+		t.Fatalf("the good one beside a bad one: %q %v", id, err)
+	}
+	if len(logged) == 0 {
+		t.Fatal("the invalid id was not logged")
+	}
+
+	piF, _ := Get("pi-sessions")
+	agent := t.TempDir()
+	pq := Query{Cwd: cwd, StartedAt: start, Env: []string{"HOME=" + t.TempDir(), "PI_CODING_AGENT_DIR=" + agent}}
+	write(t, filepath.Join(piSessionDir(pq, physical), "2026-11-10T16-35-25-813Z_"+bad+".jsonl"), "{}\n", time.Time{})
+	pq.StartedAt = time.Date(2026, 11, 10, 16, 35, 0, 0, time.UTC)
+	if id, err := piF(pq); id != "" || err == nil {
+		t.Fatalf("a bad pi session id was returned: %q %v", id, err)
+	}
+
+	claudeF, _ := Get("claude-transcripts")
+	if _, err := claudeF(Query{Cwd: cwd, SessionID: bad, Env: []string{"HOME=" + t.TempDir()}}); err == nil || !strings.Contains(err.Error(), "invalid session ID") {
+		t.Fatalf("an invalid assigned ID: %v", err)
+	}
+	if ValidID(bad) || !ValidID(idA) || !ValidID("01a1c6a7-3a9a-70c0-844b-3bcb82d854fb") {
+		t.Fatal("ValidID")
+	}
+}

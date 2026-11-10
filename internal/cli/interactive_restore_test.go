@@ -262,3 +262,58 @@ func TestRestoreInteractiveRefusesWhileOldAlive(t *testing.T) {
 	child2 := waitPid(t, pidfile)
 	t.Cleanup(func() { _ = syscall.Kill(child2, syscall.SIGKILL) })
 }
+
+// editStatus rewrites a session's status.json, as a damaged or tampered
+// file would read.
+func editStatus(t *testing.T, h *harness, name string, mutate func(*session.Status)) {
+	t.Helper()
+	path := filepath.Join(h.state, "sessions", name, "status.json")
+	var st session.Status
+	if err := session.ReadJSON(path, &st); err != nil {
+		t.Fatal(err)
+	}
+	mutate(&st)
+	if err := session.WriteJSON(path, st); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRestoreRefusesBadConversationID: a status.json whose conversation_id
+// is not an ID (a flag) is refused, never put into argv.
+func TestRestoreRefusesBadConversationID(t *testing.T) {
+	h := newHarness(t)
+	h.writeProfile("fres", fakeResumeProfile("fres", `session_id = ["--sid", "{session_id}"]`, false))
+	conf := t.TempDir()
+	h.ok("run", "fres", "--interactive", "--restart", "on-reboot", "--cwd", h.work, "--name", "b1",
+		"--env", "CLAUDE_CONFIG_DIR="+conf, "--env", "FAKE_PTY_RUN=touchsid "+claudeStoreDir(conf, h.work))
+	sid := inspectR(t, h, "b1").Plan.SessionID
+	poll(t, "conversation_id", func() bool { return inspectR(t, h, "b1").Status.ConversationID == sid })
+	reboot(t, h, "b1")
+	editStatus(t, h, "b1", func(s *session.Status) { s.ConversationID = "--dangerously-skip-permissions" })
+	_, errOut, code := h.cmd("restore", "b1")
+	v := inspectR(t, h, "b1")
+	if code != 1 || v.State != session.StateRestoreFailed || v.Status.RestoreReason != "bad_conversation_id" || v.Plan.Generation != 1 {
+		t.Fatalf("exit %d %s: %+v", code, errOut, v)
+	}
+}
+
+// TestRestoreRecordedAmbiguity: when the monitor recorded an ambiguity,
+// restore does not let a lookup now (which might see one candidate) choose.
+func TestRestoreRecordedAmbiguity(t *testing.T) {
+	h := newHarness(t)
+	h.writeProfile("fcand", fakeResumeProfile("fcand", "", false))
+	conf := t.TempDir()
+	const cand = "11111111-2222-4333-8444-555555555555"
+	h.ok("run", "fcand", "--interactive", "--restart", "on-reboot", "--cwd", h.work, "--name", "a1",
+		"--env", "CLAUDE_CONFIG_DIR="+conf, "--env", "FAKE_PTY_RUN=touch "+filepath.Join(claudeStoreDir(conf, h.work), cand+".jsonl"))
+	poll(t, "candidate", func() bool { return inspectR(t, h, "a1").Status.ConversationCandidate == cand })
+	reboot(t, h, "a1")
+	editStatus(t, h, "a1", func(s *session.Status) {
+		s.ConversationCandidate = ""
+		s.ConversationError = "more than one conversation could be this session's: 2 conversations in this folder could be this session's (a, b)"
+	})
+	out, _, code := h.cmd("restore", "--accept-candidate", "a1", "--json")
+	if code != 1 || !strings.Contains(out, `"no_conversation"`) || !strings.Contains(out, "cannot tell") {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+}

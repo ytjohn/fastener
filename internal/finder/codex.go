@@ -14,7 +14,9 @@ import (
 // the codex home is $CODEX_HOME, else ~/.codex, and the date is local. The
 // file appears with the first message. Its first line is a session_meta
 // record whose payload has the id, the cwd, the start time (UTC) and the
-// source ("cli" for the TUI, "exec" for `codex exec`). Codex has no option
+// source ("exec" for `codex exec`; the TUI has written "cli" and, in
+// 0.167.0 with the desktop app installed, "vscode", so only "exec" is
+// excluded). Codex has no option
 // to choose the ID, so this finder is a heuristic: the one interactive
 // session for this cwd that started within CodexWindow after the Fastener
 // session did. Its answer is a candidate, never the session's certain
@@ -136,6 +138,10 @@ func codexRollouts(q Query) (string, error) {
 			}
 			if s, ok := m.Payload.Source.(string); ok && s == "exec" {
 				continue // a headless `codex exec` run, not a TUI
+			}
+			if !ValidID(m.Payload.ID) {
+				q.logf("finder codex-rollouts: ignoring rollout %s with invalid id %q", name, m.Payload.ID)
+				continue
 			}
 			cands = append(cands, m.Payload.ID)
 		}

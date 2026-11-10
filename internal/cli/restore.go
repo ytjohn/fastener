@@ -57,6 +57,7 @@ const (
 	rsNoResume       = "no_resume"             // the profile cannot resume an interactive session
 	rsNoConversation = "no_conversation"       // nothing to resume: the agent never wrote a conversation (or it is ambiguous)
 	rsCandidate      = "unconfirmed_candidate" // only a heuristic candidate; needs --accept-candidate
+	rsBadID          = "bad_conversation_id"   // the recorded conversation ID is not one
 )
 
 type restoreOut struct {
@@ -481,6 +482,17 @@ func planEnv(v *session.View) []string {
 //   - else there is nothing to resume, and the restore fails: it never
 //     starts a fresh conversation in its place.
 func restoreConversation(v *session.View, env []string) (string, *restoreFailure) {
+	id, f := pickConversation(v, env)
+	if f == nil && !finder.ValidID(id) {
+		// status.json and the plan are files; whatever they say goes into
+		// the agent's argv only if it is a conversation ID.
+		return "", &restoreFailure{rsBadID, fmt.Sprintf("session %s: refusing to resume %q: not a conversation ID (a UUID)", v.Session.Name, id)}
+	}
+	return id, f
+}
+
+// pickConversation is restoreConversation before the ID is validated.
+func pickConversation(v *session.View, env []string) (string, *restoreFailure) {
 	st, plan := v.Status, v.Plan
 	if st.ConversationID != "" {
 		return st.ConversationID, nil

@@ -68,6 +68,10 @@ func piSessions(q Query) (string, error) {
 				}
 				continue
 			}
+			if !ValidID(id) {
+				q.logf("finder pi-sessions: ignoring session file %s with invalid id", e.Name())
+				continue
+			}
 			// Pi's file time has millisecond precision; allow for it.
 			if t, ok := piFileTime(stamp); ok && !t.Before(q.StartedAt.Add(-time.Second)) {
 				cands = append(cands, id)

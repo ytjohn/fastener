@@ -3,6 +3,7 @@ package profile
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -51,6 +52,10 @@ type Rendered struct {
 	SessionID, Finder string
 }
 
+// resumeIDRE is what RenderInteractive accepts as a ResumeID: it cannot
+// start with "-" (a flag) and holds only ID characters.
+var resumeIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+
 // ErrNoResume is wrapped by RenderInteractive when a resume is asked of a
 // profile that has neither [resume] nor [interactive] session_id.
 var ErrNoResume = errors.New("cannot resume")
@@ -94,6 +99,11 @@ func (p *Profile) RenderInteractive(r Request, remote bool) (Rendered, error) {
 	args := append([]string{}, in.Args...)
 	out := Rendered{PromptMode: PromptNone, Parser: in.InteractiveParser(), Env: append([]string(nil), in.Env...), Finder: in.Finder}
 	if r.ResumeID != "" {
+		// The ID becomes an argument: never one that could pass for a flag
+		// or carry anything but an ID, whoever the caller is.
+		if !resumeIDRE.MatchString(r.ResumeID) {
+			return Rendered{}, fmt.Errorf("refusing to resume conversation %q: not a conversation ID", r.ResumeID)
+		}
 		if strings.TrimSpace(r.Prompt) != "" {
 			return Rendered{}, errors.New("a resumed session takes no prompt")
 		}

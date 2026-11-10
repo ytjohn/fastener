@@ -520,3 +520,22 @@ func TestRenderInteractiveResume(t *testing.T) {
 		t.Errorf("[resume] subcommand rejected: %v", err)
 	}
 }
+
+// TestRenderRefusesBadResumeID: whatever the caller, a resume ID that could
+// pass for a flag or holds other characters never reaches argv.
+func TestRenderRefusesBadResumeID(t *testing.T) {
+	for _, b := range []string{"claude", "codex", "pi"} {
+		p, err := Load(b, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []string{"--dangerously-skip-permissions", "-x", "a b", "a;b", "a/../b", ""} {
+			if id == "" {
+				continue
+			}
+			if r, err := p.RenderInteractive(Request{Permissions: "skip", ResumeID: id}, false); err == nil {
+				t.Errorf("%s rendered resume ID %q: %q", b, id, r.Args)
+			}
+		}
+	}
+}
