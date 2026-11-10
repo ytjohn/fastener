@@ -79,7 +79,19 @@ func finalize(d Dir, overwriteExited bool, mutate func(*Status)) (bool, error) {
 	mutate(&st)
 	st.SchemaVersion = max(read, SchemaVersion)
 	st.UpdatedAt = time.Now().UTC()
-	return true, WriteJSON(d.StatusPath(), &st)
+	if err := WriteJSON(d.StatusPath(), &st); err != nil {
+		// rm (or prune) renames the directory to a tombstone and deletes it
+		// without this lock (which moved with the directory), so the write
+		// can find the directory gone: the session was removed, not an I/O
+		// failure.
+		if errors.Is(err, fs.ErrNotExist) {
+			if _, serr := os.Stat(string(d)); errors.Is(serr, fs.ErrNotExist) {
+				return false, fmt.Errorf("%w: %s", ErrNotFound, filepath.Base(string(d)))
+			}
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // unitLive returns ErrMonitorAlive if the unit is alive or its state cannot be
