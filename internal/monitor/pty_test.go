@@ -464,3 +464,20 @@ func TestAgentEnvPlanLayer(t *testing.T) {
 		t.Fatalf("env %v", env)
 	}
 }
+
+// TestURLNeverReplacedByItsPrefix: a cut-short copy of the recorded URL does
+// not replace it; a different URL does.
+func TestURLNeverReplacedByItsPrefix(t *testing.T) {
+	m := newTestMonitor(t)
+	u := &urlWatch{m: m}
+	const full = "https://claude.ai/code/session_01FAKEPTYSESSION0001"
+	u.record(full)
+	u.record(full[:40])
+	if m.st.RemoteURL != full {
+		t.Fatalf("replaced by its prefix: %q", m.st.RemoteURL)
+	}
+	u.record("https://claude.ai/code/session_02OTHER")
+	if m.st.RemoteURL != "https://claude.ai/code/session_02OTHER" {
+		t.Fatalf("a new URL was not taken: %q", m.st.RemoteURL)
+	}
+}

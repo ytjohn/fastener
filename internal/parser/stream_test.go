@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"math/rand"
 	"regexp"
 	"strings"
 	"testing"
@@ -76,15 +77,80 @@ func TestStreamMatcherHeldUntilQuiet(t *testing.T) {
 func TestStreamMatcherLatestAndWindow(t *testing.T) {
 	s := NewStreamMatcher(claudeSessionRE)
 	other := strings.Replace(sessURL, "017", "999", 1)
-	if got := feedAll(s, sessURL+"\n", strings.Repeat("x", 3*streamWindow), other+"\n"); got != other {
+	if got := feedAll(s, sessURL+"\n", strings.Repeat("x", 3*StreamOverlap), other+"\n"); got != other {
 		t.Fatalf("got %q", got)
 	}
-	if len(s.tail) > streamWindow {
-		t.Fatalf("window grew to %d", len(s.tail))
+	if len(s.text) > StreamOverlap {
+		t.Fatalf("kept %d bytes of text", len(s.text))
 	}
-	s.Feed([]byte(strings.Repeat("y", 2*streamWindow))) // pushes it out of the window
-	if got := s.Feed([]byte("z")); got != "" {
-		t.Fatalf("a URL outside the window still matched: %q", got)
+	// A URL already reported is not reported again as more output arrives.
+	if got := s.Feed([]byte("more")); got != "" {
+		t.Fatalf("reported again: %q", got)
+	}
+}
+
+// TestStreamMatcherPrefersLinkURI: a link whose visible text wraps across
+// rows (a narrow terminal) yields the URI, never the first row's fragment.
+func TestStreamMatcherPrefersLinkURI(t *testing.T) {
+	wrapped := "\x1b]8;;" + sessURL + "?from=cli\x07" + sessURL[:40] + "\r\n\x1b[2C" + sessURL[40:] + "\x1b]8;;\x07\r\n"
+	for cut := 0; cut <= len(wrapped); cut++ {
+		s := NewStreamMatcher(claudeSessionRE)
+		var got []string
+		for _, c := range []string{wrapped[:cut], wrapped[cut:], "later output\r\n"} {
+			if m := s.Feed([]byte(c)); m != "" {
+				got = append(got, m)
+			}
+		}
+		for _, m := range got {
+			if m != sessURL {
+				t.Fatalf("cut %d: reported %q (all: %q)", cut, m, got)
+			}
+		}
+		if len(got) == 0 {
+			t.Fatalf("cut %d: nothing reported", cut)
+		}
+	}
+	// Once a link has matched, visible text alone no longer counts.
+	s := NewStreamMatcher(claudeSessionRE)
+	s.Feed([]byte(wrapped))
+	if got := s.Feed([]byte(sessURL[:45] + "\r\n")); got != "" {
+		t.Fatalf("visible fragment taken after a link: %q", got)
+	}
+}
+
+// TestStreamMatcherRandomSplits: however the output is cut into reads, the
+// matcher reports the same URL, and never a cut-short one.
+func TestStreamMatcherRandomSplits(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	streams := []string{
+		"\x1b[2Cat\x1b[1C\x1b[1m" + sessURL + "\x1b[0m\x1b[3C───\r\n",
+		"at \x1b[1mhttps://claude.ai/code/\x1b[0;36msession_017sf5rxuW4AeHi7B5SRz7ij\x1b[0m\r\n",
+		"\x1b]8;;" + sessURL + "?from=cli\x07" + sessURL + "\x1b]8;;\x07\x1b[39m────",
+		strings.Repeat("\x1b[38;5;220mnoise\x1b[39m\x1b[12G", 200) + " " + sessURL + " \x1bPtmux;\x1b\x1b]11;?\x07\x1b\\ tail",
+	}
+	for si, stream := range streams {
+		for trial := 0; trial < 2000; trial++ {
+			s := NewStreamMatcher(claudeSessionRE)
+			var got []string
+			for rest := stream; len(rest) > 0; {
+				n := 1 + rng.Intn(min(len(rest), 40))
+				if m := s.Feed([]byte(rest[:n])); m != "" {
+					got = append(got, m)
+				}
+				rest = rest[n:]
+			}
+			if m := s.Feed([]byte(" ")); m != "" {
+				got = append(got, m)
+			}
+			if len(got) == 0 {
+				t.Fatalf("stream %d trial %d: nothing", si, trial)
+			}
+			for _, m := range got {
+				if m != sessURL {
+					t.Fatalf("stream %d trial %d: %q", si, trial, got)
+				}
+			}
+		}
 	}
 }
 
