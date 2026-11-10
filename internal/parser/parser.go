@@ -79,6 +79,12 @@ var registry = map[string]Parser{
 	"claude-remote":      claudeRemote{},
 }
 
+// setsConversation lists the parsers that set Fields.ConversationID.
+var setsConversation = map[string]bool{"claude-stream-json": true, "pi-json": true, "codex-jsonl": true}
+
+// SetsConversationID reports whether the named parser sets conversation_id.
+func SetsConversationID(name string) bool { return setsConversation[name] }
+
 // Get returns the named parser.
 func Get(name string) (Parser, bool) {
 	p, ok := registry[name]

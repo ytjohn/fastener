@@ -519,7 +519,7 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	close(stopFind)
 	<-findDone
 	if conv != nil {
-		conv.lookup() // the agent has exited: whatever it wrote is there now
+		conv.atExit()
 	}
 	m.finish(endedBy, func(s *session.Status) {
 		exitFacts(s, ps)

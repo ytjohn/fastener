@@ -78,6 +78,7 @@ func TestValidationErrors(t *testing.T) {
 		{"interactive remote name twice", base + "[interactive]\nprompt = \"arg\"\n[interactive.remote]\nargs = [\"{name}\", \"{name}\"]\nurl_pattern = 'x'\n", "at most once"},
 		{"interactive remote hint alone", base + "[interactive]\nprompt = \"arg\"\n[interactive.remote]\nargs = [\"--rc\"]\nurl_pattern = 'x'\nuntrusted_hint = \"h\"\n", "needs"},
 		{"interactive remote bad untrusted", base + "[interactive]\nprompt = \"arg\"\n[interactive.remote]\nargs = [\"--rc\"]\nurl_pattern = 'x'\nuntrusted_pattern = '('\n", "untrusted_pattern"},
+		{"interactive parser and finder", base + "[interactive]\nprompt = \"arg\"\nparser = \"claude-stream-json\"\nfinder = \"claude-transcripts\"\n", "finder owns"},
 		{"interactive unknown finder", base + "[interactive]\nprompt = \"arg\"\nfinder = \"nope\"\n", "interactive.finder"},
 		{"interactive session_id without placeholder", base + "[interactive]\nprompt = \"arg\"\nsession_id = [\"--session-id\"]\n", "exactly once"},
 		{"interactive session_id empty", base + "[interactive]\nprompt = \"arg\"\nsession_id = []\n", "exactly once"},

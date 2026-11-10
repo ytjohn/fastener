@@ -403,6 +403,11 @@ func (p *Profile) validateInteractive() error {
 		if _, ok := finder.Get(in.Finder); !ok {
 			return fmt.Errorf("interactive.finder %q unknown (known: %s)", in.Finder, strings.Join(finder.Names(), ", "))
 		}
+		// One source for conversation_id: the finder owns it in an
+		// interactive session.
+		if parser.SetsConversationID(in.InteractiveParser()) {
+			return fmt.Errorf("interactive.parser %q sets conversation_id, which interactive.finder owns; use one of them", in.InteractiveParser())
+		}
 	}
 	if in.SessionID != nil && (len(in.SessionID) == 0 || countIn(in.SessionID, sessionIDPH) != 1) {
 		return fmt.Errorf("interactive.session_id must be non-empty and contain %s exactly once", sessionIDPH)

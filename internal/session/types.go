@@ -199,13 +199,17 @@ type Status struct {
 	// (flushed about once a second). Both are set only while it runs.
 	AttachSocket    string `json:"attach_socket,omitempty"`
 	AttachedClients *int   `json:"attached_clients,omitempty"`
-	// ConversationSource says how conversation_id was found for an
-	// interactive session: "session_id" (the ID assigned at launch, and the
-	// agent has written that conversation) or the finder's name (a
-	// heuristic). ConversationError says why the finder has no ID yet: none
-	// written yet, or more than one candidate.
-	ConversationSource string `json:"conversation_source,omitempty"`
-	ConversationError  string `json:"conversation_error,omitempty"`
+	// For an interactive session: ConversationID (parser.Fields) is set only
+	// from an exact source, the ID assigned at launch once the agent has
+	// written that conversation (ConversationSource "session_id").
+	// ConversationCandidate is a heuristic finder's answer
+	// (ConversationSource is then the finder's name): possibly another
+	// conversation in the same folder, so a restore uses it only when told
+	// to. ConversationError says why there is neither: nothing written yet,
+	// or more than one candidate.
+	ConversationCandidate string `json:"conversation_candidate,omitempty"`
+	ConversationSource    string `json:"conversation_source,omitempty"`
+	ConversationError     string `json:"conversation_error,omitempty"`
 	parser.Fields
 	UpdatedAt time.Time `json:"updated_at"`
 }

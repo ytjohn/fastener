@@ -14,8 +14,9 @@ parser = "codex-jsonl"
 # positional [PROMPT], after "--". Remote control for Codex is separate (#56).
 #
 # Codex cannot be given a session ID, so the codex-rollouts finder looks for
-# the one interactive rollout for this cwd started after the session
-# (a heuristic; it reports ambiguity rather than guess).
+# the one interactive rollout for this cwd started within 10 minutes after
+# the session (a heuristic: its answer is only conversation_candidate, and it
+# reports ambiguity rather than guess).
 [interactive]
 args   = []
 prompt = "arg"

@@ -160,8 +160,9 @@ func renderInspect(stdout io.Writer, v *session.View, out inspectOut) {
 		row("generation", fmt.Sprint(g))
 	}
 	row("conversation_id", s.ConversationID)
+	row("conversation_candidate", s.ConversationCandidate)
 	row("conversation_source", s.ConversationSource)
-	if s.ConversationID == "" {
+	if s.ConversationID == "" && s.ConversationCandidate == "" {
 		row("conversation", s.ConversationError)
 	}
 	row("final_message", truncate(s.FinalMessage, 200))
