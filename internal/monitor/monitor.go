@@ -18,7 +18,6 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -923,10 +922,8 @@ func (u *urlWatch) record(url string) {
 	m := u.m
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	cur := m.st.RemoteURL
-	// A strict prefix of the recorded URL is a cut-short copy of it (for
-	// example visible text wrapped across rows); it never replaces it.
-	if cur != url && !strings.HasPrefix(cur, url) {
+	// The matcher already refuses cut-short copies (parser.StreamMatcher).
+	if m.st.RemoteURL != url {
 		m.st.RemoteURL = url
 		m.dirty = true
 	}

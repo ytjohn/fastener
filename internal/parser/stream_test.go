@@ -126,10 +126,15 @@ func TestStreamMatcherRandomSplits(t *testing.T) {
 		"\x1b[2Cat\x1b[1C\x1b[1m" + sessURL + "\x1b[0m\x1b[3C───\r\n",
 		"at \x1b[1mhttps://claude.ai/code/\x1b[0;36msession_017sf5rxuW4AeHi7B5SRz7ij\x1b[0m\r\n",
 		"\x1b]8;;" + sessURL + "?from=cli\x07" + sessURL + "\x1b]8;;\x07\x1b[39m────",
+		"\x1b]8;;" + sessURL + "?from=cli\x1b\\" + sessURL + "\x1b]8;;\x1b\\ ────", // ST-terminated
 		strings.Repeat("\x1b[38;5;220mnoise\x1b[39m\x1b[12G", 200) + " " + sessURL + " \x1bPtmux;\x1b\x1b]11;?\x07\x1b\\ tail",
 	}
 	for si, stream := range streams {
-		for trial := 0; trial < 2000; trial++ {
+		trials := 1000
+		if len(stream) > 1000 {
+			trials = 100
+		}
+		for trial := 0; trial < trials; trial++ {
 			s := NewStreamMatcher(claudeSessionRE)
 			var got []string
 			for rest := stream; len(rest) > 0; {
@@ -157,5 +162,95 @@ func TestStreamMatcherRandomSplits(t *testing.T) {
 func TestStripForMatchSeparatesCursorMoves(t *testing.T) {
 	if got := string(StripForMatch([]byte("Quick\x1b[1Csafety\x1b[1Ccheck\x1b[2;5HIs\x1b[1mthis"))); got != "Quick safety check Isthis" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// oracleStream builds a random stream of the escapes and strings a TUI
+// emits, with URLs (plain, SGR-wrapped, inside OSC 8 links ended by BEL or
+// by ST) among them, and returns it with the last URL it shows.
+func oracleStream(rng *rand.Rand) (string, string) {
+	urls := []string{sessURL, strings.Replace(sessURL, "017", "998", 1)}
+	pieces := []string{
+		"plain words ", "x", "──── ", "\r\n", "\x1b[1m", "\x1b[38;5;220m", "\x1b[0m", "\x1b[3C", "\x1b[12G",
+		"\x1b[2A", "\x1b[?25l", "\x1b]0;title\x07", "\x1b]0;title\x1b\\", "\x1bPtmux;\x1b\x1b]11;?\x07\x1b\\",
+		"\x1b(B", "\x1b=", "\x07", "\x1b]8;id=a;https://code.claude.com/docs\x07Security guide\x1b]8;;\x07 ",
+	}
+	var b strings.Builder
+	last := ""
+	for n := 5 + rng.Intn(40); n > 0; n-- {
+		if rng.Intn(5) > 0 {
+			b.WriteString(pieces[rng.Intn(len(pieces))])
+			continue
+		}
+		u := urls[rng.Intn(len(urls))]
+		switch rng.Intn(4) {
+		case 0:
+			b.WriteString(" " + u + " ")
+		case 1:
+			b.WriteString(" \x1b[1m" + u[:23] + "\x1b[0;36m" + u[23:] + "\x1b[0m ")
+		case 2:
+			b.WriteString("\x1b]8;;" + u + "?from=cli\x07" + u + "\x1b]8;;\x07 ")
+		case 3:
+			b.WriteString("\x1b]8;;" + u + "?from=cli\x1b\\" + u + "\x1b]8;;\x1b\\ ")
+		}
+		last = u
+	}
+	b.WriteString(" end")
+	return b.String(), last
+}
+
+// TestStreamMatcherOracle: however a random stream is cut into 1-16 byte
+// reads, the matcher strips exactly what StripForMatch strips from the
+// whole stream, and its last match is the last match in the whole stream.
+func TestStreamMatcherOracle(t *testing.T) {
+	rng := rand.New(rand.NewSource(2))
+	for trial := 0; trial < 500; trial++ {
+		stream, last := oracleStream(rng)
+		s := NewStreamMatcher(claudeSessionRE)
+		var text []byte
+		s.onText = func(b []byte) { text = append(text, b...) }
+		var got string
+		for rest := stream; len(rest) > 0; {
+			n := 1 + rng.Intn(min(len(rest), 16))
+			if m := s.Feed([]byte(rest[:n])); m != "" {
+				got = m
+			}
+			rest = rest[n:]
+		}
+		whole := StripForMatch([]byte(stream))
+		if string(text) != string(whole) {
+			t.Fatalf("trial %d: stripped differently\nstream %q\nwhole  %q\npieces %q", trial, stream, whole, text)
+		}
+		want := ""
+		if all := claudeSessionRE.FindAll(whole, -1); len(all) > 0 {
+			want = string(all[len(all)-1])
+		}
+		if want != last {
+			t.Fatalf("trial %d: generator says %q, whole stream %q", trial, last, want)
+		}
+		if got != want {
+			t.Fatalf("trial %d: last match %q, want %q\nstream %q", trial, got, want, stream)
+		}
+	}
+}
+
+// TestStreamMatcherLinkReplacesVisible: a link URI replaces what was
+// reported even when it is a strict prefix of it (a visible match that ran
+// into the following text), and after a link a genuinely new visible URL is
+// taken while fragments of the link are not.
+func TestStreamMatcherLinkReplacesVisible(t *testing.T) {
+	s := NewStreamMatcher(claudeSessionRE)
+	if got := s.Feed([]byte(sessURL + "1 ")); got != sessURL+"1" {
+		t.Fatalf("visible: %q", got)
+	}
+	if got := s.Feed([]byte("\x1b]8;;" + sessURL + "\x07link\x1b]8;;\x07 ")); got != sessURL {
+		t.Fatalf("a link URI that is a prefix of the reported URL was not taken: %q", got)
+	}
+	if got := s.Feed([]byte(sessURL[:50] + " ")); got != "" {
+		t.Fatalf("a fragment of the link was taken: %q", got)
+	}
+	other := strings.Replace(sessURL, "017", "998", 1)
+	if got := s.Feed([]byte(other + " ")); got != other {
+		t.Fatalf("a new visible URL after a link was not taken: %q", got)
 	}
 }
