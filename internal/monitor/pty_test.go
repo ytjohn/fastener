@@ -328,6 +328,7 @@ func TestPTYStop(t *testing.T) {
 func TestPTYStopIgnoringTerm(t *testing.T) {
 	r := startPTY(t, []string{"FAKE_IGNORE_TERM=1"}, nil)
 	r.running()
+	waitIgnoresTerm(t, r.d)
 	requestStop(t, r.d)
 	r.sigs <- syscall.SIGTERM
 	fin := r.wait()

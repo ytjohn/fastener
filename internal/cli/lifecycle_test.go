@@ -94,6 +94,7 @@ func TestStopIgnoringAgentAndGrandchild(t *testing.T) {
 	pidfile := filepath.Join(t.TempDir(), "gc.pid")
 	h.start("s1", []string{"FAKE_SLEEP=60s", "FAKE_IGNORE_TERM=1", "FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile})
 	h.waitState("s1", "running", 5*time.Second)
+	h.waitIgnoresTerm("s1")
 	gcPid := waitPid(t, pidfile)
 	start := time.Now()
 	h.ok("stop", "s1", "--grace", "1s") // per-call grace, shorter than the session's 10s default

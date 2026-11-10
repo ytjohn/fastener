@@ -162,6 +162,7 @@ func TestSystemdStopIgnoringAgentAndGrandchild(t *testing.T) {
 	pidfile := filepath.Join(t.TempDir(), "gc.pid")
 	h.start("s1", []string{"FAKE_SLEEP=60s", "FAKE_IGNORE_TERM=1", "FAKE_GRANDCHILD=1", "FAKE_GRANDCHILD_PIDFILE=" + pidfile})
 	h.waitState("s1", "running", 5*time.Second)
+	h.waitIgnoresTerm("s1")
 	gc := waitPid(t, pidfile)
 	start := time.Now()
 	h.ok("stop", "s1", "--grace", "1s")
@@ -239,6 +240,7 @@ func TestSystemdStopGraceIsClamped(t *testing.T) {
 	h := newSystemdHarness(t, "systemd")
 	h.start("s1", []string{"FAKE_SLEEP=60s", "FAKE_IGNORE_TERM=1"}, "--grace", "1s", "--max-runtime", "10m")
 	h.waitState("s1", "running", 5*time.Second)
+	h.waitIgnoresTerm("s1")
 	start := time.Now()
 	_, errOut, code := h.cmd("stop", "s1", "--grace", "30s")
 	took := time.Since(start)
@@ -264,6 +266,7 @@ func TestSystemdStopGraceIsClamped(t *testing.T) {
 	// longer grace is honoured (the agent ignores TERM, so stop waits it out).
 	h.start("s3", []string{"FAKE_SLEEP=60s", "FAKE_IGNORE_TERM=1"}, "--grace", "1s")
 	h.waitState("s3", "running", 5*time.Second)
+	h.waitIgnoresTerm("s3")
 	start = time.Now()
 	_, errOut, code = h.cmd("stop", "s3", "--grace", "3s")
 	if took := time.Since(start); code != 0 || strings.Contains(errOut, "clamped") || took < 3*time.Second {
