@@ -205,6 +205,9 @@ func (m *monitor) finish(endedBy string, mutate func(*session.Status)) {
 	m.update(func(s *session.Status) {
 		now := time.Now().UTC()
 		s.State, s.EndedBy, s.EndedAt = session.StateExited, endedBy, &now
+		// The attach socket goes with the monitor, on every path to an
+		// outcome (also a stop or launch failure before the spawn).
+		s.AttachSocket, s.AttachedClients = "", nil
 		if mutate != nil {
 			mutate(s)
 		}
@@ -221,6 +224,7 @@ func cloneStatus(s session.Status) session.Status {
 	c.StartedAt = clonePtr(s.StartedAt)
 	c.EndedAt = clonePtr(s.EndedAt)
 	c.ExitCode = clonePtr(s.ExitCode)
+	c.AttachedClients = clonePtr(s.AttachedClients)
 	c.AgentError = clonePtr(s.AgentError)
 	c.RemoteSessions = slices.Clone(s.RemoteSessions)
 	if s.Usage != nil {
@@ -305,6 +309,9 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	cmd.Env = env
 	cmd.Stderr = errLog
 	cmd.SysProcAttr = agentSysProcAttr()
+	if m.plan.PTY != nil && m.plan.PromptMode == "stdin" {
+		return m.launchFailed(errors.New("prompt_mode stdin cannot be used with a pty (the terminal is the agent's stdin)"))
+	}
 	if m.plan.PromptMode == "stdin" {
 		in, err := os.Open(m.d.PromptPath())
 		if err != nil {
@@ -313,11 +320,30 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 		defer in.Close()
 		cmd.Stdin = in
 	}
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		return m.launchFailed(err)
+	// pr is what the monitor reads the agent's output from; pw is the
+	// agent's end, closed here once the agent holds it. Headless: a pipe for
+	// stdout (stderr goes to stderr.log). Interactive: the pty, which is the
+	// agent's controlling terminal and all of stdin, stdout and stderr.
+	var pr io.ReadCloser
+	var pw *os.File
+	var pt *ptyIO
+	if m.plan.PTY != nil {
+		pt, err = m.openPTY()
+		if err != nil {
+			return m.launchFailed(fmt.Errorf("pty: %w", err))
+		}
+		defer pt.close() // after the outcome is recorded: clients get it in the exit frame
+		pr, pw = pt.master, pt.slave
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = pw, pw, pw
+		cmd.SysProcAttr = agentPTYSysProcAttr()
+	} else {
+		r, w, err := os.Pipe()
+		if err != nil {
+			return m.launchFailed(err)
+		}
+		pr, pw = r, w
+		cmd.Stdout = pw
 	}
-	cmd.Stdout = pw
 
 	// Linux delivers Pdeathsig when the spawning *thread* exits (golang/go#27505),
 	// so spawn and wait on one locked thread that lives as long as the agent.
@@ -377,16 +403,27 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	if err != nil {
 		agent = proc.Identity{PID: pid} // already exited; exit facts follow
 	}
+	if pt != nil {
+		pt.spawned(pid)
+	}
 	m.update(func(s *session.Status) {
 		now := time.Now().UTC()
 		s.State, s.Agent, s.PGID, s.StartedAt = session.StateRunning, &agent, pid, &now
+		if pt != nil {
+			n := pt.srv.Clients()
+			s.AttachSocket, s.AttachedClients = pt.path, &n
+		}
 	})
 
+	var src io.Reader = pr
+	if pt != nil {
+		src = io.TeeReader(pr, pt.srv) // the server never blocks or fails
+	}
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
 		defer pr.Close()
-		m.pump(pr, out, p)
+		m.pump(src, out, p)
 	}()
 	stopFlush := make(chan struct{})
 	go m.flushLoop(stopFlush)
@@ -437,6 +474,9 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 				endedBy = session.EndedByStop
 			}
 		}
+	}
+	if pt != nil {
+		pt.reaping()
 	}
 	close(reapNow) // signalling is finished; let the spawn goroutine reap
 	ps := <-exited

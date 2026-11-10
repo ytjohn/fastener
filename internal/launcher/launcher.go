@@ -79,12 +79,24 @@ func selectWith(pref string, warn io.Writer, available func() (bool, error)) (La
 // Setsid re-executes this binary as `_monitor` in a new session, with stdio
 // to monitor.log, and releases it without waiting. Go cannot fork without
 // exec, so there is no double fork; the CLI knows the monitor pid directly.
-type Setsid struct{}
+type Setsid struct {
+	// Exe is the fastener binary to run; "" means this one (os.Executable).
+	// Tests that run in a test binary set it.
+	Exe string
+}
 
 func (Setsid) Name() string { return "setsid" }
 
-func (Setsid) Start(d session.Dir, gen int) (session.LauncherRecord, error) {
-	exe, err := os.Executable()
+// executable is exe, else the running binary.
+func executable(exe string) (string, error) {
+	if exe != "" {
+		return exe, nil
+	}
+	return os.Executable()
+}
+
+func (l Setsid) Start(d session.Dir, gen int) (session.LauncherRecord, error) {
+	exe, err := executable(l.Exe)
 	if err != nil {
 		return session.LauncherRecord{}, err
 	}

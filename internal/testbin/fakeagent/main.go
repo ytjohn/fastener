@@ -31,6 +31,17 @@
 //	FAKE_BRIDGE_FRAMES=n       print n frames as fast as possible, then keep redrawing
 //	                           at the interval
 //	FAKE_BRIDGE_EXIT_AFTER=dur exit 0 on its own after this long
+//
+// Pty mode (an interactive agent; stdin is the terminal):
+//
+//	FAKE_PTY=1                 print "tty=<bool> ctty=<bool> size=<rows>x<cols>", then
+//	                           read lines: "exit N" exits N, "flood N" prints N bytes of
+//	                           "x" in 100-byte lines then "flood-done", "size" prints
+//	                           "size=<rows>x<cols>", anything else is echoed as "echo:<line>";
+//	                           every SIGWINCH prints "winch=<rows>x<cols>"; EOF exits 0
+//	FAKE_PTY_INIT=1            also print a claude stream-json init event at start
+//	FAKE_PTY_FLOOD=n           print n bytes at start, as "flood n" would
+//	FAKE_PTY_AUTOEXIT=1        exit with FAKE_EXIT right after the start output
 package main
 
 import (
@@ -43,8 +54,11 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func emit(v map[string]any) {
@@ -86,6 +100,10 @@ func main() {
 	}
 	if os.Getenv("FAKE_IGNORE_TERM") == "1" {
 		signal.Ignore(syscall.SIGTERM)
+	}
+	if os.Getenv("FAKE_PTY") == "1" {
+		ptyMode()
+		return
 	}
 	_, _ = io.ReadAll(os.Stdin)
 	if s := os.Getenv("FAKE_STDERR"); s != "" {
@@ -245,6 +263,79 @@ func bridge() {
 			w.Flush()
 			return
 		case <-t.C:
+		}
+	}
+}
+
+// ptyMode is an interactive agent on a terminal (see the package comment).
+func ptyMode() {
+	var mu sync.Mutex
+	say := func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		fmt.Printf(format+"\n", args...)
+	}
+	size := func() string {
+		ws, err := unix.IoctlGetWinsize(0, unix.TIOCGWINSZ)
+		if err != nil {
+			return "none"
+		}
+		return fmt.Sprintf("%dx%d", ws.Row, ws.Col)
+	}
+	_, ttyErr := unix.IoctlGetTermios(0, ioctlGetTermios)
+	ctty := false
+	if f, err := os.Open("/dev/tty"); err == nil {
+		ctty = true
+		f.Close()
+	}
+	winch := make(chan os.Signal, 8)
+	signal.Notify(winch, syscall.SIGWINCH)
+	if os.Getenv("FAKE_PTY_INIT") == "1" {
+		b, _ := json.Marshal(map[string]any{"type": "system", "subtype": "init", "session_id": "fake-pty-0001"})
+		say("%s", b)
+	}
+	say("tty=%v ctty=%v size=%s", ttyErr == nil, ctty, size())
+	flood := func(n int) {
+		line := strings.Repeat("x", 99)
+		mu.Lock()
+		w := bufio.NewWriter(os.Stdout)
+		for ; n >= 100; n -= 100 {
+			fmt.Fprintln(w, line)
+		}
+		if n > 0 {
+			fmt.Fprintln(w, strings.Repeat("x", n-1))
+		}
+		w.Flush()
+		mu.Unlock()
+		say("flood-done")
+	}
+	if n, _ := strconv.Atoi(os.Getenv("FAKE_PTY_FLOOD")); n > 0 {
+		flood(n)
+	}
+	if os.Getenv("FAKE_PTY_AUTOEXIT") == "1" {
+		code, _ := strconv.Atoi(os.Getenv("FAKE_EXIT"))
+		os.Exit(code)
+	}
+	go func() {
+		for range winch {
+			say("winch=%s", size())
+		}
+	}()
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		line := strings.TrimRight(sc.Text(), "\r")
+		f := strings.Fields(line)
+		switch {
+		case len(f) == 2 && f[0] == "exit":
+			code, _ := strconv.Atoi(f[1])
+			os.Exit(code)
+		case len(f) == 2 && f[0] == "flood":
+			n, _ := strconv.Atoi(f[1])
+			flood(n)
+		case line == "size":
+			say("size=%s", size())
+		default:
+			say("echo:%s", line)
 		}
 	}
 }

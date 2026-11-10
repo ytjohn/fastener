@@ -34,7 +34,10 @@ import (
 // manager's default soft limit (1024) is far below a typical shell's. The
 // user manager's PATH differs from the shell's, so the binary is named by
 // absolute path.
-type Systemd struct{}
+type Systemd struct {
+	// Exe is the fastener binary to run; "" means this one (os.Executable).
+	Exe string
+}
 
 func (Systemd) Name() string { return "systemd" }
 
@@ -45,8 +48,8 @@ const stopMargin = 30 * time.Second
 // runTimeout bounds systemd-run itself (it waits for the start job).
 const runTimeout = 30 * time.Second
 
-func (Systemd) Start(d session.Dir, gen int) (session.LauncherRecord, error) {
-	exe, err := os.Executable()
+func (l Systemd) Start(d session.Dir, gen int) (session.LauncherRecord, error) {
+	exe, err := executable(l.Exe)
 	if err != nil {
 		return session.LauncherRecord{}, err
 	}

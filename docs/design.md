@@ -93,7 +93,7 @@ ${FASTENER_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/fastener}/
     monitor.log          # monitor diagnostics
     lock                 # flock target for CLI-side finalization
     restore.lock         # flock target that serialises `restore` of this session (§8.4)
-    attach.sock          # phase B
+    attach.sock          # interactive generations: the monitor's attach socket (§8.2), while it runs
   .last-prune            # prune throttle stamp: empty until a prune completes, then its time; mtime is the throttle; also the prune flock target
 ```
 
@@ -118,6 +118,7 @@ ${FASTENER_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/fastener}/
 - `schema_version`, `generation` (the first launch is 1)
 - `argv`: the fully resolved argument list. `argv[0]` is resolved to an absolute path at plan time, against the session's PATH; the monitor never does a PATH lookup.
 - `prompt_mode` (`stdin` | `arg` | `none` for a remote bridge), `parser`, `dedupe_frames` (remote bridges, §8.1): copied from the profile. (`url_pattern` and `conversation_finder` arrive with phase B.)
+- `pty` (v0.4, interactive generations only): `{rows, cols}`, the initial window size (0 or absent means 24 × 80). Its presence is what makes the monitor run the agent on a pty (§8.2); a plan without it, including every plan written before v0.4, runs exactly as before.
 - **Profile provenance:** `profile_source` (`builtin` | the file path), `profile_sha256`
 - `marker`: `<name>:<generation>:<random nonce>` (see "Process identity" in §4)
 - `fastener_version`, `planned_at`
@@ -141,6 +142,7 @@ This is the record that lets the CLI judge whether a monitor is alive before the
 - `started_at`, `ended_at`
 - **Exit facts:** `ended_by`, `exit_code` (absent when a signal killed the agent), `signal` (the signal name that terminated the agent, if any), `error`, `output_truncated` (true when the stdout drain timed out; see "Output drain" in §4)
 - `restore_reason` (with state `restore-failed`, §8.4): why `restore` could not relaunch the session; `error` has the message
+- **Attach** (interactive generations, while the monitor runs; cleared in the exit record): `attach_socket`, the path the monitor listens on, and `attached_clients`, how many clients are attached (flushed with the parser fields, about once a second)
 - **Parser fields** (each optional; omitted when unknown): `conversation_id`, `final_message` (capped at 64 KiB), `model` (the model the backend says it served; absent after an agent error), `model_source` (`server` or `client`), `agent_error`, `usage` {`input_tokens`, `output_tokens`, `cost_usd`} (present only when the backend reported usage), `parse_errors`; for remote bridges `remote_url` and `remote_sessions` (§8.1)
 
 **The monitor writes its own identity first.** Right after it loads its plan, before it checks for a stop request, spawns anything or can fail in any other way, the monitor writes `status.json` once (state `starting`, with its `monitor` identity and `boot_id`). Each generation's status is built fresh; nothing is carried over from a previous generation. This shrinks the window in which no record identifies a live monitor.
@@ -502,8 +504,11 @@ A remote bridge is a long-running headless session, so it reuses the v0.2 machin
 Needed for `claude --remote-control`, for local attach to any backend, and for Pi.
 
 - **The monitor owns the pty** (the `dtach`/`abduco` model, using `github.com/creack/pty`). Not tmux: one tmux server holds every session for a user, which is the shared-daemon failure mode Fastener avoids.
-- **Attach:** the monitor listens on `attach.sock`. `fastener attach <name>` connects the user's terminal. The detach key defaults to `ctrl-]` and is configurable. Several clients may attach at once. On attach, the monitor resizes the pty and sends SIGWINCH to force a redraw; Fastener does not emulate the screen. Terminal output is also written to `output.log`.
-- **Attach protocol:** versioned framed messages (`hello{version}`, `data`, `resize{rows,cols}`, `detach`), independent of the transport. The Unix socket is the only transport in scope.
+- **What makes a generation interactive** is the plan's `pty` field (§3), which `run --interactive` sets. The monitor then opens a pty at the plan's size and starts the agent in a new session (`setsid`) with the pty slave as its controlling terminal and as stdin, stdout and stderr (so `stderr.log` stays empty). As session leader the agent also leads its own process group (pgid = pid), so everything in §4 applies unchanged: the marker, identity, `stop` with its TERM / grace / KILL of the group, zombie pinning, `PR_SET_PDEATHSIG` on Linux, orphans, exit facts, and both launchers. `prompt_mode` `stdin` cannot be combined with a pty (the terminal is stdin): such a plan is `launch-failed`. A process that the agent puts in another process group of its terminal (a job-control shell) is outside the group like any process that leaves it (§4); it gets SIGHUP from the kernel when the agent, the session leader, exits.
+- **Output.** The monitor reads the pty master continuously, whether or not anyone is attached, so the agent never blocks writing to its terminal. Each chunk goes to the attach clients (never waiting for them) and to the same pump as headless stdout: raw bytes to `output.log`, with the same 16 MB line bound and the same 2 s drain after the agent exits (`output_truncated` when a descendant still holds the terminal open). `output.log` holds what the terminal showed, including the line discipline's echo of input and `\r\n` line ends.
+- **Parsers on a pty.** The plan's parser runs over that same stream, line by line (a line ends at `\n`; the `\r` before it is trimmed), exactly as on headless stdout, and `none` is always available. A TUI's output is mostly escape sequences, so interactive profiles will usually set `none` or a parser written for that screen (such as `url_pattern` below); no parser strips escapes for them yet.
+- **Attach:** the monitor listens on `attach.sock` (§3; a fallback path when the session directory is too long for a socket address, recorded in `status.json`'s `attach_socket`). Only the owning user can connect: the socket is 0600 inside a 0700 directory, and the peer's uid is checked. `fastener attach <name>` connects the user's terminal. The detach key defaults to `ctrl-]` and is configurable. Several clients may attach at once; all receive the output, input from any reaches the pty, and the last client to attach or resize sets the size. On attach, the monitor resizes the pty and sends SIGWINCH to force a redraw (also when the size did not change); Fastener does not emulate the screen. A client too slow to keep up is disconnected rather than allowed to stall the agent or the others. Detaching leaves the agent running. When the session ends, every client receives its exit facts and the socket is removed. `status.json` records `attached_clients` while the generation runs, so `ps` and `inspect` show it.
+- **Attach protocol:** versioned framed messages (`hello{version}`, `welcome`, `data`, `resize{rows,cols}`, `detach`, `exit`, `error`), independent of the transport, with bounded frames; a malformed frame drops that client only. The Unix socket is the only transport in scope. The wire format is in [attach-protocol.md](attach-protocol.md).
 - **Remote:** `run --interactive --remote` uses `[interactive.remote]` args (for Claude, `["--remote-control", "{name}"]`). If `url_pattern` matches terminal output (for Claude, `https://claude\.ai/code/session_\S+` after stripping escapes), `remote_url` is set. A detached remote session is an interactive session nobody is attached to.
 - **Conversation ID:** found by a named **finder** (for example `claude-transcripts`: the newest transcript for the session's `cwd` created after `started_at`). Codex and Pi finders still need investigation and are a known risk.
 
@@ -663,7 +668,8 @@ fastener attach <name>
 cmd/fastener/          entry point; calls internal/cli (stdlib flag, no CLI framework)
 internal/cli/          commands, flag parsing, views, check
 internal/session/      state dir, schema types, read/write, liveness, prune, labels
-internal/monitor/      _monitor: spawn, log, parser feed, limits, signals; (B) pty, attach
+internal/monitor/      _monitor: spawn, log, parser feed, limits, signals; the pty of interactive generations
+internal/attach/       attach protocol (docs/attach-protocol.md): frames, server, client, socket path and peer credentials
 internal/launcher/     setsid and systemd launchers, selection
 internal/systemd/      systemctl/loginctl calls: availability, linger, unit state, MainPID, kill, reset-failed
 internal/config/       config.toml, config/state locations, authorizations.json

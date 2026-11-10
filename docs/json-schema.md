@@ -38,6 +38,7 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 - `argv`: the fully resolved argument list; `argv[0]` is an absolute path. For `prompt = "arg"` backends it contains the prompt text itself
 - `prompt_mode` (`stdin` | `arg` | `none`: a remote bridge, whose stdin is `/dev/null`), `parser`
 - `dedupe_frames`: `true` when the monitor drops redrawn status lines from `output.log` (a line equal to the same position in the previous frame) and strips leading cursor-movement escapes from the lines it writes (from the profile's `[remote] dedupe_frames`; every line is still parsed). Omitted otherwise.
+- `pty`: `{rows, cols}` for an interactive generation, which the monitor runs on a pty it owns (design §8.2); `rows` and `cols` are the initial window size, each omitted when 0 (meaning 24 × 80). Omitted for every other generation.
 - `profile_source` (`builtin` or the file path), `profile_sha256`
 - `marker`: the value of `FASTENER_SESSION` in the agent's environment
 - `fastener_version`, `planned_at`
@@ -52,6 +53,8 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 - `ended_by`: `exit` | `limit` | `stop` | `signal` | `launch-failed`
 - `exit_code` (absent when the agent was killed by a signal), `signal` (a name, e.g. `SIGKILL`), `error`
 - `restore_reason`: with state `restore-failed`, why `restore` could not relaunch the session (see `restore --json` below for the values); `error` then holds the message, and `remote_url` and `remote_sessions` are cleared (they would describe a bridge that is not running). Omitted otherwise.
+- `attach_socket`: interactive generations, while the monitor runs: the absolute path of the attach socket (`<dir>/attach.sock`, or a fallback under `/tmp/fastener-<uid>/` when that path is too long for a socket address; see docs/attach-protocol.md). Omitted otherwise and in the exit record.
+- `attached_clients`: interactive generations, while the monitor runs: how many clients are attached (an integer, `0` included), updated about once a second. Omitted otherwise and in the exit record. A `lost` session may still show the last value its monitor wrote.
 - `output_truncated`: `true` when a descendant still held the agent's stdout open 2 s after the agent exited. The monitor stopped reading, so anything written to stdout after that is not in `output.log`. Omitted otherwise.
 - parser fields, each present only when known:
   - `conversation_id`
@@ -70,7 +73,7 @@ While a session runs, parser fields are flushed about once a second and always a
 
 ## `ps --json`
 
-An array (never null) of `{name, backend, state, created_at, ended_at?, ended_by?, exit_code?, labels?, remote_url?}`, newest first. `remote_url` is a remote bridge's URL (`status.remote_url`), once it has reported one. Without `--all`, `ps` lists running, starting and lost sessions plus those that ended in the last 24 hours. `ps` does not scan for orphans (too costly across many sessions) and has no orphans field; use `inspect` for that. `--filter KEY=VALUE` (repeatable, ANDed; see design §10) keeps only matching rows after the window is applied; the shape is unchanged and no match gives `[]`. A session that cannot be read is skipped with a warning on stderr. A session whose files have a newer `schema_version` than this fastener understands is listed, with one `fastener: warning: <name>: …` line on stderr (the same text as `inspect`'s `warnings`).
+An array (never null) of `{name, backend, state, created_at, ended_at?, ended_by?, exit_code?, labels?, remote_url?, interactive?, attached_clients?}`, newest first. `remote_url` is a remote bridge's URL (`status.remote_url`), once it has reported one. `interactive` is `true` when the current generation runs on a pty (`plan.pty`), omitted otherwise; `attached_clients` is `status.attached_clients`, present only for an interactive session whose state is `running`. Without `--all`, `ps` lists running, starting and lost sessions plus those that ended in the last 24 hours. `ps` does not scan for orphans (too costly across many sessions) and has no orphans field; use `inspect` for that. `--filter KEY=VALUE` (repeatable, ANDed; see design §10) keeps only matching rows after the window is applied; the shape is unchanged and no match gives `[]`. A session that cannot be read is skipped with a warning on stderr. A session whose files have a newer `schema_version` than this fastener understands is listed, with one `fastener: warning: <name>: …` line on stderr (the same text as `inspect`'s `warnings`).
 
 ## `prune --json`
 
