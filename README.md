@@ -185,8 +185,16 @@ size, else 24x80. `--attach` attaches right away. With `--remote` (claude:
 `--remote-control <name>`), `run` waits for the session's claude.ai URL and
 prints it, as for a bridge; in a folder Claude has not been told to trust,
 the TUI would sit at its trust dialog, so `run` stops it and names the
-`fastener authorize` command instead. `--restart on-reboot` is not available
-for interactive sessions yet.
+`fastener authorize` command instead.
+
+With `--restart on-reboot`, `fastener restore` brings an interactive session
+back after a reboot by resuming its conversation (claude `--resume <id>`,
+pi `--session-id <id>`, codex `codex resume <id>`), at the same terminal
+size and, for `--remote`, under the same remote-control name. It never
+starts a fresh conversation: a session nothing was sent to fails with
+`no_conversation`. When the conversation is only a guess (Codex has no way
+to be given an ID, so its finder matches by folder and time), restore
+resumes it only with `fastener restore --accept-candidate <name>`.
 
 Every key goes to the agent (ctrl-c included); the detach key, `ctrl-]` by
 default (`detach_key` in `config.toml`, or `--detach-key`; `none` disables
