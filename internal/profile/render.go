@@ -43,7 +43,9 @@ type Rendered struct {
 }
 
 // ErrNoInteractive is wrapped by RenderInteractive when the profile has no
-// [interactive] section (or, with remote, no [interactive.remote]).
+// [interactive] section (or, with remote, no [interactive.remote]), or takes
+// no initial prompt and one was given: things the caller asked for that the
+// profile does not offer.
 var ErrNoInteractive = errors.New("no [interactive] section")
 
 type noInteractiveError struct{ msg string }
@@ -83,7 +85,7 @@ func (p *Profile) RenderInteractive(r Request, remote bool) (Rendered, error) {
 	}
 	if strings.TrimSpace(r.Prompt) != "" {
 		if in.Prompt != InteractivePromptArg {
-			return Rendered{}, fmt.Errorf("backend %s takes no initial prompt in interactive mode; type it after attaching", p.Name)
+			return Rendered{}, noInteractiveError{fmt.Sprintf("backend %s takes no initial prompt in interactive mode; type it after attaching", p.Name)}
 		}
 		args = append(args, "--", r.Prompt)
 		out.PromptMode = InteractivePromptArg

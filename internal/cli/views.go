@@ -59,6 +59,7 @@ func inspectOf(v *session.View) inspectOut {
 type psRow struct {
 	Name      string            `json:"name"`
 	Backend   string            `json:"backend"`
+	Kind      string            `json:"kind,omitempty"`
 	State     string            `json:"state"`
 	CreatedAt time.Time         `json:"created_at"`
 	EndedAt   *time.Time        `json:"ended_at,omitempty"`
@@ -131,6 +132,7 @@ func renderInspect(stdout io.Writer, v *session.View, out inspectOut) {
 	}
 	row("name", out.Name)
 	row("backend", out.Backend)
+	row("kind", v.Session.Kind)
 	row("state", out.State)
 	if v.OrphanErr != "" {
 		row("orphans", "unknown ("+v.OrphanErr+")")
@@ -228,7 +230,7 @@ func cmdPs(args []string, stdout, stderr io.Writer) int {
 			continue
 		}
 		row := psRow{
-			Name: n, Backend: v.Session.Backend, State: v.State, CreatedAt: v.Session.CreatedAt,
+			Name: n, Backend: v.Session.Backend, Kind: v.Session.Kind, State: v.State, CreatedAt: v.Session.CreatedAt,
 			EndedAt: v.Status.EndedAt, EndedBy: v.Status.EndedBy, ExitCode: v.Status.ExitCode,
 			Labels: v.Session.Labels, RemoteURL: v.Status.RemoteURL,
 			Interactive: v.Plan != nil && v.Plan.PTY != nil,

@@ -387,3 +387,41 @@ func TestCodexUsesCodexJSONL(t *testing.T) {
 	}
 	t.Fatal("no diagnose entry matches the unsupported-model message")
 }
+
+func TestBuiltinInteractive(t *testing.T) {
+	claude, err := Load("claude", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := claude.RenderInteractive(Request{Permissions: "skip", Name: "s1", Prompt: "-hi", Model: "opus"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--remote-control", "s1", "--dangerously-skip-permissions", "--model", "opus", "--", "-hi"}
+	if strings.Join(r.Args, "|") != strings.Join(want, "|") || r.URLPattern == "" || r.Parser != "none" || r.PromptMode != "arg" {
+		t.Fatalf("claude interactive remote: %+v", r)
+	}
+	if !regexp.MustCompile(r.URLPattern).MatchString("https://claude.ai/code/session_017sf5rxuW4AeHi7B5SRz7ij") {
+		t.Fatal("claude url_pattern misses a session URL")
+	}
+	if r, err := claude.RenderInteractive(Request{Permissions: "auto"}, false); err != nil || strings.Join(r.Args, "|") != "--permission-mode|auto" || r.PromptMode != "none" {
+		t.Fatalf("claude interactive: %+v %v", r, err)
+	}
+	pi, err := Load("pi", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pi.RenderInteractive(Request{Permissions: "skip", Prompt: "hi"}, false); !errors.Is(err, ErrNoInteractive) {
+		t.Fatalf("pi with a prompt: %v", err)
+	}
+	if _, err := pi.RenderInteractive(Request{Permissions: "skip"}, true); !errors.Is(err, ErrNoInteractive) {
+		t.Fatalf("pi --remote: %v", err)
+	}
+	codex, err := Load("codex", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, err := codex.RenderInteractive(Request{Permissions: "auto", Prompt: "go"}, false); err != nil || strings.Join(r.Args, "|") != "--approve-for-me|--|go" {
+		t.Fatalf("codex interactive: %+v %v", r, err)
+	}
+}

@@ -47,6 +47,7 @@
 //	                           nothing after it; "trust-dialog" draws Claude's folder
 //	                           trust dialog
 //	FAKE_PTY_ARGV=1            print "argv=<args joined by |>" at start
+//	FAKE_PTY_RUN=line          handle line as if typed, right after the start output
 //	FAKE_PTY_INIT=1            also print a claude stream-json init event at start
 //	FAKE_PTY_FLOOD=n           print n bytes at start, as "flood n" would
 //	FAKE_PTY_AUTOEXIT=1        exit with FAKE_EXIT right after the start output
@@ -332,9 +333,7 @@ func ptyMode() {
 			say("winch=%s", size())
 		}
 	}()
-	sc := bufio.NewScanner(os.Stdin)
-	for sc.Scan() {
-		line := strings.TrimRight(sc.Text(), "\r")
+	handle := func(line string) {
 		f := strings.Fields(line)
 		switch {
 		case len(f) == 2 && f[0] == "exit":
@@ -374,5 +373,12 @@ func ptyMode() {
 		default:
 			say("echo:%s", line)
 		}
+	}
+	if c := os.Getenv("FAKE_PTY_RUN"); c != "" {
+		handle(c)
+	}
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		handle(strings.TrimRight(sc.Text(), "\r"))
 	}
 }

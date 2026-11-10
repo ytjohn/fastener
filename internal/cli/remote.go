@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ytjohn/fastener/internal/parser"
 	"github.com/ytjohn/fastener/internal/session"
 )
 
@@ -39,6 +40,11 @@ func (e *remoteFailure) Error() string { return e.msg }
 // view read. A session that ended (even one that printed a URL first) is a
 // *remoteFailure; a timeout while the bridge still runs is not an error, and
 // the view then has no remote_url.
+//
+// An interactive remote session does not exit in an untrusted folder: its
+// TUI shows the trust dialog and waits. So while it runs, its terminal
+// output is checked against untrusted_pattern too; on a match the session
+// is stopped and reported untrusted, exactly as a bridge that exited.
 func waitRemoteURL(v *session.View, p *prepared, wait time.Duration) (*session.View, error) {
 	name := v.Session.Name
 	deadline := time.Now().Add(wait)
@@ -46,6 +52,19 @@ func waitRemoteURL(v *session.View, p *prepared, wait time.Duration) (*session.V
 		if !v.Alive() {
 			full := withOrphanScan(v, name, p.cfg.Handshake(), session.LoadFull)
 			return full, explainEarlyEnd(full, p)
+		}
+		if p.interactive && v.Status.RemoteURL == "" {
+			if f := untrustedFailure(v, p); f != nil {
+				outcome := "the session was stopped"
+				if err := stopSession(v, 0, "stop"); err != nil {
+					outcome = "stopping it failed: " + err.Error()
+				}
+				f.msg += " (" + outcome + ")"
+				if nv, err := session.LoadFull(name, p.cfg.Handshake()); err == nil {
+					v = nv
+				}
+				return v, f
+			}
 		}
 		if v.Status.RemoteURL != "" || !time.Now().Before(deadline) {
 			return v, nil
@@ -64,14 +83,12 @@ func waitRemoteURL(v *session.View, p *prepared, wait time.Duration) (*session.V
 // profile's untrusted_hint, if any), else the way it ended, the URL if it
 // reported one, and the last line of stderr.
 func explainEarlyEnd(v *session.View, p *prepared) error {
+	if f := untrustedFailure(v, p); f != nil {
+		return f
+	}
 	tail := readTail(v.Dir.StderrLog(), stderrTail)
-	cwd := v.Session.Cwd
-	if r := p.prof.Remote; r != nil && r.UntrustedPattern != "" && regexp.MustCompile(r.UntrustedPattern).Match(tail) {
-		msg := fmt.Sprintf("%s is not a trusted workspace for %s", cwd, bridgeCommand(p))
-		if r.UntrustedHint != "" {
-			msg += "; authorize it with: " + strings.ReplaceAll(r.UntrustedHint, "{dir}", cwd)
-		}
-		return &remoteFailure{reason: reasonUntrusted, folder: cwd, msg: msg}
+	if p.interactive { // a pty merges stderr into the terminal output
+		tail = parser.StripForMatch(readTail(v.Dir.OutputLog(), stderrTail))
 	}
 	how := []string{"state=" + v.State}
 	if s := v.Status; s.EndedBy != "" {
@@ -87,22 +104,80 @@ func explainEarlyEnd(v *session.View, p *prepared) error {
 	if u := v.Status.RemoteURL; u != "" {
 		what = "after reporting " + u // it started, then went away before run saw the URL
 	}
-	msg := fmt.Sprintf("session %s: the bridge ended %s (%s)", v.Session.Name, what, strings.Join(how, ", "))
+	msg := fmt.Sprintf("session %s: the %s ended %s (%s)", v.Session.Name, remoteNoun(p), what, strings.Join(how, ", "))
 	if v.Status.Error != "" {
 		msg += ": " + v.Status.Error
 	}
 	if line := lastLine(tail); line != "" {
-		msg += "; stderr: " + line
+		if p.interactive {
+			msg += "; terminal: " + line
+		} else {
+			msg += "; stderr: " + line
+		}
 	}
 	return &remoteFailure{reason: reasonExited, msg: msg}
 }
 
-// bridgeCommand names the bridge as a user would type it, e.g.
-// "claude remote-control": the command's base name and the first argument.
+// trustCheck is the untrusted pattern and hint for this kind of remote run,
+// and the output they are matched against: stderr.log for a bridge, the
+// terminal output (escapes stripped) for an interactive session.
+func trustCheck(v *session.View, p *prepared) (pattern, hint string, text []byte) {
+	if p.interactive {
+		if in := p.prof.Interactive; in != nil && in.Remote != nil {
+			pattern, hint = in.Remote.UntrustedPattern, in.Remote.UntrustedHint
+		}
+		if pattern != "" {
+			text = parser.StripForMatch(readTail(v.Dir.OutputLog(), stderrTail))
+		}
+		return
+	}
+	if r := p.prof.Remote; r != nil {
+		pattern, hint = r.UntrustedPattern, r.UntrustedHint
+	}
+	if pattern != "" {
+		text = readTail(v.Dir.StderrLog(), stderrTail)
+	}
+	return
+}
+
+// untrustedFailure reports the folder untrusted when the output matches the
+// profile's untrusted_pattern, with its untrusted_hint if any; else nil.
+func untrustedFailure(v *session.View, p *prepared) *remoteFailure {
+	pattern, hint, text := trustCheck(v, p)
+	if pattern == "" || !regexp.MustCompile(pattern).Match(text) {
+		return nil
+	}
+	cwd := v.Session.Cwd
+	msg := fmt.Sprintf("%s is not a trusted workspace for %s", cwd, bridgeCommand(p))
+	if hint != "" {
+		msg += "; authorize it with: " + strings.ReplaceAll(hint, "{dir}", cwd)
+	}
+	return &remoteFailure{reason: reasonUntrusted, folder: cwd, msg: msg}
+}
+
+// remoteNoun names what run --remote started.
+func remoteNoun(p *prepared) string {
+	if p.interactive {
+		return "interactive session"
+	}
+	return "bridge"
+}
+
+// bridgeCommand names the remote command as a user would type it, e.g.
+// "claude remote-control" or "claude --remote-control": the command's base
+// name and the first remote argument.
 func bridgeCommand(p *prepared) string {
 	cmd := filepath.Base(p.prof.Command)
-	if r := p.prof.Remote; r != nil && len(r.Args) > 0 && !strings.Contains(r.Args[0], "{") {
-		cmd += " " + r.Args[0]
+	var args []string
+	if p.interactive {
+		if in := p.prof.Interactive; in != nil && in.Remote != nil {
+			args = in.Remote.Args
+		}
+	} else if r := p.prof.Remote; r != nil {
+		args = r.Args
+	}
+	if len(args) > 0 && !strings.Contains(args[0], "{") {
+		cmd += " " + args[0]
 	}
 	return cmd
 }
