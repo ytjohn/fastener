@@ -35,6 +35,79 @@ type Rendered struct {
 	Parser     string
 	// DedupeFrames: the monitor drops redrawn lines from output.log.
 	DedupeFrames bool
+	// Env is extra KEY=VALUE pairs for the agent ([interactive].env).
+	Env []string
+	// URLPattern is matched against terminal output to find remote_url
+	// ([interactive.remote].url_pattern).
+	URLPattern string
+}
+
+// ErrNoInteractive is wrapped by RenderInteractive when the profile has no
+// [interactive] section (or, with remote, no [interactive.remote]).
+var ErrNoInteractive = errors.New("no [interactive] section")
+
+type noInteractiveError struct{ msg string }
+
+func (e noInteractiveError) Error() string        { return e.msg }
+func (e noInteractiveError) Is(target error) bool { return target == ErrNoInteractive }
+
+// RenderInteractive builds an interactive run's argument list:
+// [interactive].args, then (remote) [interactive.remote].args with {name}
+// replaced, then the permission level's arguments ([interactive.permissions]
+// if it lists the level, else [permissions]), then the model option, then,
+// when a prompt is given and the profile takes one as an argument, "--" and
+// the prompt. The prompt is optional.
+func (p *Profile) RenderInteractive(r Request, remote bool) (Rendered, error) {
+	in := p.Interactive
+	if in == nil {
+		return Rendered{}, noInteractiveError{fmt.Sprintf("backend %s has no [interactive] section, so it does not support --interactive", p.Name)}
+	}
+	if remote && in.Remote == nil {
+		return Rendered{}, noInteractiveError{fmt.Sprintf("backend %s has no [interactive.remote] section, so it does not support --interactive --remote", p.Name)}
+	}
+	perm, err := p.permArgs(r.Permissions, in.Permissions)
+	if err != nil {
+		return Rendered{}, err
+	}
+	args := append([]string{}, in.Args...)
+	out := Rendered{PromptMode: PromptNone, Parser: in.InteractiveParser(), Env: append([]string(nil), in.Env...)}
+	if remote {
+		for _, a := range in.Remote.Args {
+			args = append(args, strings.ReplaceAll(a, namePH, r.Name))
+		}
+		out.URLPattern = in.Remote.URLPattern
+	}
+	args = append(args, perm...)
+	if args, err = p.appendModel(args, r.Model); err != nil {
+		return Rendered{}, err
+	}
+	if strings.TrimSpace(r.Prompt) != "" {
+		if in.Prompt != InteractivePromptArg {
+			return Rendered{}, fmt.Errorf("backend %s takes no initial prompt in interactive mode; type it after attaching", p.Name)
+		}
+		args = append(args, "--", r.Prompt)
+		out.PromptMode = InteractivePromptArg
+	}
+	out.Args = args
+	return out, nil
+}
+
+// appendModel appends the [options] model template for model, if one is set.
+func (p *Profile) appendModel(args []string, model string) ([]string, error) {
+	if model == "" {
+		return args, nil
+	}
+	if strings.HasPrefix(model, "-") {
+		return nil, fmt.Errorf("model %q must not start with '-'", model)
+	}
+	tmpl, ok := p.Options["model"]
+	if !ok {
+		return nil, fmt.Errorf("backend %s does not support --model", p.Name)
+	}
+	for _, a := range tmpl {
+		args = append(args, strings.ReplaceAll(a, "{value}", model))
+	}
+	return args, nil
 }
 
 // RenderHeadless builds the argument list. Nothing passes through a shell;
@@ -47,17 +120,8 @@ func (p *Profile) RenderHeadless(r Request) (Rendered, error) {
 	}
 	args := append([]string{}, p.Headless.Args...)
 	args = append(args, perm...)
-	if r.Model != "" {
-		if strings.HasPrefix(r.Model, "-") {
-			return Rendered{}, fmt.Errorf("model %q must not start with '-'", r.Model)
-		}
-		tmpl, ok := p.Options["model"]
-		if !ok {
-			return Rendered{}, fmt.Errorf("backend %s does not support --model", p.Name)
-		}
-		for _, a := range tmpl {
-			args = append(args, strings.ReplaceAll(a, "{value}", r.Model))
-		}
+	if args, err = p.appendModel(args, r.Model); err != nil {
+		return Rendered{}, err
 	}
 	if p.Headless.Prompt == "arg" {
 		if strings.TrimSpace(r.Prompt) == "" {

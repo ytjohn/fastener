@@ -426,3 +426,41 @@ func TestClientCountOnlyWhileRunning(t *testing.T) {
 		t.Fatalf("count recorded after the outcome: %v", *m.st.AttachedClients)
 	}
 }
+
+// TestPTYURLPattern: the plan's url_pattern is matched against terminal
+// output with escapes stripped, across a split write, and with nothing
+// after it (taken once the output has been quiet).
+func TestPTYURLPattern(t *testing.T) {
+	r := startPTY(t, []string{"FAKE_PTY_ARGV=1"}, func(p *session.Plan) {
+		p.URLPattern = `https://claude\.ai/code/session_[A-Za-z0-9_-]+`
+		p.Env = []string{"FROM_PROFILE=1"}
+	})
+	r.running()
+	c := r.attach(attach.Size{})
+	c.Send([]byte("url\n"))
+	waitFor(t, "remote_url", func() bool {
+		return r.status().RemoteURL == "https://claude.ai/code/session_01FAKEPTYSESSION0001"
+	})
+	if u := r.status().RemoteURL; u != "https://claude.ai/code/session_01FAKEPTYSESSION0001" {
+		t.Fatalf("remote_url %q", u)
+	}
+}
+
+// TestAgentEnvPlanLayer: the plan's env (from the profile) comes after
+// env_base and before the env-file and --env.
+func TestAgentEnvPlanLayer(t *testing.T) {
+	m := newTestMonitor(t)
+	m.plan.Env = []string{"A=plan", "B=plan", "P=plan"}
+	env, err := m.agentEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		got[k] = v
+	}
+	if got["A"] != "plan" || got["B"] != "file" || got["C"] != "flag" || got["P"] != "plan" {
+		t.Fatalf("env %v", env)
+	}
+}

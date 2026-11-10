@@ -32,6 +32,28 @@ dedupe_frames     = true
 [remote.permissions]
 skip = ["--permission-mode", "bypassPermissions"]
 
+# An interactive session (`fastener run claude --interactive`): Claude Code's
+# own TUI on a pty the monitor owns; `fastener attach` connects to it. An
+# initial prompt is passed as the positional prompt, after "--" (Claude Code
+# 2.1.322 submits it as the first message).
+[interactive]
+args   = []
+prompt = "arg"
+
+# `run claude --interactive --remote`: the same TUI with Remote Control on,
+# so it can also be driven from claude.ai/code or the mobile app. Claude
+# prints "/remote-control is active · Continue here, on your phone, or at
+# https://claude.ai/code/session_…" (an OSC 8 link, redrawn several times).
+# The TUI draws spaces as cursor movements, so the pattern names the ID's
+# characters instead of relying on \S+. In a folder whose trust dialog has
+# not been accepted, the TUI shows that dialog and waits ("Quick safety
+# check: Is this a project you created or one you trust?").
+[interactive.remote]
+args              = ["--remote-control", "{name}"]
+url_pattern       = 'https://claude\.ai/code/session_[A-Za-z0-9_-]+'
+untrusted_pattern = '(?i)is\s*this\s*a\s*project\s*you\s*created\s*or\s*one\s*you\s*trust|workspace\s*not\s*trusted'
+untrusted_hint    = "fastener authorize claude-folder-trust {dir}"
+
 [check]
 version_args = ["--version"]
 diagnose = [

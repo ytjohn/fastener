@@ -70,6 +70,7 @@ type Profile struct {
 	Permissions        map[string][]string `toml:"permissions"`
 	Resume             *Resume             `toml:"resume"`
 	Remote             *Remote             `toml:"remote"`
+	Interactive        *Interactive        `toml:"interactive"`
 	Check              Check               `toml:"check"`
 
 	Source string `toml:"-"` // "builtin" or the file path
@@ -103,6 +104,58 @@ type Remote struct {
 	// DedupeFrames makes the monitor drop redrawn status lines from
 	// output.log (they are still parsed).
 	DedupeFrames bool `toml:"dedupe_frames"`
+}
+
+// Interactive describes an interactive run (`run --interactive`): the agent's
+// TUI on a pty the monitor owns, which terminals attach to.
+type Interactive struct {
+	// Args follow the command.
+	Args []string `toml:"args"`
+	// Prompt is how an optional initial prompt is passed: "arg" appends
+	// "--" and the prompt after every other argument; "none" means the
+	// backend takes none here (a prompt is then a usage error).
+	Prompt string `toml:"prompt"`
+	// Parser reads the terminal output line by line; default "none".
+	Parser string `toml:"parser"`
+	// Env is KEY=VALUE pairs set for the agent, after the passthrough
+	// environment and before --env-file and --env.
+	Env []string `toml:"env"`
+	// Permissions overrides [permissions] per level, as [remote.permissions].
+	Permissions map[string][]string `toml:"permissions"`
+	// Remote is `run --interactive --remote`: the same TUI, also driven
+	// from elsewhere.
+	Remote *InteractiveRemote `toml:"remote"`
+}
+
+// InteractiveRemote is [interactive.remote].
+type InteractiveRemote struct {
+	// Args follow [interactive].args; {name} (at most once) is the session
+	// name.
+	Args []string `toml:"args"`
+	// URLPattern is a regex the monitor matches against the terminal output
+	// (escapes stripped); the latest match is the session's remote_url.
+	URLPattern string `toml:"url_pattern"`
+	// UntrustedPattern and UntrustedHint are as in [remote], matched against
+	// the terminal output.
+	UntrustedPattern string `toml:"untrusted_pattern"`
+	UntrustedHint    string `toml:"untrusted_hint"`
+}
+
+// Interactive prompt modes.
+const (
+	InteractivePromptArg  = "arg"
+	InteractivePromptNone = "none"
+)
+
+// DefaultInteractiveParser is [interactive].parser when the profile names none.
+const DefaultInteractiveParser = "none"
+
+// InteractiveParser is the parser an interactive run uses.
+func (i *Interactive) InteractiveParser() string {
+	if i.Parser == "" {
+		return DefaultInteractiveParser
+	}
+	return i.Parser
 }
 
 // DefaultRemoteParser is [remote].parser when the profile names none.
@@ -215,6 +268,9 @@ func (p *Profile) validate() error {
 	if err := p.validateRemote(); err != nil {
 		return err
 	}
+	if err := p.validateInteractive(); err != nil {
+		return err
+	}
 	for i, d := range p.Check.Diagnose {
 		if _, err := regexp.Compile(d.Match); err != nil {
 			return fmt.Errorf("check.diagnose[%d].match: %w", i, err)
@@ -323,6 +379,60 @@ func (p *Profile) validateRemote() error {
 	return nil
 }
 
+func (p *Profile) validateInteractive() error {
+	in := p.Interactive
+	if in == nil {
+		return nil
+	}
+	if in.Prompt != InteractivePromptArg && in.Prompt != InteractivePromptNone {
+		return fmt.Errorf("interactive.prompt %q: want \"arg\" or \"none\"", in.Prompt)
+	}
+	if _, ok := parser.Get(in.InteractiveParser()); !ok {
+		return fmt.Errorf("interactive.parser %q unknown (known: %s)", in.Parser, strings.Join(parser.Names(), ", "))
+	}
+	for i, kv := range in.Env {
+		k, _, ok := strings.Cut(kv, "=")
+		if !ok || !envKeyRE.MatchString(k) {
+			return fmt.Errorf("interactive.env[%d] %q: want KEY=VALUE", i, kv)
+		}
+	}
+	for lvl := range in.Permissions {
+		if !levels[lvl] {
+			return fmt.Errorf("interactive.permissions.%s: unknown level (known: auto, skip)", lvl)
+		}
+		if _, ok := p.Permissions[lvl]; !ok {
+			return fmt.Errorf("interactive.permissions.%s: level is not defined in [permissions]", lvl)
+		}
+	}
+	r := in.Remote
+	if r == nil {
+		return nil
+	}
+	if len(r.Args) == 0 {
+		return errors.New("interactive.remote.args must not be empty")
+	}
+	if countIn(r.Args, namePH) > 1 {
+		return fmt.Errorf("interactive.remote.args must contain %s at most once", namePH)
+	}
+	if r.URLPattern == "" {
+		return errors.New("interactive.remote.url_pattern is required")
+	}
+	if _, err := regexp.Compile(r.URLPattern); err != nil {
+		return fmt.Errorf("interactive.remote.url_pattern: %w", err)
+	}
+	if r.UntrustedHint != "" && r.UntrustedPattern == "" {
+		return errors.New("interactive.remote.untrusted_hint needs interactive.remote.untrusted_pattern")
+	}
+	if r.UntrustedPattern != "" {
+		if _, err := regexp.Compile(r.UntrustedPattern); err != nil {
+			return fmt.Errorf("interactive.remote.untrusted_pattern: %w", err)
+		}
+	}
+	return nil
+}
+
+var envKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // RemoteParser is the parser a remote bridge uses.
 func (r *Remote) RemoteParser() string {
 	if r.Parser == "" {
@@ -351,7 +461,14 @@ func (p *Profile) validateTemplates() error {
 			plain = append(plain, a)
 		}
 	}
-	// {name} is only allowed in [remote].args (see validateRemote).
+	if in := p.Interactive; in != nil {
+		plain = append(plain, in.Args, in.Env)
+		for _, a := range in.Permissions {
+			plain = append(plain, a)
+		}
+	}
+	// {name} is only allowed in [remote].args and [interactive.remote].args
+	// (see validateRemote and validateInteractive).
 	noName := append([][]string{}, plain...)
 	for _, t := range p.Options {
 		noName = append(noName, t)
@@ -361,11 +478,14 @@ func (p *Profile) validateTemplates() error {
 	}
 	for _, a := range noName {
 		if countIn(a, namePH) != 0 {
-			return fmt.Errorf("placeholder %s is only allowed in remote.args", namePH)
+			return fmt.Errorf("placeholder %s is only allowed in remote.args and interactive.remote.args", namePH)
 		}
 	}
 	if p.Remote != nil {
 		plain = append(plain, p.Remote.Args)
+	}
+	if in := p.Interactive; in != nil && in.Remote != nil {
+		plain = append(plain, in.Remote.Args)
 	}
 	for name, tmpl := range p.Options {
 		if len(tmpl) == 0 || countIn(tmpl, val) != 1 {

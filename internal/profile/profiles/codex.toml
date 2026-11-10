@@ -9,6 +9,13 @@ args   = ["exec", "--json", "--skip-git-repo-check"]
 prompt = "stdin"
 parser = "codex-jsonl"
 
+# An interactive session (`fastener run codex --interactive`): the Codex TUI
+# on a pty (codex-cli 0.167.0 starts cleanly there). An initial prompt is the
+# positional [PROMPT], after "--". Remote control for Codex is separate (#56).
+[interactive]
+args   = []
+prompt = "arg"
+
 [options]
 model = ["--model", "{value}"]
 
