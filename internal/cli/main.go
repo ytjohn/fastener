@@ -29,6 +29,7 @@ commands:
   ps                 list sessions
   inspect <name>     show a session's state and facts
   logs <name>        print a session's output
+  attach <name>      connect this terminal to an interactive session
   wait <name>        wait for a session to end; exit with its code
   stop <name>        stop a session
   rm <name>          remove a session's state
@@ -60,6 +61,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return cmdPs(rest, stdout, stderr)
 	case "inspect":
 		return cmdInspect(rest, stdout, stderr)
+	case "attach":
+		return cmdAttach(rest, stdout, stderr)
 	case "logs":
 		return cmdLogs(rest, stdout, stderr)
 	case "wait":
