@@ -7,7 +7,9 @@
 //	FAKE_IS_ERROR=1            result.is_error = true
 //	FAKE_EXIT=n                exit code (default 0)
 //	FAKE_SLEEP=dur             sleep between init and result
-//	FAKE_IGNORE_TERM=1         ignore SIGTERM
+//	FAKE_IGNORE_TERM=1         ignore SIGTERM, then print "fakeagent: ignoring SIGTERM" on
+//	                           stderr (stderr.log, or output.log on a pty): tests signal
+//	                           only after it
 //	FAKE_STDERR=text           print text to stderr first
 //	FAKE_GRANDCHILD=1          start a long-lived child in the same process group
 //	                           (also in bridge mode)
@@ -71,6 +73,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const ignoreTermMarker = "fakeagent: ignoring SIGTERM"
+
 func emit(v map[string]any) {
 	b, _ := json.Marshal(v)
 	fmt.Println(string(b))
@@ -110,6 +114,9 @@ func main() {
 	}
 	if os.Getenv("FAKE_IGNORE_TERM") == "1" {
 		signal.Ignore(syscall.SIGTERM)
+		// The marker tests wait for before they signal: SIGTERM is ignored
+		// from here on.
+		fmt.Fprintln(os.Stderr, ignoreTermMarker)
 	}
 	if os.Getenv("FAKE_PTY") == "1" {
 		ptyMode()

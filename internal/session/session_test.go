@@ -452,3 +452,30 @@ func TestResolveRecordsUnknownLiveness(t *testing.T) {
 		t.Fatalf("reloaded: state %s, err %q", v.State, v.LivenessError)
 	}
 }
+
+// TestFinalizeDirRemovedUnderneath (#65): when the session directory is
+// renamed away (rm's tombstone) after Finalize took its lock, Finalize
+// reports the session gone (ErrNotFound), not an I/O error.
+func TestFinalizeDirRemovedUnderneath(t *testing.T) {
+	t.Setenv("FASTENER_STATE_DIR", t.TempDir())
+	d, err := Create("gone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteJSON(d.StatusPath(), Status{SchemaVersion: 1, State: StateRunning}); err != nil {
+		t.Fatal(err)
+	}
+	tomb := string(d) + ".tomb"
+	_, err = Finalize(d, func(s *Status) {
+		// Runs under the lock, just before the write: rm renames the
+		// directory to its tombstone and deletes it.
+		if err := os.Rename(string(d), tomb); err != nil {
+			t.Fatal(err)
+		}
+		os.RemoveAll(tomb)
+		s.State = StateExited
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}

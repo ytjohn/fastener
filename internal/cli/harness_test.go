@@ -249,3 +249,16 @@ func pidAlive(pid int) bool {
 	_, err := proc.StartTime(pid)
 	return err == nil
 }
+
+// waitIgnoresTerm waits until a FAKE_IGNORE_TERM agent in session name has
+// said it ignores SIGTERM (on stderr): stopping it earlier would kill it
+// with the default action instead of testing the grace and SIGKILL.
+func (h *harness) waitIgnoresTerm(name string) {
+	h.t.Helper()
+	for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		if out, _, _ := h.cmd("logs", name, "--stderr"); strings.Contains(out, "fakeagent: ignoring SIGTERM") {
+			return
+		}
+	}
+	h.t.Fatalf("%s: the agent never said it ignores SIGTERM", name)
+}

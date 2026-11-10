@@ -225,6 +225,21 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+// waitIgnoresTerm waits until a FAKE_IGNORE_TERM agent has said it ignores
+// SIGTERM (stderr.log, or output.log on a pty); a signal sent earlier would
+// kill it with the default action.
+func waitIgnoresTerm(t *testing.T, d session.Dir) {
+	t.Helper()
+	waitFor(t, "the agent to ignore SIGTERM", func() bool {
+		for _, f := range []string{d.StderrLog(), d.OutputLog()} {
+			if b, _ := os.ReadFile(f); strings.Contains(string(b), "fakeagent: ignoring SIGTERM") {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 func runningStatus(d session.Dir) bool {
 	var st session.Status
 	return session.ReadJSON(d.StatusPath(), &st) == nil && st.State == session.StateRunning
@@ -236,7 +251,7 @@ func TestStopIgnoringTermIsKilled(t *testing.T) {
 	start := time.Now()
 	st := runWith(t, d, sigs, func() {
 		waitFor(t, "running", func() bool { return runningStatus(d) })
-		time.Sleep(100 * time.Millisecond)
+		waitIgnoresTerm(t, d)
 		requestStop(t, d)
 		sigs <- syscall.SIGTERM
 	})
@@ -264,7 +279,7 @@ func TestSecondStopShortensGrace(t *testing.T) {
 	var first time.Time
 	st := runWith(t, d, sigs, func() {
 		waitFor(t, "running", func() bool { return runningStatus(d) })
-		time.Sleep(100 * time.Millisecond)
+		waitIgnoresTerm(t, d)
 		first = time.Now()
 		stopAt(10 * time.Second)
 		sigs <- syscall.SIGTERM
@@ -289,6 +304,7 @@ func TestLaterLongerStopDoesNotExtend(t *testing.T) {
 	var first time.Time
 	st := runWith(t, d, sigs, func() {
 		waitFor(t, "running", func() bool { return runningStatus(d) })
+		waitIgnoresTerm(t, d)
 		first = time.Now()
 		session.WriteJSON(d.StopPath(), session.StopRequest{SchemaVersion: 1, Generation: 1,
 			RequestedAt: time.Now().UTC(), Grace: session.Duration(500 * time.Millisecond), By: "stop"})
@@ -322,6 +338,7 @@ func TestStopAfterPlainSignalIsStop(t *testing.T) {
 	var first time.Time
 	st := runWith(t, d, sigs, func() {
 		waitFor(t, "running", func() bool { return runningStatus(d) })
+		waitIgnoresTerm(t, d)
 		first = time.Now()
 		sigs <- syscall.SIGTERM
 		time.Sleep(200 * time.Millisecond)
