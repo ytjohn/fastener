@@ -16,19 +16,45 @@ import (
 // record whose payload has the id, the cwd, the start time (UTC) and the
 // source ("cli" for the TUI, "exec" for `codex exec`). Codex has no option
 // to choose the ID, so this finder is a heuristic: the one interactive
-// session for this cwd that started after the Fastener session did.
+// session for this cwd that started within CodexWindow after the Fastener
+// session did. Its answer is a candidate, never the session's certain
+// conversation.
 
-func codexHome(env []string) string {
-	if d := getenv(env, "CODEX_HOME"); d != "" {
+func codexHome(q Query) string {
+	if d := envDir(q, "CODEX_HOME"); d != "" {
 		return d
 	}
-	return filepath.Join(home(env), ".codex")
+	return filepath.Join(home(q), ".codex")
 }
 
 // maxMetaLine bounds how much of a rollout's first line is read: the meta
-// record carries the base instructions, so it can be long, but it is never
-// conversation content.
-const maxMetaLine = 4 << 20
+// record carries the base instructions (tens of KiB), never conversation
+// content. A longer first line is skipped.
+const maxMetaLine = 1 << 20
+
+// CodexWindow bounds how long after the Fastener session's spawn a Codex
+// rollout may start and still be taken for it. It narrows the case of a
+// Codex the user starts by hand in the same folder later (the session's own
+// conversation starts at its first message, so it cannot rule that out),
+// but cannot tell apart two Codex sessions started in the window.
+const CodexWindow = 10 * time.Minute
+
+// codexLocation is the time zone of the sessions/YYYY/MM/DD directories
+// (Codex uses local time); a variable for tests.
+var codexLocation = time.Local
+
+// codexDayDirs lists the day directories from the day before from to the
+// day after to, by calendar date in loc (a day is not always 24 hours).
+func codexDayDirs(root string, from, to time.Time, loc *time.Location) []string {
+	f, t := from.In(loc), to.In(loc)
+	day := time.Date(f.Year(), f.Month(), f.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -1)
+	last := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, 1)
+	var dirs []string
+	for ; !day.After(last); day = day.AddDate(0, 0, 1) {
+		dirs = append(dirs, filepath.Join(root, day.Format("2006/01/02")))
+	}
+	return dirs
+}
 
 type codexMeta struct {
 	Type    string `json:"type"`
@@ -49,9 +75,12 @@ func readCodexMeta(path string) (codexMeta, bool) {
 	defer f.Close()
 	r := bufio.NewReaderSize(f, 64<<10)
 	var line []byte
-	for len(line) < maxMetaLine {
+	for {
 		chunk, isPrefix, err := r.ReadLine()
 		line = append(line, chunk...)
+		if len(line) > maxMetaLine {
+			return m, false
+		}
 		if err != nil || !isPrefix {
 			break
 		}
@@ -66,17 +95,15 @@ func readCodexMeta(path string) (codexMeta, bool) {
 // cwd started at or after the session (exact for an assigned ID: Codex
 // cannot take one, but a profile may still name it).
 func codexRollouts(q Query) (string, error) {
-	root := filepath.Join(codexHome(q.Env), "sessions")
+	root := filepath.Join(codexHome(q), "sessions")
 	want := map[string]bool{}
 	for _, c := range cwds(q.Cwd) {
 		want[c] = true
 	}
-	// The directory date is local; look from the day before the start (time
-	// zones, midnight) to the day after now.
-	var dirs []string
-	for d := q.StartedAt.Add(-24 * time.Hour); !d.After(time.Now().Add(24 * time.Hour)); d = d.Add(24 * time.Hour) {
-		dirs = append(dirs, filepath.Join(root, d.Local().Format("2006/01/02")))
-	}
+	// The directory date is local; a rollout we accept starts within
+	// CodexWindow of the spawn, so look from the day before the start to the
+	// day after the window's end.
+	dirs := codexDayDirs(root, q.StartedAt, q.StartedAt.Add(CodexWindow), codexLocation)
 	var cands []string
 	for _, dir := range dedupe(dirs) {
 		ents, err := os.ReadDir(dir)
@@ -91,11 +118,12 @@ func codexRollouts(q Query) (string, error) {
 			if q.SessionID != "" && !strings.Contains(name, q.SessionID) {
 				continue
 			}
-			if fi, err := e.Info(); err != nil || fi.ModTime().Before(q.StartedAt) {
+			if fi, err := e.Info(); err != nil || fi.ModTime().Before(q.StartedAt.Add(-mtimeSlack)) {
 				continue // not written since the session started
 			}
 			m, ok := readCodexMeta(filepath.Join(dir, name))
-			if !ok || !want[filepath.Clean(m.Payload.Cwd)] || m.Payload.Timestamp.Before(q.StartedAt.Add(-time.Second)) {
+			ts := m.Payload.Timestamp
+			if !ok || !want[filepath.Clean(m.Payload.Cwd)] || ts.Before(q.StartedAt.Add(-time.Second)) || ts.After(q.StartedAt.Add(CodexWindow)) {
 				continue
 			}
 			if s, ok := m.Payload.Source.(string); ok && s == "exec" {

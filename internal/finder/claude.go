@@ -46,11 +46,11 @@ func claudeProjectKey(cwd string) string {
 	return string(key[:200]) + "-" + strconv.FormatInt(abs, 36)
 }
 
-func claudeHome(env []string) string {
-	if d := getenv(env, "CLAUDE_CONFIG_DIR"); d != "" {
+func claudeHome(q Query) string {
+	if d := envDir(q, "CLAUDE_CONFIG_DIR"); d != "" {
 		return d
 	}
-	return filepath.Join(home(env), ".claude")
+	return filepath.Join(home(q), ".claude")
 }
 
 var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -59,7 +59,7 @@ var uuidRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4
 // else the one transcript in the cwd's project directory modified since the
 // session started (a heuristic: ambiguous when there are more).
 func claudeTranscripts(q Query) (string, error) {
-	projects := filepath.Join(claudeHome(q.Env), "projects")
+	projects := filepath.Join(claudeHome(q), "projects")
 	var dirs []string
 	for _, c := range cwds(q.Cwd) {
 		dirs = append(dirs, filepath.Join(projects, claudeProjectKey(c)))
@@ -96,7 +96,7 @@ func newerFiles(dir string, since time.Time, id func(name string) (string, bool)
 			continue
 		}
 		fi, err := e.Info()
-		if err == nil && !fi.ModTime().Before(since) {
+		if err == nil && !fi.ModTime().Before(since.Add(-mtimeSlack)) {
 			out = append(out, v)
 		}
 	}

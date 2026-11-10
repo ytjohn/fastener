@@ -7,8 +7,10 @@
 //
 // The exact method is an ID Fastener assigns at launch (the profile's
 // [interactive] session_id): the finder then only checks that the agent has
-// written that conversation. Without one, a finder falls back to a heuristic
-// and reports ErrAmbiguous rather than guess between candidates.
+// written that conversation, and the answer is the session's conversation.
+// Without one, a finder falls back to a heuristic: its answer is only a
+// candidate (it could be another conversation in the same folder), and it
+// reports ErrAmbiguous rather than choose between several.
 package finder
 
 import (
@@ -83,13 +85,32 @@ func getenv(env []string, key string) string {
 }
 
 // home is the agent's HOME, else this process's.
-func home(env []string) string {
-	if h := getenv(env, "HOME"); h != "" {
+func home(q Query) string {
+	if h := envDir(q, "HOME"); h != "" {
 		return h
 	}
 	h, _ := os.UserHomeDir()
 	return h
 }
+
+// envDir is the agent's environment variable key as a directory: a relative
+// value is relative to the agent's cwd (the monitor's own cwd is "/"), as
+// the agent itself would read it.
+func envDir(q Query, key string) string {
+	v := getenv(q.Env, key)
+	if v != "" && !filepath.IsAbs(v) {
+		v = filepath.Join(q.Cwd, v)
+	}
+	return v
+}
+
+// mtimeSlack allows for filesystems that store modification times coarsely
+// (whole seconds or worse) when comparing them with StartedAt.
+const mtimeSlack = time.Second
+
+// Exact reports whether a finder's answer for q is the session's own
+// conversation (an assigned ID it has found) rather than a candidate.
+func Exact(q Query) bool { return q.SessionID != "" }
 
 // cwds is the physical cwd first, then the path as given if it differs.
 func cwds(cwd string) []string {
@@ -126,5 +147,18 @@ func one(cands []string, where string) (string, error) {
 		return cands[0], nil
 	}
 	sort.Strings(cands)
-	return "", wrapf(ErrAmbiguous, "%d in %s (%s)", len(cands), where, strings.Join(cands, ", "))
+	return "", &AmbiguousError{IDs: cands, Where: where}
 }
+
+// AmbiguousError lists the candidates a heuristic finder could not choose
+// between; it matches ErrAmbiguous.
+type AmbiguousError struct {
+	IDs   []string
+	Where string
+}
+
+func (e *AmbiguousError) Error() string {
+	return fmt.Sprintf("%v: %d in %s (%s)", ErrAmbiguous, len(e.IDs), e.Where, strings.Join(e.IDs, ", "))
+}
+
+func (e *AmbiguousError) Is(target error) bool { return target == ErrAmbiguous }

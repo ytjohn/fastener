@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	_ "time/tzdata" // America/New_York below, whatever the host has
 )
 
 // Every store here is synthetic: empty or one-line files with made-up IDs.
@@ -113,7 +114,7 @@ func TestPiSessions(t *testing.T) {
 	agent := t.TempDir()
 	cwd := t.TempDir()
 	physical, _ := filepath.EvalSymlinks(cwd)
-	dir := piSessionDir([]string{"PI_CODING_AGENT_DIR=" + agent}, physical)
+	dir := piSessionDir(Query{Env: []string{"PI_CODING_AGENT_DIR=" + agent}}, physical)
 	if want := filepath.Join(agent, "sessions", "--"+strings.ReplaceAll(strings.TrimPrefix(physical, "/"), "/", "-")+"--"); dir != want {
 		t.Fatalf("dir %s, want %s", dir, want)
 	}
@@ -179,5 +180,90 @@ func TestGet(t *testing.T) {
 	}
 	if _, ok := Get("nope"); ok {
 		t.Error("unknown finder found")
+	}
+}
+
+// TestCodexOutsideWindow (scenario A): a Codex the user starts by hand in
+// the same folder long after the session's spawn is not taken for it.
+func TestCodexOutsideWindow(t *testing.T) {
+	codex := t.TempDir()
+	cwd := t.TempDir()
+	physical, _ := filepath.EvalSymlinks(cwd)
+	start := time.Now().Add(-40 * time.Minute)
+	day := filepath.Join(codex, "sessions", time.Now().Format("2006/01/02"))
+	q := Query{Cwd: cwd, StartedAt: start, Env: []string{"HOME=" + t.TempDir(), "CODEX_HOME=" + codex}}
+	write(t, filepath.Join(day, "rollout-late-"+idB+".jsonl"), codexMetaLine(idB, physical, start.Add(30*time.Minute), "cli"), time.Time{})
+	_, err := codexRollouts(q)
+	wantErr(t, err, ErrNotFound)
+	write(t, filepath.Join(day, "rollout-ok-"+idA+".jsonl"), codexMetaLine(idA, physical, start.Add(5*time.Minute), "cli"), time.Time{})
+	if id, err := codexRollouts(q); err != nil || id != idA {
+		t.Fatalf("within the window: %q %v", id, err)
+	}
+}
+
+// TestCodexDayDirsAcrossDST: the day directories are calendar dates, so the
+// short day at a DST change is not skipped.
+func TestCodexDayDirsAcrossDST(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 3, 7, 23, 30, 0, 0, ny) // DST starts 2026-03-08 02:00
+	got := codexDayDirs("/r", start, start.Add(25*time.Hour), ny)
+	want := []string{"/r/2026/03/06", "/r/2026/03/07", "/r/2026/03/08", "/r/2026/03/09", "/r/2026/03/10"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("dirs %v, want %v", got, want)
+	}
+	// And the finder finds a rollout dated the short day.
+	old := codexLocation
+	codexLocation = ny
+	t.Cleanup(func() { codexLocation = old })
+	codex := t.TempDir()
+	cwd := t.TempDir()
+	physical, _ := filepath.EvalSymlinks(cwd)
+	start = time.Date(2026, 3, 7, 23, 58, 0, 0, ny)
+	ts := time.Date(2026, 3, 8, 0, 5, 0, 0, ny) // within the window, on the next (short) day
+	write(t, filepath.Join(codex, "sessions", "2026/03/08", "rollout-x-"+idA+".jsonl"), codexMetaLine(idA, physical, ts, "cli"), time.Time{})
+	q := Query{Cwd: cwd, StartedAt: start, Env: []string{"HOME=" + t.TempDir(), "CODEX_HOME=" + codex}}
+	if id, err := codexRollouts(q); err != nil || id != idA {
+		t.Fatalf("rollout on the DST day: %q %v", id, err)
+	}
+}
+
+// TestRelativeStoreDirs: a relative CLAUDE_CONFIG_DIR, CODEX_HOME or
+// PI_CODING_AGENT_DIR is relative to the agent's cwd.
+func TestRelativeStoreDirs(t *testing.T) {
+	cwd := t.TempDir()
+	physical, _ := filepath.EvalSymlinks(cwd)
+	q := Query{Cwd: physical, StartedAt: time.Now().Add(-time.Minute), SessionID: idA,
+		Env: []string{"HOME=/nonexistent", "CLAUDE_CONFIG_DIR=rel/claude", "PI_CODING_AGENT_DIR=rel/pi", "CODEX_HOME=rel/codex"}}
+	write(t, filepath.Join(physical, "rel/claude/projects", claudeProjectKey(physical), idA+".jsonl"), "{}\n", time.Time{})
+	if id, err := claudeTranscripts(q); err != nil || id != idA {
+		t.Fatalf("claude: %q %v", id, err)
+	}
+	write(t, filepath.Join(piSessionDir(q, physical), "2026-11-10T16-35-25-813Z_"+idA+".jsonl"), "{}\n", time.Time{})
+	if !strings.HasPrefix(piSessionDir(q, physical), filepath.Join(physical, "rel/pi")) {
+		t.Fatalf("pi dir %s", piSessionDir(q, physical))
+	}
+	if id, err := piSessions(q); err != nil || id != idA {
+		t.Fatalf("pi: %q %v", id, err)
+	}
+	if got := codexHome(q); got != filepath.Join(physical, "rel/codex") {
+		t.Fatalf("codex home %s", got)
+	}
+}
+
+// TestCoarseMtimeSlack: a file whose mtime (rounded down to the second by
+// the filesystem) is just before StartedAt still counts.
+func TestCoarseMtimeSlack(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	physical, _ := filepath.EvalSymlinks(cwd)
+	start := time.Now().Truncate(time.Second).Add(700 * time.Millisecond)
+	dir := filepath.Join(home, ".claude", "projects", claudeProjectKey(physical))
+	write(t, filepath.Join(dir, idA+".jsonl"), "{}\n", start.Truncate(time.Second))
+	q := Query{Cwd: cwd, StartedAt: start, Env: []string{"HOME=" + home}}
+	if id, err := claudeTranscripts(q); err != nil || id != idA {
+		t.Fatalf("%q %v", id, err)
 	}
 }

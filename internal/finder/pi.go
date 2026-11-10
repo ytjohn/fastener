@@ -15,12 +15,15 @@ import (
 // exists and otherwise creates it with that ID, so the same flag both
 // assigns the ID and resumes it.
 
-func piSessionDir(env []string, cwd string) string {
-	agent := getenv(env, "PI_CODING_AGENT_DIR")
-	if agent == "" {
-		agent = filepath.Join(home(env), ".pi", "agent")
-	} else if strings.HasPrefix(agent, "~/") {
-		agent = filepath.Join(home(env), agent[2:])
+func piSessionDir(q Query, cwd string) string {
+	agent := getenv(q.Env, "PI_CODING_AGENT_DIR")
+	switch {
+	case agent == "":
+		agent = filepath.Join(home(q), ".pi", "agent")
+	case strings.HasPrefix(agent, "~/"):
+		agent = filepath.Join(home(q), agent[2:])
+	default:
+		agent = envDir(q, "PI_CODING_AGENT_DIR")
 	}
 	safe := strings.TrimPrefix(cwd, "/")
 	safe = strings.NewReplacer("/", "-", "\\", "-", ":", "-").Replace(safe)
@@ -45,7 +48,7 @@ func piFileTime(stamp string) (time.Time, bool) {
 func piSessions(q Query) (string, error) {
 	var dirs []string
 	for _, c := range cwds(q.Cwd) {
-		dirs = append(dirs, piSessionDir(q.Env, c))
+		dirs = append(dirs, piSessionDir(q, c))
 	}
 	var cands []string
 	for _, d := range dirs {
