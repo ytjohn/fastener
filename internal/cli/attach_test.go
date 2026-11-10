@@ -170,6 +170,12 @@ func runningPTY(t *testing.T, h *harness, plan ...func(*session.Plan)) {
 	t.Helper()
 	startPTYSession(t, h, "setsid", plan...)
 	poll(t, "running", func() bool { return inspectPTY(t, h).State == session.StateRunning })
+	// fakeagent installs its SIGWINCH handler before its first line; an
+	// attach before that could resize it before it listens.
+	poll(t, "the agent's first line", func() bool {
+		out, _, _ := h.cmd("logs", "pty1")
+		return strings.Contains(out, "tty=")
+	})
 }
 
 // TestAttachEchoResizeDetach: keys reach the agent and its output reaches

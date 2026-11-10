@@ -79,6 +79,12 @@ func (r *ptyRun) running() session.Status {
 	if st.AttachSocket == "" || st.AttachedClients == nil {
 		r.t.Fatalf("running pty session without attach fields: %+v", st)
 	}
+	// fakeagent installs its SIGWINCH handler before its first line; a
+	// client attaching earlier could resize it before it listens.
+	waitFor(r.t, "the agent's first line", func() bool {
+		b, _ := os.ReadFile(r.d.OutputLog())
+		return bytes.Contains(b, []byte("tty="))
+	})
 	return st
 }
 

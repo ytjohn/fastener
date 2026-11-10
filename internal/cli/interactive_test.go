@@ -140,7 +140,16 @@ func TestRunInteractiveDetachedThenAttach(t *testing.T) {
 func TestRunInteractiveAttachFlag(t *testing.T) {
 	h := newInteractiveHarness(t)
 	a := startOnPty(t, h, "run", "fakei", "--interactive", "--attach", "--cwd", h.work, "--name", "i2")
-	a.waitOutput("winch=30x100") // no --size: this terminal's (the redraw on attach reports it)
+	// No --size: this terminal's. --attach can connect before the agent
+	// listens for SIGWINCH, so either its first line or its redraw shows it.
+	for end := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if o := a.output(); strings.Contains(o, "winch=30x100") || strings.Contains(o, "size=30x100") {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatalf("terminal never showed the size:\n%q", a.output())
+		}
+	}
 	if v := inspectI(t, h, "i2"); v.Plan.PTY == nil || v.Plan.PTY.Rows != 30 || v.Plan.PTY.Cols != 100 {
 		t.Fatalf("initial size not taken from the terminal: %+v", v.Plan.PTY)
 	}
