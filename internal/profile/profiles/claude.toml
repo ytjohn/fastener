@@ -46,12 +46,15 @@ prompt = "arg"
 # https://claude.ai/code/session_…" (an OSC 8 link, redrawn several times).
 # The TUI draws spaces as cursor movements, so the pattern names the ID's
 # characters instead of relying on \S+. In a folder whose trust dialog has
-# not been accepted, the TUI shows that dialog and waits ("Quick safety
-# check: Is this a project you created or one you trust?").
+# not been accepted, the TUI shows that dialog and waits; untrusted_pattern
+# matches the dialog itself, its heading ("Quick safety check: Is this a
+# project you created or one you trust?") and then its option "Yes, I trust
+# this folder", so a prompt that merely quotes the question does not trip it
+# (fastener also removes the prompt's own text before matching).
 [interactive.remote]
 args              = ["--remote-control", "{name}"]
 url_pattern       = 'https://claude\.ai/code/session_[A-Za-z0-9_-]+'
-untrusted_pattern = '(?i)is\s*this\s*a\s*project\s*you\s*created\s*or\s*one\s*you\s*trust|workspace\s*not\s*trusted'
+untrusted_pattern = '(?is)quick\s*safety\s*check\b.{0,1000}?\byes,\s*i\s*trust\s*this\s*folder'
 untrusted_hint    = "fastener authorize claude-folder-trust {dir}"
 
 [check]

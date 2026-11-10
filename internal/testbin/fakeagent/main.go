@@ -44,8 +44,8 @@
 //	                           stream-json result with is_error and exits 0; "url" draws
 //	                           a remote-control URL the way Claude Code does (spaces as
 //	                           cursor moves, an OSC 8 link), split across two writes with
-//	                           nothing after it; "trust-dialog" draws Claude's folder
-//	                           trust dialog
+//	                           nothing after it; "cat <file>" writes the file's bytes as
+//	                           they are
 //	FAKE_PTY_ARGV=1            print "argv=<args joined by |>" at start
 //	FAKE_PTY_RUN=line          handle line as if typed, right after the start output
 //	FAKE_PTY_INIT=1            also print a claude stream-json init event at start
@@ -363,8 +363,15 @@ func ptyMode() {
 			mu.Lock()
 			fmt.Print("ion_01FAKEPTYSESSION0001\x1b]8;;\x07")
 			mu.Unlock()
-		case line == "trust-dialog":
-			say("\x1b[1CAccessing\x1b[1Cworkspace:\r\n\r\n\x1b[1CQuick\x1b[1Csafety\x1b[1Ccheck:\x1b[1CIs\x1b[1Cthis\x1b[1Ca\x1b[1Cproject\x1b[1Cyou\x1b[1Ccreated\x1b[1Cor\x1b[1Cone\x1b[1Cyou\x1b[1Ctrust?")
+		case len(f) == 2 && f[0] == "cat":
+			b, err := os.ReadFile(f[1])
+			if err != nil {
+				say("cat: %v", err)
+				break
+			}
+			mu.Lock()
+			os.Stdout.Write(b)
+			mu.Unlock()
 		case line == "result-error":
 			b, _ := json.Marshal(map[string]any{"type": "result", "subtype": "error", "session_id": "fake-pty-0001",
 				"result": "model call failed", "is_error": true})

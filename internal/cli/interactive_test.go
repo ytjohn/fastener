@@ -3,6 +3,7 @@ package cli_test
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ const fakeInteractiveRemote = `
 [interactive.remote]
 args              = ["--remote-control", "{name}"]
 url_pattern       = 'https://claude\.ai/code/session_[A-Za-z0-9_-]+'
-untrusted_pattern = '(?i)is\s*this\s*a\s*project\s*you\s*created\s*or\s*one\s*you\s*trust'
+untrusted_pattern = '(?is)quick\s*safety\s*check\b.{0,1000}?\byes,\s*i\s*trust\s*this\s*folder'
 untrusted_hint    = "fastener authorize claude-folder-trust {dir}"
 `
 
@@ -186,7 +187,7 @@ func TestRunInteractiveRemoteURL(t *testing.T) {
 func TestRunInteractiveRemoteUntrusted(t *testing.T) {
 	h := newInteractiveHarness(t)
 	out, errOut, code := h.cmd("run", "fakei", "--interactive", "--remote", "--cwd", h.work, "--name", "u1",
-		"--env", "FAKE_PTY_RUN=trust-dialog", "--json")
+		"--env", "FAKE_PTY_RUN=cat "+trustDialogFixture(t), "--json")
 	if code != 1 || !strings.Contains(errOut, "is not a trusted workspace for fakeagent --remote-control") ||
 		!strings.Contains(errOut, "fastener authorize claude-folder-trust "+h.work) {
 		t.Fatalf("exit %d: %s", code, errOut)
@@ -239,5 +240,37 @@ func TestRunInteractiveNoPromptDefaultSize(t *testing.T) {
 	}
 	if v := inspectI(t, h, "n1"); v.Plan.PTY == nil || v.Plan.PTY.Rows != 24 || v.Plan.PTY.Cols != 80 {
 		t.Fatalf("plan: %+v", v.Plan)
+	}
+}
+
+// trustDialogFixture is the trust dialog Claude Code 2.1.322 really draws.
+func trustDialogFixture(t *testing.T) string {
+	t.Helper()
+	p, err := filepath.Abs("../profile/testdata/claude-2.1.322-trust-dialog.raw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestRunInteractiveRemotePromptQuotingDialog: a prompt that quotes the
+// trust dialog, echoed by the TUI, is not mistaken for the dialog, whether
+// it quotes the question alone or the heading and the option together.
+func TestRunInteractiveRemotePromptQuotingDialog(t *testing.T) {
+	h := newInteractiveHarness(t)
+	for i, prompt := range []string{
+		"Claude asked me: is this a project you created or one you trust? What does that mean?",
+		"It said Quick safety check: Is this a project you created or one you trust? and offered Yes, I trust this folder. Should I?",
+	} {
+		name := fmt.Sprintf("q%d", i)
+		// FAKE_PTY_ARGV echoes the prompt (as the TUI would) before the URL.
+		out, errOut, code := h.cmd("run", "fakei", "--interactive", "--remote", "--cwd", h.work, "--name", name,
+			"--env", "FAKE_PTY_RUN=url", "--prompt", prompt)
+		if code != 0 || !strings.HasPrefix(out, name+"  https://claude.ai/code/session_") {
+			t.Fatalf("prompt %d: exit %d, out %q, err %q", i, code, out, errOut)
+		}
+		if logs := h.ok("logs", name); !strings.Contains(logs, prompt) {
+			t.Fatalf("prompt %d not echoed: %q", i, logs)
+		}
 	}
 }

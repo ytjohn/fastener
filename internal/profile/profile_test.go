@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/ytjohn/fastener/internal/parser"
 )
 
 func TestBuiltinsLoadAndValidate(t *testing.T) {
@@ -423,5 +425,33 @@ func TestBuiltinInteractive(t *testing.T) {
 	}
 	if r, err := codex.RenderInteractive(Request{Permissions: "auto", Prompt: "go"}, false); err != nil || strings.Join(r.Args, "|") != "--approve-for-me|--|go" {
 		t.Fatalf("codex interactive: %+v %v", r, err)
+	}
+}
+
+// TestClaudeTrustDialogPattern: the interactive untrusted_pattern matches
+// the dialog Claude Code 2.1.322 really draws, and not a prompt that only
+// quotes its question.
+func TestClaudeTrustDialogPattern(t *testing.T) {
+	claude, err := Load("claude", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(claude.Interactive.Remote.UntrustedPattern)
+	raw, err := os.ReadFile("testdata/claude-2.1.322-trust-dialog.raw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !re.Match(parser.StripForMatch(raw)) {
+		t.Fatal("the real trust dialog does not match")
+	}
+	for _, echo := range []string{
+		"Claude asked me: is this a project you created or one you trust? What does that mean?",
+		"Quick safety check: is this a project you created or one you trust?",
+		"why does it say workspace not trusted",
+		"Yes, I trust this folder",
+	} {
+		if re.MatchString(echo) {
+			t.Errorf("a prompt echo matched: %q", echo)
+		}
 	}
 }

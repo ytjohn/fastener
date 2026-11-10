@@ -127,7 +127,7 @@ func trustCheck(v *session.View, p *prepared) (pattern, hint string, text []byte
 			pattern, hint = in.Remote.UntrustedPattern, in.Remote.UntrustedHint
 		}
 		if pattern != "" {
-			text = parser.StripForMatch(readTail(v.Dir.OutputLog(), stderrTail))
+			text = withoutPrompt(parser.StripForMatch(readTail(v.Dir.OutputLog(), stderrTail)), v.Dir.PromptPath())
 		}
 		return
 	}
@@ -138,6 +138,24 @@ func trustCheck(v *session.View, p *prepared) (pattern, hint string, text []byte
 		text = readTail(v.Dir.StderrLog(), stderrTail)
 	}
 	return
+}
+
+// withoutPrompt removes every echo of the session's initial prompt from
+// text, comparing with runs of whitespace collapsed (the TUI may wrap it),
+// so a prompt that quotes the trust dialog cannot pass for it. The
+// untrusted pattern is the real guard: it matches the dialog's heading and
+// its option text together.
+func withoutPrompt(text []byte, promptPath string) []byte {
+	b, err := os.ReadFile(promptPath)
+	if err != nil {
+		return text
+	}
+	prompt := strings.Join(strings.Fields(string(parser.StripForMatch(b))), " ")
+	norm := strings.Join(strings.Fields(string(text)), " ")
+	if prompt == "" {
+		return []byte(norm)
+	}
+	return []byte(strings.ReplaceAll(norm, prompt, " "))
 }
 
 // untrustedFailure reports the folder untrusted when the output matches the
