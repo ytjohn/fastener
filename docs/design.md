@@ -107,7 +107,7 @@ ${FASTENER_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/fastener}/
 
 ### `session.json` (intent; immutable after creation)
 
-- `schema_version`, `name`, `created_at`, `kind` (`headless` | `interactive`), `backend`, `cwd`
+- `schema_version`, `name`, `created_at`, `kind` (`headless` | `remote` | `interactive`; an interactive remote session is `interactive` with `remote: true`), `backend`, `cwd`
 - `prompt_source`: `inline`, `stdin` (for `--prompt-file -`), or the `--prompt-file` path. The text is always in `prompt.txt`, copied by the CLI at `run` time, so later edits to the file don't change what a session ran.
 - `permissions`, `model`, `max_runtime` (absent = no limit), `grace`
 - **Environment:** `env_base` (variables captured from the caller by the passthrough list), `env` (the `--env` values) and `env_file` (the path only, made absolute). They are stored separately because the env-file is read later, by the monitor, and precedence is base, then env-file, then `--env`.
@@ -117,7 +117,8 @@ ${FASTENER_STATE_DIR:-${XDG_STATE_HOME:-~/.local/state}/fastener}/
 
 - `schema_version`, `generation` (the first launch is 1)
 - `argv`: the fully resolved argument list. `argv[0]` is resolved to an absolute path at plan time, against the session's PATH; the monitor never does a PATH lookup.
-- `prompt_mode` (`stdin` | `arg` | `none` for a remote bridge), `parser`, `dedupe_frames` (remote bridges, §8.1): copied from the profile. (`url_pattern` and `conversation_finder` arrive with phase B.)
+- `prompt_mode` (`stdin` | `arg` | `none` for a remote bridge, or an interactive session started without a prompt), `parser`, `dedupe_frames` (remote bridges, §8.1): copied from the profile. (`conversation_finder` arrives with interactive restore.)
+- `url_pattern` (v0.4, `run --interactive --remote`): the profile's `[interactive.remote] url_pattern`, which the monitor matches against the terminal output to set `remote_url` (§8.2). `env` (v0.4): the profile's `[interactive].env`.
 - `pty` (v0.4, interactive generations only): `{rows, cols}`, the initial window size (0 or absent means 24 × 80). Its presence is what makes the monitor run the agent on a pty (§8.2); a plan without it, including every plan written before v0.4, runs exactly as before.
 - **Profile provenance:** `profile_source` (`builtin` | the file path), `profile_sha256`
 - `marker`: `<name>:<generation>:<random nonce>` (see "Process identity" in §4)
@@ -293,12 +294,13 @@ The agent's environment is explicit. It is never inherited wholesale: `systemd-r
   - `LANG`, `LC_*`
   - `SSH_AUTH_SOCK` (so agents can `git push`)
   - `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `XDG_RUNTIME_DIR`
-  - `TERM`, for interactive sessions only
+  - `TERM`, for interactive sessions only: the caller's `TERM`, or `xterm-256color` when the caller has none (or `dumb`)
 
   The resolved values are recorded in `session.json`.
+- **Profile env** (interactive sessions): `[interactive].env` pairs, recorded in the plan (`env`), come after the base and before the env-file.
 - **`--env-file F`:** read by the monitor at spawn. Only the (absolute) path is recorded, so this is where secrets go. `KEY=VALUE` lines; whole-line `#` comments; one matching pair of outer quotes around a value is stripped. An unreadable file is a `launch-failed`.
 - **`--env K=V`** (repeatable): recorded in `session.json`. The documentation says it is not for secrets.
-- **Precedence:** base, then env-file, then `--env`.
+- **Precedence:** base, then (interactive) the profile's `[interactive].env`, then env-file, then `--env`.
 
 Agent CLIs keep using their own credential stores under `HOME`.
 
@@ -343,14 +345,19 @@ dedupe_frames     = true
 [remote.permissions]             # per-level override of [permissions]
 skip = ["--permission-mode", "bypassPermissions"]
 
-# Phase B: the [interactive] tables below are rejected by v0.1
+# v0.4: an interactive session (`run --interactive`), the TUI on a pty
 [interactive]
-args = []
-conversation_finder = "claude-transcripts"   # named finder (§8)
+args   = []
+prompt = "arg"            # "arg": an optional initial prompt goes after "--"; "none": none taken
+# parser = "none"         # default
+# env = ["KEY=VALUE"]     # set for the agent (after env_base, before --env-file and --env)
+# [interactive.permissions] overrides [permissions] per level, as [remote.permissions] does
 
-[interactive.remote]
-args = ["--remote-control"]
-url_pattern = 'https://claude\.ai/\S+'
+[interactive.remote]      # run --interactive --remote
+args              = ["--remote-control", "{name}"]
+url_pattern       = 'https://claude\.ai/code/session_[A-Za-z0-9_-]+'
+untrusted_pattern = '(?i)is\s*this\s*a\s*project\s*you\s*created\s*or\s*one\s*you\s*trust|workspace\s*not\s*trusted'
+untrusted_hint    = "fastener authorize claude-folder-trust {dir}"
 ```
 
 ### Rules
@@ -360,7 +367,7 @@ url_pattern = 'https://claude\.ai/\S+'
   - `--model` values starting with `-` are rejected, as an injection guard.
   - `argv[0]` is resolved to an absolute path at plan time, against the session's PATH (the base environment plus env-file plus `--env`, not the caller's shell).
 - **Command validation.** `command` is a bare name (`[A-Za-z0-9._+][A-Za-z0-9._+-]*`) or an absolute path, with no whitespace. A relative path such as `./x` is rejected so the plan never depends on the launch directory.
-- **Template validation.** Every `[options]` template and `[resume].args` must be non-empty and contain its placeholder (`{value}`, `{conversation_id}`) exactly once; a placeholder anywhere else (headless args, permissions) is an error. `[remote].args` must be non-empty and may contain `{name}` at most once. `{name}` is reserved: anywhere else (headless args, options, resume, permissions, `[remote.permissions]`, version args) it is rejected at load. This is a small compatibility change in v0.3: a user profile from v0.1 or v0.2 that passes a literal `{name}` there no longer loads, and `check --static` reports why.
+- **Template validation.** Every `[options]` template and `[resume].args` must be non-empty and contain its placeholder (`{value}`, `{conversation_id}`) exactly once; a placeholder anywhere else (headless args, permissions) is an error. `[remote].args` and `[interactive.remote].args` must be non-empty and may contain `{name}` at most once; `[interactive.remote].url_pattern` is required and, like the untrusted pattern, must compile; `[interactive].prompt` must be `arg` or `none`, and `[interactive].env` entries `KEY=VALUE`. `{name}` is reserved: anywhere else (headless args, options, resume, permissions, `[remote.permissions]`, version args) it is rejected at load. This is a small compatibility change in v0.3: a user profile from v0.1 or v0.2 that passes a literal `{name}` there no longer loads, and `check --static` reports why.
 - **No silent fallback.**
   - A requested permission level, option, mode or `--remote` that the profile does not define is a hard error before anything is created.
   - The permission level comes from the `--permissions` flag if given, else the `default_permissions` config, else the profile's own optional `default_permissions`, else `auto`. This holds for both `run` and `check`, and the resolved level is recorded in `session.json`. A profile's `default_permissions` must name a level that profile defines (validated at load). An explicit `--permissions` must be a known level (`auto` or `skip`); anything else is a usage error (exit 2) for `run` and `check`.
@@ -427,7 +434,7 @@ Built-in fallbacks:
 - the release smoke tests (§12);
 - callers that want to check a backend before dispatching work to it (for example, catching a logged-out CLI before it wastes an attempt).
 
-Phase B adds `check --interactive [--remote]`. It launches with a pty, confirms the conversation finder found an ID, and (for `--remote`) that `url_pattern` matched.
+A later version adds `check --interactive [--remote]`: launch with a pty, confirm the TUI started (and the conversation finder found an ID), and for `--remote` that `url_pattern` matched.
 
 ## 7. Parsers
 
@@ -509,7 +516,12 @@ Needed for `claude --remote-control`, for local attach to any backend, and for P
 - **Parsers on a pty.** The plan's parser runs over that same stream, line by line (a line ends at `\n`; the `\r` before it is trimmed), exactly as on headless stdout, and `none` is always available. A TUI's output is mostly escape sequences, so interactive profiles will usually set `none` or a parser written for that screen (such as `url_pattern` below); no parser strips escapes for them yet.
 - **Attach:** the monitor listens on `attach.sock` (§3; a fallback path when the session directory is too long for a socket address, recorded in `status.json`'s `attach_socket`). Only the owning user can connect: the socket is 0600 inside a 0700 directory, and the peer's uid is checked. `fastener attach <name>` connects the user's terminal. The detach key defaults to `ctrl-]` and is configurable. Several clients may attach at once; all receive the output, input from any reaches the pty, and the last client to attach or resize sets the size. On attach, the monitor resizes the pty and sends SIGWINCH to force a redraw (also when the size did not change); Fastener does not emulate the screen. A client too slow to keep up is disconnected rather than allowed to stall the agent or the others. Detaching leaves the agent running. When the session ends, every client receives its exit facts and the socket is removed. `status.json` records `attached_clients` while the generation runs, so `ps` and `inspect` show it.
 - **Attach protocol:** versioned framed messages (`hello{version}`, `welcome`, `data`, `resize{rows,cols}`, `detach`, `exit`, `error`), independent of the transport, with bounded frames; a malformed frame drops that client only. The Unix socket is the only transport in scope. The wire format is in [attach-protocol.md](attach-protocol.md).
-- **Remote:** `run --interactive --remote` uses `[interactive.remote]` args (for Claude, `["--remote-control", "{name}"]`). If `url_pattern` matches terminal output (for Claude, `https://claude\.ai/code/session_\S+` after stripping escapes), `remote_url` is set. A detached remote session is an interactive session nobody is attached to.
+- **Starting one:** `run <backend> --interactive` renders the profile's `[interactive]` section: `args`, the permission level (`[interactive.permissions]`, else `[permissions]`), `--model` through `[options]`, and, when a prompt is given and `prompt = "arg"`, `--` and the prompt; a profile with `prompt = "none"` refuses a prompt (exit 2). The prompt is optional; it is passed as the backend's argument and never typed into the pty. A backend without `[interactive]` refuses `--interactive` (exit 2). The pty starts at `--size ROWSxCOLS`, else the caller's terminal size when stdin is one, else 24 × 80. `session.json` records `kind = "interactive"`. Detached is the default; `--attach` attaches right after the launch and then behaves exactly like `fastener attach` (exit codes included); it needs a terminal on stdin, checked before anything starts. `--follow` is refused (use `--attach`, or `logs -f`). `--restart on-reboot` is refused until interactive restore (#55).
+- **Built-in profiles** (probed on 2026-11-10 under a pty): **claude** (2.1.322) runs its TUI with no first-run dialog in a trusted folder and takes an initial prompt as `-- <prompt>`. **codex** (0.167.0) starts its TUI cleanly; the prompt is its positional `[PROMPT]`. **pi** (0.84.4) starts its TUI with no dialog; it reads messages as positional arguments but treats one starting with `@` as a file, so its profile takes no initial prompt (`prompt = "none"`). Only claude has `[interactive.remote]`; Codex remote is #56.
+- **Remote:** `run --interactive --remote` uses `[interactive.remote]` args after `[interactive].args` (for Claude, `["--remote-control", "{name}"]`). The plan carries `url_pattern`; the monitor matches it against the terminal stream and sets `remote_url` to the latest match, and `run` waits for it (up to `remote_wait`) and prints `<name>  <url>` as `run --remote` does.
+  - **Matching.** Claude draws the URL as `/remote-control is active · Continue here, on your phone, or at https://claude.ai/code/session_…`, an OSC 8 link (with `?from=cli`) redrawn several times, and draws spaces with cursor-forward escapes, so plain escape stripping glues words together. The monitor therefore strips escapes with cursor movements turned into spaces (attribute changes inside a word just vanish, and an OSC 8 link's URI is kept), keeps the last 8 KiB of raw output between reads so a URL split across reads or escapes still matches, and holds back a match that reaches the end of the output seen so far until more output shows where it ends, or until the output has been quiet for 500 ms. Claude's pattern names the ID's characters (`session_[A-Za-z0-9_-]+`), since with spaces drawn as escapes `\S+` would run into the next word.
+  - **Trust.** In a folder whose trust dialog has not been accepted, Claude's TUI does not exit: it shows "Quick safety check: Is this a project you created or one you trust?" and waits. While `run` waits for the URL it also matches the terminal output against `untrusted_pattern`; on a match it stops the session and reports `untrusted_workspace` with the hint (`fastener authorize claude-folder-trust <dir>`), exactly as for a bridge. A session that ends before its URL is explained from its terminal output (a pty merges stderr into it).
+  - A detached remote session is an interactive session nobody is attached to.
 - **Conversation ID:** found by a named **finder** (for example `claude-transcripts`: the newest transcript for the session's `cwd` created after `started_at`). Codex and Pi finders still need investigation and are a known risk.
 
 ### 8.3 Authorizing folder trust (v0.3)
@@ -592,8 +604,7 @@ fastener version [--json]
 fastener authorize claude-folder-trust <dir> [--json]    # v0.3, §8.3
 fastener authorize --list [--json] | --revoke <dir> [--json]
 fastener attach <name> [--detach-key KEY] [--quiet]          # v0.4
-# phase B
-fastener run <backend> --interactive [--remote] [--restart no|on-reboot] ...
+fastener run <backend> --interactive [--remote] [--size RxC] [--attach] [--prompt P] ...   # v0.4
 ```
 
 - **`run`:**

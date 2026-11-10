@@ -170,9 +170,23 @@ monitor owns, so you can attach to it, detach, and attach again later, from
 several terminals at once, while it keeps running:
 
 ```bash
+fastener run claude --interactive --cwd ~/src/app --name my-session   # detached
+fastener run claude --interactive --cwd ~/src/app --prompt "review the diff" --attach
+fastener run claude --interactive --remote --cwd ~/src/app            # prints the claude.ai URL
 fastener attach my-session            # ctrl-] detaches; the session keeps running
 fastener attach my-session --detach-key ctrl-a
 ```
+
+`run --interactive` runs the backend's own TUI (`[interactive]` in its
+profile; built in for claude, codex and pi). The prompt is optional and is
+passed as the backend's initial prompt (pi takes none: type it after
+attaching). The terminal starts at `--size ROWSxCOLS`, else your terminal's
+size, else 24x80. `--attach` attaches right away. With `--remote` (claude:
+`--remote-control <name>`), `run` waits for the session's claude.ai URL and
+prints it, as for a bridge; in a folder Claude has not been told to trust,
+the TUI would sit at its trust dialog, so `run` stops it and names the
+`fastener authorize` command instead. `--restart on-reboot` is not available
+for interactive sessions yet.
 
 Every key goes to the agent (ctrl-c included); the detach key, `ctrl-]` by
 default (`detach_key` in `config.toml`, or `--detach-key`; `none` disables
@@ -189,9 +203,6 @@ up to 1 MiB and then discarded, with a note on exit.
 `ps` and `inspect` show whether a session is interactive and how many
 terminals are attached.
 
-Starting interactive sessions from the CLI (`fastener run --interactive`)
-comes with [#52](https://github.com/ytjohn/fastener/issues/52); until then
-`attach` has nothing to connect to unless a pty session is created by hand.
 Over the network, `ssh host fastener attach <name>` works as it is.
 
 ### Leftover processes
