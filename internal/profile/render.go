@@ -13,6 +13,10 @@ type Request struct {
 	Name        string // the session name, for remote.args' {name}
 	// SessionID is the conversation ID chosen for [interactive].session_id.
 	SessionID string
+	// ResumeID, for an interactive restore, is the conversation to resume:
+	// rendered through [resume] (else [interactive] session_id) instead of
+	// a new session ID. A prompt cannot be given with it.
+	ResumeID string
 }
 
 // ErrNoRemote is wrapped by RenderRemote when the profile has no [remote]
@@ -47,6 +51,17 @@ type Rendered struct {
 	SessionID, Finder string
 }
 
+// ErrNoResume is wrapped by RenderInteractive when a resume is asked of a
+// profile that has neither [resume] nor [interactive] session_id.
+var ErrNoResume = errors.New("cannot resume")
+
+type noResumeError struct{ backend string }
+
+func (e noResumeError) Error() string {
+	return fmt.Sprintf("backend %s cannot resume an interactive session (its profile has neither [resume] nor [interactive] session_id)", e.backend)
+}
+func (e noResumeError) Is(target error) bool { return target == ErrNoResume }
+
 // ErrNoInteractive is wrapped by RenderInteractive when the profile has no
 // [interactive] section (or, with remote, no [interactive.remote]), or takes
 // no initial prompt and one was given: things the caller asked for that the
@@ -78,7 +93,30 @@ func (p *Profile) RenderInteractive(r Request, remote bool) (Rendered, error) {
 	}
 	args := append([]string{}, in.Args...)
 	out := Rendered{PromptMode: PromptNone, Parser: in.InteractiveParser(), Env: append([]string(nil), in.Env...), Finder: in.Finder}
-	if in.SessionID != nil {
+	if r.ResumeID != "" {
+		if strings.TrimSpace(r.Prompt) != "" {
+			return Rendered{}, errors.New("a resumed session takes no prompt")
+		}
+		switch {
+		case p.Resume != nil:
+			var res []string
+			for _, a := range p.Resume.Args {
+				res = append(res, strings.ReplaceAll(a, "{conversation_id}", r.ResumeID))
+			}
+			if p.Resume.Subcommand {
+				args = append(res, args...)
+			} else {
+				args = append(args, res...)
+			}
+		case in.SessionID != nil:
+			for _, a := range in.SessionID {
+				args = append(args, strings.ReplaceAll(a, sessionIDPH, r.ResumeID))
+			}
+		default:
+			return Rendered{}, noResumeError{p.Name}
+		}
+		out.SessionID = r.ResumeID
+	} else if in.SessionID != nil {
 		if r.SessionID == "" {
 			return Rendered{}, fmt.Errorf("backend %s assigns a session ID, but none was given", p.Name)
 		}

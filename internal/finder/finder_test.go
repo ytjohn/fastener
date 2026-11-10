@@ -267,3 +267,20 @@ func TestCoarseMtimeSlack(t *testing.T) {
 		t.Fatalf("%q %v", id, err)
 	}
 }
+
+// TestCodexKnownID: a restored generation's known ID finds its rollout in
+// whatever day directory it started, with no time window.
+func TestCodexKnownID(t *testing.T) {
+	codex := t.TempDir()
+	cwd := t.TempDir()
+	physical, _ := filepath.EvalSymlinks(cwd)
+	long := time.Now().AddDate(0, 0, -20)
+	write(t, filepath.Join(codex, "sessions", long.Format("2006/01/02"), "rollout-x-"+idA+".jsonl"), codexMetaLine(idA, physical, long, "cli"), time.Time{})
+	q := Query{Cwd: cwd, StartedAt: time.Now(), SessionID: idA, Env: []string{"HOME=" + t.TempDir(), "CODEX_HOME=" + codex}}
+	if id, err := codexRollouts(q); err != nil || id != idA {
+		t.Fatalf("%q %v", id, err)
+	}
+	q.SessionID = idB
+	_, err := codexRollouts(q)
+	wantErr(t, err, ErrNotFound)
+}

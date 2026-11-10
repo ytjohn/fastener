@@ -471,3 +471,52 @@ func TestClaudeTrustDialogPattern(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderInteractiveResume: a restore resumes through [resume] (claude:
+// after the args; codex: a leading subcommand) or, without one, through
+// [interactive] session_id (pi), never with a new session ID or a prompt.
+func TestRenderInteractiveResume(t *testing.T) {
+	const id = "11111111-2222-4333-8444-555555555555"
+	for _, c := range []struct {
+		backend string
+		remote  bool
+		want    string
+	}{
+		{"claude", false, "--resume|" + id + "|--permission-mode|auto"},
+		{"claude", true, "--resume|" + id + "|--remote-control|s1|--permission-mode|auto"},
+		{"codex", false, "resume|" + id + "|--approve-for-me"},
+		{"pi", false, "--session-id|" + id},
+	} {
+		p, err := Load(c.backend, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		perm := "auto"
+		if c.backend == "pi" {
+			perm = "skip"
+		}
+		if !p.CanResumeInteractive() {
+			t.Errorf("%s cannot resume", c.backend)
+		}
+		r, err := p.RenderInteractive(Request{Permissions: perm, Name: "s1", ResumeID: id, SessionID: "new-one"}, c.remote)
+		if err != nil || strings.Join(r.Args, "|") != c.want || r.SessionID != id || r.PromptMode != "none" {
+			t.Errorf("%s remote=%v: %q %v (session_id %q)", c.backend, c.remote, r.Args, err, r.SessionID)
+		}
+		if _, err := p.RenderInteractive(Request{Permissions: perm, ResumeID: id, Prompt: "hi"}, false); err == nil {
+			t.Errorf("%s resumed with a prompt", c.backend)
+		}
+	}
+	np, err := Parse([]byte(baseTOML + "[interactive]\nprompt = \"arg\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if np.CanResumeInteractive() {
+		t.Error("a profile without [resume] or session_id can resume")
+	}
+	if _, err := np.RenderInteractive(Request{Permissions: "auto", ResumeID: id}, false); !errors.Is(err, ErrNoResume) {
+		t.Errorf("no resume: %v", err)
+	}
+	if _, err := Parse([]byte(baseTOML + "[resume]\nargs = [\"resume\", \"{conversation_id}\"]\nsubcommand = true\n")); err != nil {
+		t.Errorf("[resume] subcommand rejected: %v", err)
+	}
+}
