@@ -163,6 +163,37 @@ Claude's config, and `run --remote` never authorizes a folder by itself. `--revo
 only removes Fastener's record; to make Claude ask again, delete the folder's entry
 under `projects` in Claude's config.
 
+### Interactive sessions
+
+An interactive session runs the agent on a terminal (a pty) that its
+monitor owns, so you can attach to it, detach, and attach again later, from
+several terminals at once, while it keeps running:
+
+```bash
+fastener attach my-session            # ctrl-] detaches; the session keeps running
+fastener attach my-session --detach-key ctrl-a
+```
+
+Every key goes to the agent (ctrl-c included); the detach key, `ctrl-]` by
+default (`detach_key` in `config.toml`, or `--detach-key`; `none` disables
+it), leaves. However `attach` ends, it restores the terminal's settings and
+resets the modes full-screen agents turn on (alternate screen, hidden cursor,
+mouse reporting, bracketed paste); the screen contents are not restored.
+It exits 0 when you detach, with the agent's exit code (as `wait` reports
+it) when the session ends while you are attached, 1 when it cannot attach
+(the session is not interactive or not running, or too many terminals are
+attached), 2 when stdin is not a terminal, 125 when the connection is lost,
+127 for an unknown session, and 128+N when `attach` itself gets signal N
+(129 when the terminal closes). Input the session does not read is queued
+up to 1 MiB and then discarded, with a note on exit.
+`ps` and `inspect` show whether a session is interactive and how many
+terminals are attached.
+
+Starting interactive sessions from the CLI (`fastener run --interactive`)
+comes with [#52](https://github.com/ytjohn/fastener/issues/52); until then
+`attach` has nothing to connect to unless a pty session is created by hand.
+Over the network, `ssh host fastener attach <name>` works as it is.
+
 ### Leftover processes
 
 An agent can start processes that outlive it. **systemd mode kills them;

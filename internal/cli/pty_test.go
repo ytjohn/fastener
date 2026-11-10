@@ -20,7 +20,7 @@ import (
 
 // startPTYSession writes session pty1 with a pty plan for the fake agent
 // and starts its monitor with launch ("setsid" or "systemd").
-func startPTYSession(t *testing.T, h *harness, launch string) session.Dir {
+func startPTYSession(t *testing.T, h *harness, launch string, plan ...func(*session.Plan)) session.Dir {
 	t.Helper()
 	// Not session.Create: it reads FASTENER_STATE_DIR, and t.Setenv is not
 	// allowed in the parallel systemd tests.
@@ -35,10 +35,7 @@ func startPTYSession(t *testing.T, h *harness, launch string) session.Dir {
 			Grace: session.Duration(2 * time.Second), Restart: "no",
 			EnvBase: []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}, Env: []string{"FAKE_PTY=1"},
 		}),
-		session.WriteJSON(d.PlanPath(1), session.Plan{
-			SchemaVersion: 1, Generation: 1, Argv: []string{fakeBin}, PromptMode: "none", Parser: "none",
-			PTY: &session.PTYPlan{Rows: 33, Cols: 101}, Marker: session.NewMarker("pty1", 1), PlannedAt: now,
-		}),
+		writePlan(d, plan),
 		session.WriteJSON(d.StatusPath(), session.Status{SchemaVersion: 1, State: session.StateStarting}),
 	} {
 		if err != nil {
@@ -188,4 +185,17 @@ func TestPTYSessionSetsid(t *testing.T) { testPTYSession(t, newHarness(t), "sets
 
 func TestPTYSessionSystemd(t *testing.T) {
 	testPTYSession(t, newSystemdHarness(t, "systemd"), "systemd")
+}
+
+// writePlan writes the fake agent's pty plan, adjusted by mutate.
+func writePlan(d session.Dir, mutate []func(*session.Plan)) error {
+	now := time.Now().UTC()
+	p := session.Plan{
+		SchemaVersion: 1, Generation: 1, Argv: []string{fakeBin}, PromptMode: "none", Parser: "none",
+		PTY: &session.PTYPlan{Rows: 33, Cols: 101}, Marker: session.NewMarker("pty1", 1), PlannedAt: now,
+	}
+	for _, f := range mutate {
+		f(&p)
+	}
+	return session.WriteJSON(d.PlanPath(1), p)
 }

@@ -167,7 +167,8 @@ func (p *ptyIO) close() {
 	m.mu.Lock()
 	var exit *attach.ExitInfo
 	if m.st.State == session.StateExited {
-		exit = &attach.ExitInfo{EndedBy: m.st.EndedBy, ExitCode: clonePtr(m.st.ExitCode), Signal: m.st.Signal, Error: m.st.Error}
+		exit = &attach.ExitInfo{EndedBy: m.st.EndedBy, ExitCode: clonePtr(m.st.ExitCode), Signal: m.st.Signal, Error: m.st.Error,
+			AgentError: clonePtr(m.st.AgentError)}
 	}
 	m.mu.Unlock()
 	p.srv.Close(exit)

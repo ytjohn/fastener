@@ -21,7 +21,7 @@ type Config struct {
 	HandshakeTimeout   string   `toml:"handshake_timeout"`
 	Launcher           string   `toml:"launcher"`
 	EnvPassthrough     []string `toml:"env_passthrough"`
-	DetachKey          string   `toml:"detach_key"` // used from v0.3
+	DetachKey          string   `toml:"detach_key"` // fastener attach; --detach-key overrides
 	// RemoteWait is how long `run --remote` waits for a bridge's URL.
 	RemoteWait string `toml:"remote_wait"`
 	// TrustDirs is a user-maintained allowlist of folders that

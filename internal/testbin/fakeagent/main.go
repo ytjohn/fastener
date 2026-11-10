@@ -38,7 +38,10 @@
 //	                           read lines: "exit N" exits N, "flood N" prints N bytes of
 //	                           "x" in 100-byte lines then "flood-done", "size" prints
 //	                           "size=<rows>x<cols>", anything else is echoed as "echo:<line>";
-//	                           every SIGWINCH prints "winch=<rows>x<cols>"; EOF exits 0
+//	                           every SIGWINCH prints "winch=<rows>x<cols>"; EOF exits 0;
+//	                           "stall" puts the terminal in raw mode, prints "stalled" and
+//	                           never reads again; "result-error" prints a claude
+//	                           stream-json result with is_error and exits 0
 //	FAKE_PTY_INIT=1            also print a claude stream-json init event at start
 //	FAKE_PTY_FLOOD=n           print n bytes at start, as "flood n" would
 //	FAKE_PTY_AUTOEXIT=1        exit with FAKE_EXIT right after the start output
@@ -334,6 +337,21 @@ func ptyMode() {
 			flood(n)
 		case line == "size":
 			say("size=%s", size())
+		case line == "stall":
+			if t, err := unix.IoctlGetTermios(0, ioctlGetTermios); err == nil {
+				t.Lflag &^= unix.ICANON | unix.ECHO | unix.ISIG
+				t.Iflag &^= unix.ICRNL | unix.IXON
+				_ = unix.IoctlSetTermios(0, ioctlSetTermios, t)
+			}
+			say("stalled")
+			for { // never reads its terminal again
+				time.Sleep(time.Hour)
+			}
+		case line == "result-error":
+			b, _ := json.Marshal(map[string]any{"type": "result", "subtype": "error", "session_id": "fake-pty-0001",
+				"result": "model call failed", "is_error": true})
+			say("%s", b)
+			os.Exit(0)
 		default:
 			say("echo:%s", line)
 		}
