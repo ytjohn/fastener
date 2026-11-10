@@ -573,31 +573,60 @@ func TestPeerOfAnotherUserRefused(t *testing.T) {
 	c.Close()
 }
 
-// TestStuckInputDoesNotBlockOthers: while the pty write of one client's
-// input is stuck, another client's resize and detach still go through, and
-// output still flows.
-func TestStuckInputDoesNotBlockOthers(t *testing.T) {
-	dir := shortDir(t)
-	l, path, err := Listen(dir)
+// stuckServer is a server whose pty writes block until release is called;
+// entered receives once the first write has started.
+func stuckServer(t *testing.T) (s *Server, f *fakePTY, path string, entered <-chan struct{}, release func()) {
+	t.Helper()
+	l, path, err := Listen(shortDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakePTY{size: Size{24, 80}}
+	f = &fakePTY{size: Size{24, 80}}
 	cfg := f.config()
 	stuck := make(chan struct{})
-	entered := make(chan struct{}, 1)
+	ent := make(chan struct{}, 1)
+	record := cfg.Input
 	cfg.Input = func(p []byte) error {
 		select {
-		case entered <- struct{}{}:
+		case ent <- struct{}{}:
 		default:
 		}
 		<-stuck
-		return nil
+		return record(p)
 	}
-	s := NewServer(l, cfg)
+	s = NewServer(l, cfg)
 	go s.Serve()
-	t.Cleanup(func() { close(stuck); s.Close(nil) })
+	var once sync.Once
+	release = func() { once.Do(func() { close(stuck) }) }
+	t.Cleanup(func() { release(); s.Close(nil) })
+	return s, f, path, ent, release
+}
 
+// pasteUntilStuck has c send far more input than its own queue holds, in
+// the background, and waits until the pty write is stuck on it.
+func pasteUntilStuck(t *testing.T, c *Client, entered <-chan struct{}) {
+	t.Helper()
+	go func() {
+		for i := 0; i < 200; i++ {
+			if c.Send([]byte("A")) != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("input never reached the pty")
+	}
+	time.Sleep(50 * time.Millisecond) // let a's queue fill and its reader block
+}
+
+// TestStuckInputDoesNotBlockOthers: while the pty write is stuck on client
+// a's paste (a's own queue full, a's reader waiting), client b's input is
+// still queued without waiting, and b's resize and detach after it go
+// through. Once the pty unsticks, b's input is written.
+func TestStuckInputDoesNotBlockOthers(t *testing.T) {
+	s, f, path, entered, release := stuckServer(t)
 	a, err := Dial(path, Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -608,34 +637,64 @@ func TestStuckInputDoesNotBlockOthers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
-	// a pastes far more than the input queue holds; its reader ends up
-	// waiting, and the pty writer is stuck in Input.
-	go func() {
-		for i := 0; i < 4*inputQueue; i++ {
-			if a.Send([]byte("paste")) != nil {
-				return
-			}
-		}
-	}()
-	select {
-	case <-entered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("input never reached the pty")
+	pasteUntilStuck(t, a, entered)
+
+	if err := b.Send([]byte("k")); err != nil {
+		t.Fatal(err)
 	}
 	if err := b.Resize(Size{33, 99}); err != nil {
 		t.Fatal(err)
 	}
-	waitUntil(t, "b's resize despite a's stuck input", func() bool {
+	// b's reader handles frames in order: the resize arriving proves "k"
+	// was queued without waiting on a.
+	waitUntil(t, "b's resize after b's input, despite a's stuck paste", func() bool {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		return len(f.resizes) > 0 && f.resizes[len(f.resizes)-1] == (Size{33, 99})
 	})
 	s.Write([]byte("output flows"))
 	recvUntil(t, b, "output flows")
+	if err := b.Send([]byte("j")); err != nil {
+		t.Fatal(err)
+	}
 	if err := b.Detach(); err != nil {
 		t.Fatal(err)
 	}
-	waitUntil(t, "b's detach despite a's stuck input", func() bool { return s.Clients() == 1 })
+	waitUntil(t, "b's detach despite a's stuck paste", func() bool { return s.Clients() == 1 })
+
+	release()
+	waitUntil(t, "b's input written once the pty unsticks", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		in := f.input.String()
+		return strings.Contains(in, "k") && strings.Contains(in, "j")
+	})
+}
+
+// TestDisconnectWhileInputStuck: a client that goes away without detaching
+// while the pty write is stuck is no longer counted.
+func TestDisconnectWhileInputStuck(t *testing.T) {
+	s, _, path, entered, _ := stuckServer(t)
+	a, err := Dial(path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Dial(path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pasteUntilStuck(t, a, entered)
+	if err := b.Send([]byte("k")); err != nil {
+		t.Fatal(err)
+	}
+	b.Close() // no detach frame
+	waitUntil(t, "b's disconnect noticed", func() bool { return s.Clients() == 1 })
+	// b's forwarder, waiting to hand "k" to the stuck pty writer, gives up
+	// after inputDrainTimeout; a's ends when the server closes.
+	waitUntil(t, "b's forwarder gone", func() bool { return s.forwarders.Load() == 1 })
+	s.Close(nil)
+	waitUntil(t, "a's forwarder gone", func() bool { return s.forwarders.Load() == 0 })
 }
 
 // TestClientCountNeverStale: with attaches and detaches racing and a slow

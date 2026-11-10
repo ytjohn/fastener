@@ -32,9 +32,10 @@ const (
 // from several goroutines at once.
 type Config struct {
 	// Input writes one client frame of terminal input to the pty. It is
-	// called from a single goroutine, so it may block while the agent is not
-	// reading: input then queues (inputQueue frames) and, once that is full,
-	// clients sending more input wait; resizes and detaches never do.
+	// called from a single goroutine, so frames never interleave, and it may
+	// block while the agent is not reading. Each client's input then waits
+	// in that client's own queue (clientInputQueue frames); only a client
+	// whose own queue is full waits, and its resizes and detaches with it.
 	Input func(p []byte) error
 	// Resize applies a client's size to the pty and makes the agent redraw.
 	// It is called on attach (with the hello's size) and on every resize.
@@ -59,10 +60,9 @@ type Server struct {
 	closed  bool
 	wg      sync.WaitGroup // client writers
 
-	// input feeds the one goroutine that writes to the pty, a frame at a
-	// time, so each frame's bytes stay together and a pty write that blocks
-	// (the agent is not reading) holds up only clients sending input, never
-	// a resize or a detach. quit ends it (and any reader waiting on it).
+	// input hands one frame at a time from the clients' forwarders to the
+	// one goroutine that writes to the pty (unbuffered: forwarders take
+	// turns). quit ends the writer, the forwarders and waiting readers.
 	input chan []byte
 	quit  chan struct{}
 
@@ -73,19 +73,27 @@ type Server struct {
 	// ownerUID is the only uid allowed to connect: this process's (tests
 	// change it to exercise the refusal).
 	ownerUID atomic.Int64
+
+	forwarders atomic.Int64 // live forwarder goroutines (tests)
 }
 
 // writeBatch bounds the bytes of one writev to a client.
 const writeBatch = 64 << 10
 
-// inputQueue is how many input frames may wait for the pty writer. A client
-// sending input while it is full waits; other frames are not affected.
-const inputQueue = 64
+// clientInputQueue is how many of one client's input frames may wait for
+// the pty writer. A client whose queue is full waits for its own input;
+// other clients are not affected.
+const clientInputQueue = 32
+
+// inputDrainTimeout is how long a dropped (detached, disconnected) client's
+// forwarder keeps trying to deliver its queued input before giving up.
+const inputDrainTimeout = time.Second
 
 type client struct {
 	conn net.Conn
 	wake chan struct{} // cap 1: the writer has something to do
 	done chan struct{} // closed when the client is dropped
+	in   chan []byte   // the client's input queue; its reader sends and closes it
 
 	// Guarded by Server.mu.
 	pending [][]byte // encoded frames not yet taken by the writer
@@ -102,7 +110,7 @@ func NewServer(l net.Listener, cfg Config) *Server {
 		cfg.Clients = func(int) {}
 	}
 	s := &Server{cfg: cfg, l: l, clients: map[*client]struct{}{},
-		input: make(chan []byte, inputQueue), quit: make(chan struct{})}
+		input: make(chan []byte), quit: make(chan struct{})}
 	s.ownerUID.Store(int64(os.Getuid()))
 	go s.ptyWriter()
 	return s
@@ -189,7 +197,8 @@ func (s *Server) handle(conn net.Conn) {
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 
-	c := &client{conn: conn, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	c := &client{conn: conn, wake: make(chan struct{}, 1), done: make(chan struct{}),
+		in: make(chan []byte, clientInputQueue)}
 	s.mu.Lock()
 	switch {
 	case s.closed:
@@ -214,13 +223,55 @@ func (s *Server) handle(conn net.Conn) {
 	s.wg.Add(1)
 	s.mu.Unlock()
 	go s.writer(c)
+	go s.forwarder(c)
 	s.notify()
 	s.reader(c)
+}
+
+// forwarder passes one client's queued input to the pty writer, a frame at
+// a time, until the reader closes the queue or the server closes. After
+// the client is dropped it keeps delivering what is queued (a detach right
+// after typing loses nothing) for at most inputDrainTimeout, so a forwarder
+// waiting on a stuck pty write still ends.
+func (s *Server) forwarder(c *client) {
+	s.forwarders.Add(1)
+	defer s.forwarders.Add(-1)
+	done := c.done
+	var giveUp <-chan time.Time
+	for {
+		var p []byte
+		select {
+		case b, ok := <-c.in:
+			if !ok {
+				return
+			}
+			p = b
+		case <-s.quit:
+			return
+		}
+		for sent := false; !sent; {
+			select {
+			case s.input <- p:
+				sent = true
+			case <-s.quit:
+				return
+			case <-done:
+				done = nil
+				t := time.NewTimer(inputDrainTimeout)
+				defer t.Stop()
+				giveUp = t.C
+			case <-giveUp:
+				s.cfg.Logf("attach: dropped client's input not delivered within %s; discarded", inputDrainTimeout)
+				return
+			}
+		}
+	}
 }
 
 // reader handles one client's frames until it detaches, disconnects or
 // sends something malformed (which drops this client only).
 func (s *Server) reader(c *client) {
+	defer close(c.in) // the reader is the queue's only sender
 	for {
 		f, err := ReadFrame(c.conn)
 		if err != nil {
@@ -236,8 +287,8 @@ func (s *Server) reader(c *client) {
 			if len(f.Payload) == 0 {
 				continue
 			}
-			select {
-			case s.input <- f.Payload:
+			select { // waits only while this client's own queue is full
+			case c.in <- f.Payload:
 			case <-c.done:
 				return
 			case <-s.quit:

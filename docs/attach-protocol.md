@@ -113,10 +113,16 @@ agent are unaffected.
   closed. The pty is read by the monitor whether or not anyone is attached,
   and the fan-out never waits for a client, so a stuck client can stall
   neither the agent nor the other clients.
-- **Input.** One writer writes input to the pty, a whole `data` frame at a
-  time, so frames from different clients never interleave. Up to 64 frames
-  wait for it while the agent is not reading its terminal; once that queue
-  is full, a client sending more input waits (its later frames are read
-  after its input is queued). Resizes and detaches never wait for input,
-  whichever client sends them.
+- **Input.** Each client has its own input queue of 32 `data` frames,
+  emptied by its own forwarder. The forwarders take turns handing frames to
+  a single pty writer, which writes each frame whole, so frames from
+  different clients never interleave. While the agent is not reading its
+  terminal the pty write blocks and the queues fill. A client's frames are
+  read in order, and its reader waits only when that client's own queue is
+  full: so only a client that is itself pasting more than 32 frames ahead
+  of the agent has its later frames (resizes and detaches included) wait
+  behind its own input. Another client's input never makes a client wait.
+  When a client detaches or disconnects it stops being counted at once; its
+  forwarder still delivers what it had queued, for at most a second, then
+  discards the rest.
 - At most 16 clients are attached at once; one more gets `error` code `busy`.
