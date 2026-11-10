@@ -106,12 +106,44 @@ type Plan struct {
 	Parser        string   `json:"parser"`
 	// DedupeFrames: drop redrawn lines from output.log (still parsed); from
 	// the profile's [remote] dedupe_frames.
-	DedupeFrames    bool      `json:"dedupe_frames,omitempty"`
+	DedupeFrames bool `json:"dedupe_frames,omitempty"`
+	// PTY, when set, makes this an interactive generation: the monitor runs
+	// the agent on a pseudo-terminal it owns and serves attach.sock (design
+	// §8.2). Absent in every plan written before v0.4, which run exactly as
+	// before.
+	PTY             *PTYPlan  `json:"pty,omitempty"`
 	ProfileSource   string    `json:"profile_source"`
 	ProfileSHA256   string    `json:"profile_sha256"`
 	Marker          string    `json:"marker"`
 	FastenerVersion string    `json:"fastener_version"`
 	PlannedAt       time.Time `json:"planned_at"`
+}
+
+// PTYPlan is the pty of an interactive generation.
+type PTYPlan struct {
+	// Rows and Cols are the initial window size; 0 means the default
+	// (DefaultPTYRows × DefaultPTYCols). The first client to attach with a
+	// size replaces it.
+	Rows uint16 `json:"rows,omitempty"`
+	Cols uint16 `json:"cols,omitempty"`
+}
+
+// The pty size used when a plan gives none.
+const (
+	DefaultPTYRows = 24
+	DefaultPTYCols = 80
+)
+
+// Size is the initial size with the defaults applied.
+func (p PTYPlan) Size() (rows, cols uint16) {
+	rows, cols = p.Rows, p.Cols
+	if rows == 0 {
+		rows = DefaultPTYRows
+	}
+	if cols == 0 {
+		cols = DefaultPTYCols
+	}
+	return rows, cols
 }
 
 // LauncherRecord identifies the monitor before it has written anything.
@@ -146,6 +178,11 @@ type Status struct {
 	// could not relaunch the session (a code such as no_remote or
 	// untrusted_workspace; Error has the message).
 	RestoreReason string `json:"restore_reason,omitempty"`
+	// AttachSocket is where the monitor of an interactive (pty) generation
+	// listens for attach clients, and AttachedClients how many are attached
+	// (flushed about once a second). Both are set only while it runs.
+	AttachSocket    string `json:"attach_socket,omitempty"`
+	AttachedClients *int   `json:"attached_clients,omitempty"`
 	parser.Fields
 	UpdatedAt time.Time `json:"updated_at"`
 }

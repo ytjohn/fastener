@@ -14,6 +14,14 @@ func agentSysProcAttr() *syscall.SysProcAttr {
 	return &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 }
 
+// agentPTYSysProcAttr starts an interactive agent in a new session whose
+// controlling terminal is the pty on fd 0. As session leader it also leads
+// its own process group (pgid = pid), as a headless agent does; Setpgid
+// must not be added, since setpgid fails for a session leader.
+func agentPTYSysProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0, Pdeathsig: syscall.SIGKILL}
+}
+
 // pinsZombie reports that waitExitNoReap is supported: the dead agent stays a
 // zombie until cmd.Wait, so its pid and pgid cannot be reused while we signal.
 const pinsZombie = true
