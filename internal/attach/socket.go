@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 )
 
 // SocketName is the attach socket's name in the session directory.
@@ -62,13 +63,34 @@ func ensurePrivateDir(dir string) error {
 	return nil
 }
 
+// Listener is the attach socket's listener. Closing it removes the socket
+// file only if the path still names the socket it bound, so a monitor that
+// outlives its successor's start can never delete the successor's socket.
+type Listener struct {
+	*net.UnixListener
+	path  string
+	bound os.FileInfo
+}
+
+// Close stops listening and removes the socket if it is still ours.
+func (l *Listener) Close() error {
+	err := l.UnixListener.Close()
+	if fi, serr := os.Lstat(l.path); serr == nil && os.SameFile(fi, l.bound) {
+		_ = os.Remove(l.path)
+	}
+	return err
+}
+
 // Listen creates the attach socket for the session in dir and returns the
 // listener and the path it is bound to (see SocketPath). The socket is
 // created inside a directory only this user can enter (the session
-// directory, or the checked fallback directory), then chmodded to 0600. A
-// leftover socket from a monitor that died is replaced; any other file at
-// the path is an error. Closing the listener removes the socket.
-func Listen(dir string) (*net.UnixListener, string, error) {
+// directory, or the checked fallback directory), then chmodded to 0600.
+//
+// A socket already at the path is replaced only if it is stale: connecting
+// to it must fail with ECONNREFUSED (a monitor that was killed). If the
+// connect succeeds, another monitor is serving there and Listen fails; any
+// other error, or any other kind of file at the path, is an error too.
+func Listen(dir string) (*Listener, string, error) {
 	path, fallback := SocketPath(dir)
 	if fallback {
 		if err := ensurePrivateDir(filepath.Dir(path)); err != nil {
@@ -76,41 +98,62 @@ func Listen(dir string) (*net.UnixListener, string, error) {
 				dir, SocketName, len(filepath.Join(dir, SocketName)), maxSocketPath, err)
 		}
 	}
-	if fi, err := os.Lstat(path); err == nil {
-		if fi.Mode().Type() != fs.ModeSocket {
-			return nil, "", fmt.Errorf("attach socket: %s exists and is not a socket", path)
-		}
-		if err := os.Remove(path); err != nil {
-			return nil, "", fmt.Errorf("attach socket: remove stale %s: %w", path, err)
-		}
+	if err := removeStale(path); err != nil {
+		return nil, "", fmt.Errorf("attach socket: %w", err)
 	}
-	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	ul, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		return nil, "", fmt.Errorf("attach socket: %w", err)
 	}
-	l.SetUnlinkOnClose(true)
-	if err := os.Chmod(path, 0o600); err != nil {
-		l.Close()
+	ul.SetUnlinkOnClose(false) // Listener.Close unlinks, after checking the inode
+	fi, err := os.Lstat(path)
+	if err == nil {
+		err = os.Chmod(path, 0o600)
+	}
+	if err != nil {
+		ul.Close()
 		return nil, "", fmt.Errorf("attach socket: %w", err)
 	}
-	return l, path, nil
+	return &Listener{UnixListener: ul, path: path, bound: fi}, path, nil
 }
 
-// peerIsOwner reports whether the process at the other end of c runs as this
-// user, from the kernel's peer credentials (SO_PEERCRED on Linux,
-// LOCAL_PEERCRED on macOS).
-func peerIsOwner(c *net.UnixConn) (bool, error) {
+// removeStale removes a dead socket at path (see Listen).
+func removeStale(path string) error {
+	fi, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.Mode().Type() != fs.ModeSocket {
+		return fmt.Errorf("%s exists and is not a socket", path)
+	}
+	c, err := net.DialTimeout("unix", path, time.Second)
+	if err == nil {
+		c.Close()
+		return fmt.Errorf("%s is in use: another monitor is listening on it", path)
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		return fmt.Errorf("%s exists and its liveness is unknown: %w", path, err)
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove stale %s: %w", path, err)
+	}
+	return nil
+}
+
+// peerUIDOf returns the uid of the process at the other end of c, from the
+// kernel's peer credentials (SO_PEERCRED on Linux, LOCAL_PEERCRED on macOS).
+func peerUIDOf(c *net.UnixConn) (int, error) {
 	rc, err := c.SyscallConn()
 	if err != nil {
-		return false, err
+		return -1, err
 	}
-	var uid int
+	uid := -1
 	var cerr error
 	if err := rc.Control(func(fd uintptr) { uid, cerr = peerUID(int(fd)) }); err != nil {
-		return false, err
+		return -1, err
 	}
-	if cerr != nil {
-		return false, cerr
-	}
-	return uid == os.Getuid(), nil
+	return uid, cerr
 }
