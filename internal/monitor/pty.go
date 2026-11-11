@@ -3,7 +3,7 @@ package monitor
 import (
 	"os"
 	"sync"
-	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
@@ -27,13 +27,20 @@ type ptyIO struct {
 	srv    *attach.Server
 	path   string // where the attach socket is bound
 
-	// sigMu guards pgid and reaped, so a SIGWINCH is sent to the agent's
-	// group only between the spawn and the reap: until the agent is reaped
-	// its zombie pins the pgid, so the signal cannot reach a stranger.
-	sigMu  sync.Mutex
-	pgid   int
-	reaped bool
+	// sizeMu serializes resizes and guards the same-size nudge (see
+	// resize): gen counts resizes, so a delayed restore that a later resize
+	// overtook does nothing; want is the size a client asked for, reported
+	// while the pty is still one column narrower.
+	sizeMu  sync.Mutex
+	gen     uint64
+	nudging bool
+	want    attach.Size
 }
+
+// nudgeDelay is how long a same-size attach keeps the pty one column
+// narrower before restoring the client's size: long enough for the agent to
+// handle the first SIGWINCH on its own, so it sees two real changes.
+var nudgeDelay = 100 * time.Millisecond
 
 // openPTY opens the pty at the plan's size and starts the attach server.
 func (m *monitor) openPTY() (*ptyIO, error) {
@@ -58,7 +65,7 @@ func (m *monitor) openPTY() (*ptyIO, error) {
 	p.srv = attach.NewServer(l, attach.Config{
 		Input:   func(b []byte) error { _, err := master.Write(b); return err },
 		Resize:  p.resize,
-		Size:    p.size,
+		Size:    p.reportedSize,
 		Clients: p.clients,
 		Logf:    m.log.Printf,
 	})
@@ -100,50 +107,59 @@ func (p *ptyIO) size() attach.Size {
 
 // resize applies a client's size (the last client to attach or resize
 // wins). Setting a different size makes the kernel send SIGWINCH to the
-// pty's foreground process group; when the size is unchanged it does not,
-// so the monitor sends SIGWINCH itself: an attach always forces a redraw.
+// pty's foreground process group, and the agent redraws.
+//
+// An attach at the size the pty already has must redraw too, but a bare
+// SIGWINCH is not enough: Node emits 'resize' only when the size changed,
+// and Ink writes nothing for a frame identical to the last one, so Claude
+// Code (and other Ink TUIs) would leave a fresh client's screen blank. So a
+// same-size resize nudges: the pty is set one column narrower (the layout
+// changes, so the agent redraws), then back to the client's size after
+// nudgeDelay (it redraws again, at the right width).
 func (p *ptyIO) resize(s attach.Size) {
-	before := p.size()
-	if err := p.setSize(s); err != nil {
-		p.m.log.Printf("pty resize to %dx%d: %v", s.Rows, s.Cols, err)
-		return
-	}
-	if before == s {
-		p.winch()
-	}
-}
-
-// winch sends SIGWINCH to the pty's foreground process group (TIOCGPGRP on
-// the master, which Linux allows), else to the agent's process group (macOS
-// answers TIOCGPGRP only on a process's own controlling terminal).
-func (p *ptyIO) winch() {
-	p.sigMu.Lock()
-	defer p.sigMu.Unlock()
-	if p.pgid == 0 || p.reaped {
-		return
-	}
-	pg := p.pgid
-	_ = p.control(func(fd int) error {
-		fg, err := unix.IoctlGetInt(fd, unix.TIOCGPGRP)
-		if err == nil && fg > 0 {
-			pg = fg
+	p.sizeMu.Lock()
+	defer p.sizeMu.Unlock()
+	p.gen++
+	p.want = s
+	p.nudging = false
+	if p.size() != s {
+		if err := p.setSize(s); err != nil {
+			p.m.log.Printf("pty resize to %dx%d: %v", s.Rows, s.Cols, err)
 		}
-		return err
+		return
+	}
+	n := s
+	if n.Cols > 1 {
+		n.Cols--
+	} else {
+		n.Cols++
+	}
+	if err := p.setSize(n); err != nil {
+		p.m.log.Printf("pty resize to %dx%d: %v", n.Rows, n.Cols, err)
+		return
+	}
+	p.nudging = true
+	gen := p.gen
+	time.AfterFunc(nudgeDelay, func() {
+		p.sizeMu.Lock()
+		defer p.sizeMu.Unlock()
+		if p.gen != gen {
+			return // a later resize set the size
+		}
+		p.nudging = false
+		_ = p.setSize(s) // fails only once the pty is closed
 	})
-	_ = syscall.Kill(-pg, syscall.SIGWINCH)
 }
 
-func (p *ptyIO) spawned(pgid int) {
-	p.sigMu.Lock()
-	p.pgid = pgid
-	p.sigMu.Unlock()
-}
-
-// reaping is called just before the agent is reaped; no signal follows it.
-func (p *ptyIO) reaping() {
-	p.sigMu.Lock()
-	p.reaped = true
-	p.sigMu.Unlock()
+// reportedSize is the pty's size as a client should see it: the size asked
+// for while a nudge holds the pty one column narrower.
+func (p *ptyIO) reportedSize() attach.Size {
+	p.sizeMu.Lock()
+	defer p.sizeMu.Unlock()
+	if p.nudging {
+		return p.want
+	}
+	return p.size()
 }
 
 // clients records the attached-client count while the agent runs; the

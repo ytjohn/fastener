@@ -1,6 +1,10 @@
 package cli
 
-import "testing"
+import (
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 func TestParseDetachKey(t *testing.T) {
 	for in, want := range map[string]int{
@@ -16,5 +20,44 @@ func TestParseDetachKey(t *testing.T) {
 		if _, err := parseDetachKey(in); err == nil {
 			t.Errorf("parseDetachKey(%q) accepted", in)
 		}
+	}
+}
+
+// TestSettle: settle returns once input has been quiet for settleQuiet,
+// waits while replies keep arriving, and never past settleMax.
+func TestSettle(t *testing.T) {
+	var last atomic.Int64
+	start := time.Now()
+	settle(&last)
+	if d := time.Since(start); d < settleQuiet || d > settleQuiet+100*time.Millisecond {
+		t.Fatalf("quiet terminal: settled after %v", d)
+	}
+
+	start = time.Now()
+	go func() { // a reply arrives 30ms in
+		time.Sleep(30 * time.Millisecond)
+		last.Store(time.Now().UnixNano())
+	}()
+	settle(&last)
+	if d := time.Since(start); d < 30*time.Millisecond+settleQuiet {
+		t.Fatalf("late reply: settled after %v", d)
+	}
+
+	stop := make(chan struct{})
+	go func() { // a terminal that never goes quiet
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(10 * time.Millisecond):
+				last.Store(time.Now().UnixNano())
+			}
+		}
+	}()
+	start = time.Now()
+	settle(&last)
+	close(stop)
+	if d := time.Since(start); d < settleMax || d > settleMax+100*time.Millisecond {
+		t.Fatalf("busy terminal: settled after %v", d)
 	}
 }

@@ -201,6 +201,9 @@ default (`detach_key` in `config.toml`, or `--detach-key`; `none` disables
 it), leaves. However `attach` ends, it restores the terminal's settings and
 resets the modes full-screen agents turn on (alternate screen, hidden cursor,
 mouse reporting, bracketed paste); the screen contents are not restored.
+When the session exits while attached, `attach` first waits briefly (at
+most 300 ms) for and discards the terminal's replies to the agent's last
+queries, so they do not land at your shell prompt.
 It exits 0 when you detach, with the agent's exit code (as `wait` reports
 it) when the session ends while you are attached, 1 when it cannot attach
 (the session is not interactive or not running, or too many terminals are

@@ -98,13 +98,15 @@ agent are unaffected.
 - **Size: the last client to attach with a size, or to resize, wins.**
   Detaching does not restore an earlier size (as in dtach and abduco).
 - **Redraw.** Applying a size is `TIOCSWINSZ` on the pty master. When the
-  size changes, the kernel itself sends SIGWINCH to the terminal's
-  foreground process group (Linux and macOS alike). When it does not change,
-  the monitor sends SIGWINCH itself, so an attach always forces a redraw: to
-  the foreground process group from `TIOCGPGRP` on the master on Linux, and
-  to the agent's process group on macOS, where `TIOCGPGRP` works only on a
-  process's own controlling terminal. A signal is only sent between the
-  agent's spawn and its reap, while its pgid cannot be reused.
+  size changes, the kernel sends SIGWINCH to the terminal's foreground
+  process group (Linux and macOS alike), and the agent redraws. When it does
+  not change, a bare SIGWINCH is not enough: Node emits `resize` only when
+  the size changed, and Ink writes nothing for a frame identical to the last
+  one, so an Ink TUI such as Claude Code would leave the new client's screen
+  blank. So the monitor nudges: it sets the pty one column narrower, then
+  back to the client's size 100 ms later. The agent sees two real changes and
+  redraws at the right width. The welcome reports the client's size, not the
+  narrower one, and a resize during the nudge cancels the pending restore.
 - **Slow clients.** Output for each client is queued in memory, at most
   1 MiB of frames (counted in bytes, however small the frames). A client
   whose queue would grow past that is disconnected: its waiting output is

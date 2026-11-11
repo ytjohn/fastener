@@ -199,6 +199,9 @@ func cmdAttach(args []string, stdout, stderr io.Writer) int {
 	var once sync.Once
 	restore := func() {
 		once.Do(func() {
+			// Replies to terminal queries the agent sent last (device
+			// attributes, version) must not reach the shell as typed input.
+			_ = flushInput(in)
 			_ = term.Restore(in, old)
 			if stdoutTTY {
 				_, _ = io.WriteString(stdout, terminalReset)
@@ -250,6 +253,11 @@ func cmdAttach(args []string, stdout, stderr io.Writer) int {
 	// is not reading its terminal) is discarded and counted.
 	inq := make(chan []byte, 4096)
 	var queued, discarded atomic.Int64
+	// settling is set once the session has ended: the reader then drops
+	// what it reads (late replies to the agent's terminal queries) and
+	// stamps lastIn, so settle can wait for the terminal to go quiet.
+	var settling atomic.Bool
+	var lastIn atomic.Int64
 	go func() {
 		defer guard()
 		for p := range inq {
@@ -282,6 +290,13 @@ func cmdAttach(args []string, stdout, stderr io.Writer) int {
 		for {
 			n, err := os.Stdin.Read(buf)
 			p := buf[:n]
+			if settling.Load() {
+				lastIn.Store(time.Now().UnixNano())
+				if err != nil {
+					return
+				}
+				continue
+			}
 			if key != noDetachKey {
 				if i := bytes.IndexByte(p, byte(key)); i >= 0 {
 					enqueue(p[:i]) // what follows the key in this read is dropped
@@ -357,6 +372,10 @@ func cmdAttach(args []string, stdout, stderr io.Writer) int {
 		discardNote()
 		return exitOK
 	case ev.exit != nil:
+		// The agent's last output may have asked the terminal something;
+		// let the replies arrive and drop them before restoring.
+		settling.Store(true)
+		settle(&lastIn)
 		restore()
 		st := session.Status{EndedBy: ev.exit.EndedBy, ExitCode: ev.exit.ExitCode, Signal: ev.exit.Signal, Error: ev.exit.Error}
 		st.AgentError = ev.exit.AgentError
@@ -385,6 +404,32 @@ const terminalReset = "\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b
 // inputQueueBytes bounds the input attach holds for a session that is not
 // reading its terminal; more is discarded (and reported).
 const inputQueueBytes = 1 << 20
+
+// settleQuiet and settleMax bound how long attach waits, after the session
+// ends, for the terminal's replies to the agent's last queries: until no
+// input has arrived for settleQuiet, and never longer than settleMax.
+const (
+	settleQuiet = 50 * time.Millisecond
+	settleMax   = 300 * time.Millisecond
+)
+
+func settle(lastIn *atomic.Int64) {
+	start := time.Now()
+	for {
+		now := time.Now()
+		if now.Sub(start) >= settleMax {
+			return
+		}
+		quietSince := start
+		if t := lastIn.Load(); t > 0 && time.Unix(0, t).After(start) {
+			quietSince = time.Unix(0, t)
+		}
+		if now.Sub(quietSince) >= settleQuiet {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
 
 // teardownWait bounds each step of leaving an attachment.
 const teardownWait = 500 * time.Millisecond

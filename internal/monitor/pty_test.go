@@ -252,12 +252,35 @@ func TestPTYAttachSession(t *testing.T) {
 }
 
 // TestPTYAttachSameSizeRedraws: attaching at the size the pty already has
-// changes nothing for the kernel, so the monitor sends SIGWINCH itself.
+// changes nothing for the kernel, and an Ink TUI ignores a bare SIGWINCH, so
+// the monitor nudges: one column narrower, then back. The agent sees both
+// sizes, and the welcome reports the client's size, not the nudged one.
 func TestPTYAttachSameSizeRedraws(t *testing.T) {
 	r := startPTY(t, nil, nil)
 	r.running()
 	c := r.attach(attach.Size{Rows: session.DefaultPTYRows, Cols: session.DefaultPTYCols})
+	if got := c.Welcome.Size; got != (attach.Size{Rows: session.DefaultPTYRows, Cols: session.DefaultPTYCols}) {
+		t.Fatalf("welcome size %+v", got)
+	}
+	recv(t, c, "winch=24x79")
 	recv(t, c, "winch=24x80")
+}
+
+// TestPTYResizeDuringNudge: a resize that arrives while a nudge holds the pty
+// narrower wins; the nudge's delayed restore does not undo it.
+func TestPTYResizeDuringNudge(t *testing.T) {
+	r := startPTY(t, nil, nil)
+	r.running()
+	c := r.attach(attach.Size{Rows: session.DefaultPTYRows, Cols: session.DefaultPTYCols})
+	if err := c.Resize(attach.Size{Rows: 30, Cols: 100}); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, c, "winch=30x100")
+	time.Sleep(2 * nudgeDelay)
+	if err := c.Send([]byte("size\n")); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, c, "size=30x100")
 }
 
 func TestPTYTwoClientsBothGetOutput(t *testing.T) {
