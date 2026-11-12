@@ -410,9 +410,6 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 	if err != nil {
 		agent = proc.Identity{PID: pid} // already exited; exit facts follow
 	}
-	if pt != nil {
-		pt.spawned(pid)
-	}
 	startedAt := time.Now().UTC()
 	m.update(func(s *session.Status) {
 		s.State, s.Agent, s.PGID, s.StartedAt = session.StateRunning, &agent, pid, &startedAt
@@ -497,9 +494,6 @@ func (m *monitor) run(sigs <-chan os.Signal) int {
 				endedBy = session.EndedByStop
 			}
 		}
-	}
-	if pt != nil {
-		pt.reaping()
 	}
 	close(reapNow) // signalling is finished; let the spawn goroutine reap
 	ps := <-exited
