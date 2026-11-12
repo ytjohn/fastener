@@ -1,6 +1,10 @@
 package cli
 
 import (
+	"bytes"
+	"flag"
+	"io"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -59,5 +63,30 @@ func TestSettle(t *testing.T) {
 	close(stop)
 	if d := time.Since(start); d < settleMax || d > settleMax+100*time.Millisecond {
 		t.Fatalf("busy terminal: settled after %v", d)
+	}
+}
+
+// TestRunHelpListsEveryFlag: the hand-written run help names every flag the
+// flag set defines, and the flag package's own descriptions stay out of it.
+func TestRunHelpListsEveryFlag(t *testing.T) {
+	var out bytes.Buffer
+	if code := cmdRun([]string{"-h"}, &out, &out); code != exitUsage && code != exitOK {
+		t.Fatalf("run -h exited %d", code)
+	}
+	if out.String() != runHelp {
+		t.Fatalf("run -h printed something other than runHelp:\n%s", out.String())
+	}
+	fs := newFlagSet("run", io.Discard)
+	var names []string
+	var r runFlags
+	r.define(fs)
+	fs.VisitAll(func(f *flag.Flag) { names = append(names, f.Name) })
+	if len(names) == 0 {
+		t.Fatal("no flags")
+	}
+	for _, n := range names {
+		if !strings.Contains(runHelp, "--"+n+" ") && !strings.Contains(runHelp, "--"+n+"\n") {
+			t.Errorf("run help does not mention --%s", n)
+		}
 	}
 }
