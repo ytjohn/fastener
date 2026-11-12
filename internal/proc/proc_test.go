@@ -213,3 +213,35 @@ func TestIsZombie(t *testing.T) {
 		t.Fatalf("reaped child: IsZombie err = %v, want ErrNoProcess", err)
 	}
 }
+
+// TestFindArgv: a process with the string inside an argument is found, with
+// its argv; the calling process (whose own argv could hold it) is not.
+func TestFindArgv(t *testing.T) {
+	const tag = "4f1e2d3c-fastener-findargv-test"
+	// "; :" keeps sh from exec'ing sleep (bash does for a lone command),
+	// so sh with $0 = the tagged argument stays alive.
+	cmd := exec.Command("sh", "-c", "sleep 30; :", "--resume="+tag)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	var got []ArgvMatch
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		var err error
+		if got, err = FindArgv(tag); err != nil {
+			t.Fatal(err)
+		}
+		if len(got) > 0 {
+			break
+		}
+	}
+	if len(got) != 1 || got[0].PID != cmd.Process.Pid || got[0].Argv[len(got[0].Argv)-1] != "--resume="+tag {
+		t.Fatalf("FindArgv = %+v, want pid %d", got, cmd.Process.Pid)
+	}
+	if got, _ := FindArgv("no-such-arg-" + tag + "-x"); len(got) != 0 {
+		t.Fatalf("FindArgv found %+v", got)
+	}
+	if ppid, err := PPID(os.Getpid()); err != nil || ppid != os.Getppid() {
+		t.Fatalf("PPID = %d, %v; want %d", ppid, err, os.Getppid())
+	}
+}

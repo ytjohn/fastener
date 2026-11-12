@@ -1,13 +1,13 @@
 # Fastener `--json` output (schema_version 1)
 
-The `--json` output of `run`, `inspect`, `ps`, `prune`, `restore`, `backends`, `check`, `authorize` and `version` is
+The `--json` output of `run`, `adopt`, `inspect`, `ps`, `prune`, `restore`, `backends`, `check`, `authorize` and `version` is
 a stable contract. Human-readable output is not. Within a schema version, fields are
 only added, never removed or repurposed. Absent optional fields are omitted, not null.
 Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 
-## `inspect <name> --json` and `run --json`
+## `inspect <name> --json`, `run --json` and `adopt --json`
 
-`run --json` prints the same object as `inspect --json`, taken right after the launch handshake. `run --remote --json` takes it once the bridge has reported its URL (`status.remote_url`), once `remote_wait` (config, default 15 s) has elapsed while the bridge still runs (exit 0; `remote_url` is then absent), or once the bridge has ended before reporting its URL (exit 1, with `reason`).
+`run --json` and `adopt --json` print the same object as `inspect --json`, taken right after the launch handshake (`adopt --remote --json` like `run --interactive --remote --json`). `run --remote --json` takes it once the bridge has reported its URL (`status.remote_url`), once `remote_wait` (config, default 15 s) has elapsed while the bridge still runs (exit 0; `remote_url` is then absent), or once the bridge has ended before reporting its URL (exit 1, with `reason`).
 
 | Field | Meaning |
 |---|---|
@@ -27,11 +27,12 @@ Timestamps are RFC 3339 in UTC. Durations are Go duration strings (`"10s"`).
 | `warnings` | Array of strings, omitted when empty. One entry per state file whose `schema_version` is newer than this fastener understands, e.g. `status.json has schema_version 2; this fastener understands up to 1, so some fields may be ignored`. The file is still read; unknown fields are ignored. |
 
 `session` fields:
-- `schema_version`, `name`, `created_at`, `kind` (`headless` | `remote` | `interactive`: `run --interactive`, with `remote: true` when also `--remote`), `backend`, `cwd` (absolute)
+- `schema_version`, `name`, `created_at`, `kind` (`headless` | `remote` | `interactive`: `run --interactive` or `adopt`, with `remote: true` when also `--remote`), `backend`, `cwd` (absolute)
 - `prompt_source`: `inline`, `stdin` (for `--prompt-file -`), or the absolute `--prompt-file` path; `""` for a remote bridge, which takes no prompt, and for an interactive session started without one. The text itself is not in the JSON.
 - `permissions`, `model`, `max_runtime`, `grace`
 - `env_base`: environment values captured from the caller (the passthrough list); `env`: the `--env` values; `env_file`: the path only. Precedence is base, then env-file, then `--env`.
-- `labels`, `restart` (`no` | `on-reboot`; `on-reboot` only with `remote`, and not for interactive sessions), `remote` (true for `run --remote`, including `run --interactive --remote`)
+- `labels`, `restart` (`no` | `on-reboot`; `on-reboot` only for remote bridges and interactive sessions), `remote` (true for `run --remote`, including `run --interactive --remote` and `adopt --remote`)
+- `adopted`: `true` for a session made by `fastener adopt` (design §8.6): an interactive session whose first generation resumed a conversation started outside Fastener, `plan.session_id`. Omitted otherwise.
 
 `plan` fields:
 - `schema_version`, `generation`
@@ -135,6 +136,6 @@ An array of `{name, source, sha256, command, parser, permissions, default_permis
   - 0 for success;
   - 1 for failure (for `check`, any non-skipped backend failed, or `--all` checked nothing);
   - 2 for usage errors, including an unknown `--permissions` level;
-  - 127 for an unknown session or backend.
+  - 127 for an unknown session or backend, and for `adopt`, a conversation the backend's store does not have.
 
 As with Podman, `wait`'s 124, 125 and 127 can collide with real agent exit codes. `inspect --json` is authoritative.

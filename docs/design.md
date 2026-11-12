@@ -593,6 +593,21 @@ Starting a bridge in a new folder should not require someone to open a terminal 
 
 Codex's server and remote-control model is different enough to be planned separately once routes A and B exist.
 
+### 8.6 Adopting an outside conversation (`fastener adopt`)
+
+`fastener adopt <backend> <conversation-id> [--cwd DIR] [flags]` resumes a conversation started outside Fastener (its ID is known) as an interactive session, so it can be attached, driven remotely and restored after a reboot.
+
+- **One launch path.** It is `run --interactive` with the conversation resumed instead of a new one: the profile's `[resume]` (else `[interactive] session_id`) with the ID, rendered exactly as an interactive restore renders it (§8.4), then `[interactive.remote]` for `--remote`, the permission level and `--model`. The flags are `run --interactive`'s minus the prompt, `--follow` and `--max-runtime` (`--name`, `--remote`, `--size`, `--attach`, `--restart`, `--permissions`, `--model`, `--env`, `--env-file`, `--label`, `--launcher`, `--grace`, `--json`), plus `--cwd` (optional for claude and pi) and `--force`. `-h` prints a short grouped usage, not the flag dump. A profile with no `[interactive]`, no way to resume, or no finder is a usage error.
+- **The ID** must be a UUID (exit 2 otherwise) and the backend's store must hold it: the profile's finder locates it by ID wherever it is (`finder.Locate`: claude `<config home>/projects/*/<id>.jsonl`, pi `<agent dir>/sessions/*/*_<id>.jsonl`, codex `sessions/*/*/*/rollout-*<id>.jsonl` whose `session_meta` names the ID). None is exit 127 (`backend <b> has no conversation <id>`). It is recorded as the plan's `session_id`, so the monitor's finder confirms it at its first lookup as the exact `status.conversation_id`, and `restore` and `--restart on-reboot` work as for any interactive session. `session.json` records `adopted: true`; `inspect` shows `adopted  yes`.
+- **The folder.** Probed with Claude Code 2.1.322 (2026-11-11): `claude --resume <id>` started in another folder still finds the conversation, but the agent then works in that folder and appends lines with that `cwd` to the original transcript, which stays under the original folder's project key, where a restore's finder looks. So for claude the folder is taken from the transcript: the `cwd` field of the first line that has one (only that field is decoded; at most 200 lines and 64 MiB are read, lines over 4 MiB skipped), accepted only when it keys to the transcript's directory. pi's session header (its first line) records `cwd` the same way, checked against the session directory's name. A `--cwd` that is not that folder (symlinks resolved) is refused (exit 1) and the message names the right one; without a recorded folder `--cwd` must key to the store directory. Codex resumes a rollout by ID from any folder, so the folder is the caller's choice: `--cwd` is required (exit 2). A conversation stored for more than one folder needs `--cwd` too. The folder must exist.
+- **In use elsewhere.** Two agents writing one conversation interleave it, so adopt refuses (exit 1, `close the other session, or pass --force`) when:
+  - the conversation's file was written within the last **3 minutes** (`adoptActiveWindow`). An agent writes at every message and also as it exits, so a session just closed reads as in use for up to that long; the message says `--force` is safe once the other session is closed;
+  - a live process other than adopt and its ancestors has the ID inside one of its arguments (`claude --resume <id>`, `codex resume <id>`, `pi --session-id <id>`): `/proc/<pid>/cmdline` on Linux, `KERN_PROCARGS2` on macOS (`proc.FindArgv`); processes whose arguments cannot be read (another user's, on macOS) are skipped, and a failure to list processes at all refuses, naming `--force`;
+  - a Fastener interactive session that has not exited (running, starting, lost or restore-failed, any of which could resume it) has it as its `conversation_id` or plan `session_id`.
+
+  `--force` skips these checks (never the folder check). Not detected: an agent that opened the conversation without its ID on the command line (`claude --continue`, `/resume` inside a TUI) and has been idle longer than the window.
+- **Exit codes:** 0 adopted (or, with `--attach`, `attach`'s codes), 1 refused or failed (folder mismatch, in use, launch failure, `untrusted_workspace` with `--remote`), 2 usage, 127 no such conversation or backend.
+
 ## 9. Future, explicitly out of scope
 
 - **Remote attach.**
@@ -626,6 +641,7 @@ fastener authorize claude-folder-trust <dir> [--json]    # v0.3, §8.3
 fastener authorize --list [--json] | --revoke <dir> [--json]
 fastener attach <name> [--detach-key KEY] [--quiet]          # v0.4
 fastener run <backend> --interactive [--remote] [--size RxC] [--attach] [--prompt P] ...   # v0.4
+fastener adopt <backend> <conversation-id> [--cwd DIR] [--remote] [--size RxC] [--attach] [--restart no|on-reboot] [--force] [--json] ...   # §8.6
 ```
 
 - **`run`:**

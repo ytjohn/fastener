@@ -26,6 +26,7 @@ const usageText = `usage: fastener <command> [arguments]
 
 commands:
   run <backend>      launch a headless session, a remote bridge or an interactive TUI (detached)
+  adopt <backend>    resume a conversation started outside Fastener (by its ID) as an interactive session
   ps                 list sessions
   inspect <name>     show a session's state and facts
   logs <name>        print a session's output
@@ -55,6 +56,8 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	switch cmd {
 	case "_monitor":
 		return runMonitor(rest, stderr)
+	case "adopt":
+		return cmdAdopt(rest, stdout, stderr)
 	case "run":
 		return cmdRun(rest, stdout, stderr)
 	case "ps":

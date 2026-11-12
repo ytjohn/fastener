@@ -105,6 +105,44 @@ func Environ(pid int) ([]string, error) {
 	return strings.Split(s, "\x00"), nil
 }
 
+// Args returns the process's argument list (/proc/<pid>/cmdline; empty for
+// a kernel thread or a zombie).
+func Args(pid int) ([]string, error) {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+			err = ErrNoProcess
+		}
+		return nil, err
+	}
+	s := strings.TrimRight(string(b), "\x00")
+	if s == "" {
+		return nil, nil
+	}
+	return strings.Split(s, "\x00"), nil
+}
+
+// PPID returns the parent process ID (field 4 of /proc/<pid>/stat).
+func PPID(pid int) (int, error) {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+			err = ErrNoProcess
+		}
+		return 0, err
+	}
+	s := string(b)
+	i := strings.LastIndexByte(s, ')')
+	if i < 0 {
+		return 0, fmt.Errorf("proc: malformed stat for pid %d", pid)
+	}
+	f := strings.Fields(s[i+1:]) // f[0] is field 3 (state), f[1] field 4 (ppid)
+	if len(f) < 2 {
+		return 0, fmt.Errorf("proc: short stat for pid %d", pid)
+	}
+	return strconv.Atoi(f[1])
+}
+
 func PIDs() ([]int, error) {
 	ents, err := os.ReadDir("/proc")
 	if err != nil {

@@ -85,6 +85,10 @@ type Session struct {
 	Labels        map[string]string `json:"labels,omitempty"`
 	Restart       string            `json:"restart"`
 	Remote        bool              `json:"remote"`
+	// Adopted marks an interactive session made by `fastener adopt`: its
+	// first generation resumed a conversation started outside Fastener
+	// (the plan's session_id). Absent for every other session.
+	Adopted bool `json:"adopted,omitempty"`
 }
 
 // DefaultGrace is the stop grace for a session that recorded none.

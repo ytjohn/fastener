@@ -40,6 +40,10 @@ type launchOptions struct {
 	// Restart is the restart policy recorded in session.json: "no" (or "")
 	// or "on-reboot" (remote bridges only, validated by validateRestart).
 	Restart string
+	// Adopt, set by `fastener adopt` (with Interactive), resumes an existing
+	// conversation instead of starting a new one; Cwd may then be empty, to
+	// be taken from the conversation (see adoptConversation).
+	Adopt *adoptRequest
 }
 
 // Restart policies (session.json "restart").
@@ -115,12 +119,22 @@ func prepare(o launchOptions, prompt, name string) (*prepared, error) {
 	req := profile.Request{Permissions: perms, Model: o.Model, Prompt: prompt, Name: name}
 	var r profile.Rendered
 	if o.Interactive {
-		// A conversation ID for profiles that assign one ([interactive]
-		// session_id); unused otherwise.
-		req.SessionID = newUUID()
+		if o.Adopt != nil {
+			// Resume the adopted conversation, as restore does.
+			req.ResumeID = o.Adopt.ID
+		} else {
+			// A conversation ID for profiles that assign one ([interactive]
+			// session_id); unused otherwise.
+			req.SessionID = newUUID()
+		}
 		r, err = prof.RenderInteractive(req, o.Remote)
-		if errors.Is(err, profile.ErrNoInteractive) {
+		switch {
+		case errors.Is(err, profile.ErrNoInteractive):
 			err = usagef("%v", err) // no silent fallback to a headless run
+		case errors.Is(err, profile.ErrNoResume):
+			err = usagef("%v", err)
+		case err == nil && o.Adopt != nil && r.Finder == "":
+			err = usagef("backend %s cannot adopt a conversation: its [interactive] section names no finder to locate it", o.Backend)
 		}
 		if err == nil && o.Restart == restartOnReboot && !prof.CanResumeInteractive() {
 			err = usagef("--restart on-reboot: backend %s cannot resume an interactive session (its profile has neither [resume] nor [interactive] session_id)", o.Backend)
@@ -300,12 +314,14 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 			return nil, usagef("a prompt is required (--prompt or --prompt-file)")
 		}
 	}
-	if o.Cwd == "" {
+	var cwd string
+	if o.Cwd != "" {
+		var err error
+		if cwd, err = filepath.Abs(o.Cwd); err != nil {
+			return nil, err
+		}
+	} else if o.Adopt == nil {
 		return nil, usagef("--cwd is required")
-	}
-	cwd, err := filepath.Abs(o.Cwd)
-	if err != nil {
-		return nil, err
 	}
 	if o.Name != "" && !session.ValidName(o.Name) {
 		return nil, usagef("invalid --name %q", o.Name)
@@ -320,6 +336,12 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 		return nil, err
 	}
 	*out = p
+	if o.Adopt != nil {
+		// Find the conversation, settle the folder, refuse one in use.
+		if cwd, err = adoptConversation(o, p, cwd); err != nil {
+			return nil, err
+		}
+	}
 	l, err := p.selectLauncher(o, stderr)
 	if err != nil {
 		return nil, err
@@ -341,6 +363,7 @@ func launchWith(o launchOptions, stderr io.Writer, out **prepared) (*session.Vie
 		Backend: o.Backend, Cwd: cwd, PromptSource: source, Permissions: p.perms, Model: o.Model,
 		MaxRuntime: session.Duration(o.MaxRuntime), Grace: session.Duration(o.Grace),
 		EnvBase: p.envBase, Env: o.Env, EnvFile: p.envFile, Labels: o.Labels, Restart: restart,
+		Adopted: o.Adopt != nil,
 	}
 	plan := session.Plan{
 		SchemaVersion: session.SchemaVersion, Generation: 1,

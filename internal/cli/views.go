@@ -136,6 +136,9 @@ func renderInspect(stdout io.Writer, v *session.View, out inspectOut) {
 	row("name", out.Name)
 	row("backend", out.Backend)
 	row("kind", v.Session.Kind)
+	if v.Session.Adopted {
+		row("adopted", "yes")
+	}
 	row("state", out.State)
 	if v.OrphanErr != "" {
 		row("orphans", "unknown ("+v.OrphanErr+")")

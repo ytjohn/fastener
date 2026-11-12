@@ -14,6 +14,17 @@ model = ["--model", "{value}"]
 auto = ["--permission-mode", "auto"]
 skip = ["--dangerously-skip-permissions"]
 
+# Resuming a conversation (`fastener restore`, `fastener adopt`). Probed
+# with Claude Code 2.1.322 (2026-11-11): `--resume <id> --remote-control
+# <name>` keeps the conversation ID (it appends to <id>.jsonl and writes no
+# new transcript), also for a conversation started without remote control,
+# and reattaches the conversation's claude.ai session if it had one (the
+# same session_… URL under another name). From another folder `--resume`
+# still finds the conversation (it is not limited to the current project):
+# the agent then works in that folder and appends lines with that cwd to
+# the original transcript. So adopt takes the folder from the transcript
+# and refuses a different --cwd, and a restore's finder (which looks under
+# the session's folder) keeps finding it.
 [resume]
 args = ["--resume", "{conversation_id}"]
 
