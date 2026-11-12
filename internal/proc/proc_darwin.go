@@ -87,18 +87,38 @@ func PIDs() ([]int, error) {
 // Environ parses KERN_PROCARGS2: int32 argc, exec path, NUL padding,
 // argv[argc] (NUL-terminated), then environment strings until an empty one.
 func Environ(pid int) ([]string, error) {
+	_, env, err := procArgs(pid)
+	return env, err
+}
+
+// Args returns the process's argument list (KERN_PROCARGS2).
+func Args(pid int) ([]string, error) {
+	argv, _, err := procArgs(pid)
+	return argv, err
+}
+
+// PPID returns the parent process ID.
+func PPID(pid int) (int, error) {
+	k, err := kinfo(pid)
+	if err != nil {
+		return 0, err
+	}
+	return int(k.Eproc.Ppid), nil
+}
+
+func procArgs(pid int) (argv, env []string, err error) {
 	b, err := unix.SysctlRaw("kern.procargs2", pid)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(b) < 4 {
-		return nil, ErrNoProcess
+		return nil, nil, ErrNoProcess
 	}
 	argc := int(binary.LittleEndian.Uint32(b[:4]))
 	b = b[4:]
 	i := bytes.IndexByte(b, 0) // end of exec path
 	if i < 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	b = b[i:]
 	for len(b) > 0 && b[0] == 0 {
@@ -107,11 +127,11 @@ func Environ(pid int) ([]string, error) {
 	for n := 0; n < argc; n++ {
 		i := bytes.IndexByte(b, 0)
 		if i < 0 {
-			return nil, nil
+			return argv, nil, nil
 		}
+		argv = append(argv, string(b[:i]))
 		b = b[i+1:]
 	}
-	var env []string
 	for len(b) > 0 {
 		i := bytes.IndexByte(b, 0)
 		if i <= 0 {
@@ -120,5 +140,5 @@ func Environ(pid int) ([]string, error) {
 		env = append(env, string(b[:i]))
 		b = b[i+1:]
 	}
-	return env, nil
+	return argv, env, nil
 }

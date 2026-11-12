@@ -6,6 +6,7 @@ package proc
 import (
 	"errors"
 	"os"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -223,6 +224,52 @@ func scanMarked(pgid int, marker string) ([]Identity, error) {
 			continue
 		}
 		out = append(out, Identity{PID: pid, StartTime: start})
+	}
+	return out, nil
+}
+
+// ArgvMatch is a live process with a given string in one of its arguments.
+type ArgvMatch struct {
+	PID  int
+	Argv []string
+}
+
+// FindArgv returns the live processes, other than the calling process and
+// its ancestors (the shell or script that ran it, whose command line may
+// name the same string), that have s inside one of their arguments.
+// Processes whose arguments cannot be read (another user's on macOS, a
+// process that exits during the scan) are skipped; only a failure to list
+// processes at all is an error.
+func FindArgv(s string) ([]ArgvMatch, error) {
+	if s == "" {
+		return nil, nil
+	}
+	pids, err := PIDs()
+	if err != nil {
+		return nil, err
+	}
+	skip := map[int]bool{0: true}
+	for pid, n := os.Getpid(), 0; pid > 1 && n < 64 && !skip[pid]; n++ {
+		skip[pid] = true
+		if pid, err = PPID(pid); err != nil {
+			break
+		}
+	}
+	var out []ArgvMatch
+	for _, pid := range pids {
+		if skip[pid] {
+			continue
+		}
+		argv, err := Args(pid)
+		if err != nil {
+			continue
+		}
+		for _, a := range argv {
+			if strings.Contains(a, s) {
+				out = append(out, ArgvMatch{PID: pid, Argv: argv})
+				break
+			}
+		}
 	}
 	return out, nil
 }

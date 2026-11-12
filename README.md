@@ -49,7 +49,7 @@ exits, the monitor reads its stdout for at most 2 s more: if a process the agent
 started keeps the pipe open, later output is not recorded, and `inspect --json`
 shows `"output_truncated": true` in `status`.
 
-Add `--json` to `run`, `inspect`, `ps`, `prune`, `backends`, `check`, `authorize` and `version` for
+Add `--json` to `run`, `adopt`, `inspect`, `ps`, `prune`, `backends`, `check`, `authorize` and `version` for
 machine-readable output (see `docs/json-schema.md`). `wait` exits with the
 agent's exit code: 124 on `--timeout`; 125 if the session was lost, failed to
 launch or was removed while waiting, or if the agent exited 0 but reported an
@@ -215,6 +215,37 @@ up to 1 MiB and then discarded, with a note on exit.
 terminals are attached.
 
 Over the network, `ssh host fastener attach <name>` works as it is.
+
+### Adopting a conversation started outside Fastener
+
+```bash
+fastener adopt claude 58334c1d-5a81-4fac-a1a7-2fb9a2293481 --name review   # folder from the transcript
+fastener adopt claude <id> --remote --restart on-reboot                     # prints the claude.ai URL
+fastener adopt codex <id> --cwd ~/src/app                                   # codex needs --cwd
+```
+
+`adopt <backend> <conversation-id>` resumes a conversation you started
+yourself (in a terminal, an IDE) as a Fastener interactive session, through
+the same path as `restore` (claude `--resume <id>`, codex `codex resume
+<id>`, pi `--session-id <id>`), so you can attach to it, drive it remotely
+with `--remote`, and keep it across reboots with `--restart on-reboot`. The
+ID must be a UUID and the backend's store must have it (else exit 127); it is
+recorded as the session's exact `conversation_id`, and `inspect` shows
+`adopted`. It takes the flags of `run --interactive` except a prompt,
+`--follow` and `--max-runtime`; `fastener adopt -h` lists them.
+
+The folder: for claude and pi it is read from the conversation itself (only
+its `cwd` field), and a `--cwd` naming another folder is refused, since the
+agent would work there and a restore would not find the conversation. Codex
+resumes a conversation from any folder, so `--cwd` is required.
+
+Two agents writing one conversation interleave it, so adopt refuses a
+conversation that looks in use: its file was written in the last 3 minutes,
+a running process has the ID in its arguments (`claude --resume <id>`), or a
+Fastener session that is not over holds it. Close the other session first,
+or pass `--force` (an agent also writes as it exits, so right after closing
+it you need `--force`). An agent started without the ID on its command line
+and idle for longer than 3 minutes is not detected.
 
 ### Leftover processes
 
